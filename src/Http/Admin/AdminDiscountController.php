@@ -6,10 +6,15 @@ namespace Glueful\Extensions\Commerce\Http\Admin;
 
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Discounts\DiscountRepository;
+use Glueful\Extensions\Commerce\Http\DTOs\CreateDiscountData;
+use Glueful\Extensions\Commerce\Http\DTOs\UpdateDiscountData;
 use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Glueful\Helpers\Utils;
 use Glueful\Http\Response;
+use Glueful\Routing\Attributes\ApiOperation;
+use Glueful\Routing\Attributes\ApiRequestBody;
+use Glueful\Routing\Attributes\ApiResponse;
 use Glueful\Validation\ValidationException;
 use Symfony\Component\HttpFoundation\Request;
 
@@ -28,6 +33,8 @@ final class AdminDiscountController
             : new SentinelTenantResolver();
     }
 
+    #[ApiOperation(summary: 'List discounts', tags: ['Commerce Admin'])]
+    #[ApiResponse(200, description: 'Discounts retrieved')]
     public function index(Request $request): Response
     {
         return Response::success(
@@ -36,6 +43,10 @@ final class AdminDiscountController
         );
     }
 
+    #[ApiOperation(summary: 'Create a discount', tags: ['Commerce Admin'])]
+    #[ApiRequestBody(schema: CreateDiscountData::class)]
+    #[ApiResponse(201, description: 'Discount created')]
+    #[ApiResponse(422, description: 'Validation failed')]
     public function store(Request $request): Response
     {
         try {
@@ -52,6 +63,10 @@ final class AdminDiscountController
         }
     }
 
+    #[ApiOperation(summary: 'Update a discount', tags: ['Commerce Admin'])]
+    #[ApiRequestBody(schema: UpdateDiscountData::class)]
+    #[ApiResponse(200, description: 'Discount updated')]
+    #[ApiResponse(422, description: 'Validation failed')]
     public function update(Request $request, string $uuid): Response
     {
         try {

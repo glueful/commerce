@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Commerce\Http\Admin;
 
 use Glueful\Bootstrap\ApplicationContext;
+use Glueful\Extensions\Commerce\Http\DTOs\FulfillOrderData;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
 use Glueful\Extensions\Commerce\Orders\OrderPaymentService;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
@@ -13,6 +14,9 @@ use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Glueful\Http\Exceptions\Client\NotFoundException;
 use Glueful\Http\Response;
+use Glueful\Routing\Attributes\ApiOperation;
+use Glueful\Routing\Attributes\ApiRequestBody;
+use Glueful\Routing\Attributes\ApiResponse;
 use Symfony\Component\HttpFoundation\Request;
 
 final class AdminOrderController
@@ -34,6 +38,8 @@ final class AdminOrderController
             : new SentinelTenantResolver();
     }
 
+    #[ApiOperation(summary: 'List orders', tags: ['Commerce Admin'])]
+    #[ApiResponse(200, description: 'Orders retrieved')]
     public function index(Request $request): Response
     {
         return Response::success(
@@ -42,11 +48,17 @@ final class AdminOrderController
         );
     }
 
+    #[ApiOperation(summary: 'Get an order', tags: ['Commerce Admin'])]
+    #[ApiResponse(200, description: 'Order retrieved')]
+    #[ApiResponse(404, description: 'Order not found')]
     public function show(Request $request, string $uuid): Response
     {
         return Response::success($this->order($uuid), 'Order retrieved');
     }
 
+    #[ApiOperation(summary: 'Cancel an order', tags: ['Commerce Admin'])]
+    #[ApiResponse(200, description: 'Order canceled')]
+    #[ApiResponse(409, description: 'Invalid order transition')]
     public function cancel(Request $request, string $uuid): Response
     {
         try {
@@ -64,6 +76,9 @@ final class AdminOrderController
         }
     }
 
+    #[ApiOperation(summary: 'Mark an order paid', tags: ['Commerce Admin'])]
+    #[ApiResponse(200, description: 'Order marked paid')]
+    #[ApiResponse(409, description: 'Invalid order transition')]
     public function markPaid(Request $request, string $uuid): Response
     {
         try {
@@ -75,6 +90,10 @@ final class AdminOrderController
         }
     }
 
+    #[ApiOperation(summary: 'Fulfill an order', tags: ['Commerce Admin'])]
+    #[ApiRequestBody(schema: FulfillOrderData::class)]
+    #[ApiResponse(200, description: 'Order fulfilled')]
+    #[ApiResponse(409, description: 'Invalid order transition')]
     public function fulfill(Request $request, string $uuid): Response
     {
         try {
@@ -100,6 +119,9 @@ final class AdminOrderController
         }
     }
 
+    #[ApiOperation(summary: 'Mark an order refunded', tags: ['Commerce Admin'])]
+    #[ApiResponse(200, description: 'Order marked refunded')]
+    #[ApiResponse(409, description: 'Invalid order transition')]
     public function markRefunded(Request $request, string $uuid): Response
     {
         try {

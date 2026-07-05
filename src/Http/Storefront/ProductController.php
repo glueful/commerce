@@ -11,6 +11,9 @@ use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Glueful\Http\Exceptions\Client\NotFoundException;
 use Glueful\Http\Response;
+use Glueful\Routing\Attributes\ApiOperation;
+use Glueful\Routing\Attributes\ApiResponse;
+use Glueful\Routing\Attributes\QueryParam;
 use Symfony\Component\HttpFoundation\Request;
 
 final class ProductController
@@ -28,6 +31,10 @@ final class ProductController
             : new SentinelTenantResolver();
     }
 
+    #[ApiOperation(summary: 'List active products', tags: ['Commerce Storefront'])]
+    #[QueryParam('page', type: 'integer', description: 'Page number')]
+    #[QueryParam('per_page', type: 'integer', description: 'Items per page')]
+    #[ApiResponse(200, description: 'Products retrieved')]
     public function index(Request $request): Response
     {
         $page = max(1, (int) $request->query->get('page', 1));
@@ -45,6 +52,9 @@ final class ProductController
         );
     }
 
+    #[ApiOperation(summary: 'Get an active product by slug', tags: ['Commerce Storefront'])]
+    #[ApiResponse(200, description: 'Product retrieved')]
+    #[ApiResponse(404, description: 'Product not found')]
     public function show(Request $request, string $slug): Response
     {
         $tenant = $this->tenants->tenantUuid($this->context);

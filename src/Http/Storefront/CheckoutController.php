@@ -6,10 +6,15 @@ namespace Glueful\Extensions\Commerce\Http\Storefront;
 
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Cart\CartService;
+use Glueful\Extensions\Commerce\Http\DTOs\CheckoutPlaceData;
+use Glueful\Extensions\Commerce\Http\DTOs\CheckoutQuoteData;
 use Glueful\Extensions\Commerce\Orders\CheckoutService;
 use Glueful\Extensions\Commerce\Orders\InsufficientStockException;
 use Glueful\Http\Exceptions\Client\NotFoundException;
 use Glueful\Http\Response;
+use Glueful\Routing\Attributes\ApiOperation;
+use Glueful\Routing\Attributes\ApiRequestBody;
+use Glueful\Routing\Attributes\ApiResponse;
 use Glueful\Validation\ValidationException;
 use Symfony\Component\HttpFoundation\Request;
 
@@ -26,6 +31,10 @@ final class CheckoutController
         $this->checkout ??= app($context, CheckoutService::class);
     }
 
+    #[ApiOperation(summary: 'Quote checkout totals', tags: ['Commerce Storefront'])]
+    #[ApiRequestBody(schema: CheckoutQuoteData::class)]
+    #[ApiResponse(200, description: 'Checkout quoted')]
+    #[ApiResponse(422, description: 'Validation failed')]
     public function quote(Request $request): Response
     {
         try {
@@ -43,6 +52,11 @@ final class CheckoutController
         }
     }
 
+    #[ApiOperation(summary: 'Place an order from the current cart', tags: ['Commerce Storefront'])]
+    #[ApiRequestBody(schema: CheckoutPlaceData::class)]
+    #[ApiResponse(201, description: 'Order placed')]
+    #[ApiResponse(409, description: 'Insufficient stock')]
+    #[ApiResponse(422, description: 'Validation failed')]
     public function place(Request $request): Response
     {
         try {

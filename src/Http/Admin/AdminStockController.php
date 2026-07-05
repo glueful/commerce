@@ -5,8 +5,12 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Commerce\Http\Admin;
 
 use Glueful\Bootstrap\ApplicationContext;
+use Glueful\Extensions\Commerce\Http\DTOs\StockAdjustmentData;
 use Glueful\Extensions\Commerce\Inventory\InventoryService;
 use Glueful\Http\Response;
+use Glueful\Routing\Attributes\ApiOperation;
+use Glueful\Routing\Attributes\ApiRequestBody;
+use Glueful\Routing\Attributes\ApiResponse;
 use Glueful\Validation\ValidationException;
 use Symfony\Component\HttpFoundation\Request;
 
@@ -21,6 +25,10 @@ final class AdminStockController
         $this->inventory ??= app($context, InventoryService::class);
     }
 
+    #[ApiOperation(summary: 'Adjust variant stock', tags: ['Commerce Admin'])]
+    #[ApiRequestBody(schema: StockAdjustmentData::class)]
+    #[ApiResponse(200, description: 'Stock adjusted')]
+    #[ApiResponse(422, description: 'Validation failed')]
     public function adjust(Request $request, string $variantUuid): Response
     {
         try {

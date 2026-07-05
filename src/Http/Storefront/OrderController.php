@@ -12,6 +12,8 @@ use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Glueful\Http\Exceptions\Client\NotFoundException;
 use Glueful\Http\Response;
+use Glueful\Routing\Attributes\ApiOperation;
+use Glueful\Routing\Attributes\ApiResponse;
 use Glueful\Validation\ValidationException;
 use Symfony\Component\HttpFoundation\Request;
 
@@ -30,11 +32,18 @@ final class OrderController
             : new SentinelTenantResolver();
     }
 
+    #[ApiOperation(summary: 'Get an order by number', tags: ['Commerce Storefront'])]
+    #[ApiResponse(200, description: 'Order retrieved')]
+    #[ApiResponse(404, description: 'Order not found')]
     public function show(Request $request, string $number): Response
     {
         return Response::success($this->authorizedOrder($request, $number), 'Order retrieved');
     }
 
+    #[ApiOperation(summary: 'Retry payment for an order', tags: ['Commerce Storefront'])]
+    #[ApiResponse(200, description: 'Payment retry created')]
+    #[ApiResponse(404, description: 'Order not found')]
+    #[ApiResponse(422, description: 'Validation failed')]
     public function retryPayment(Request $request, string $number): Response
     {
         try {
@@ -46,6 +55,9 @@ final class OrderController
         }
     }
 
+    #[ApiOperation(summary: 'List the authenticated user orders', tags: ['Commerce Storefront'])]
+    #[ApiResponse(200, description: 'Orders retrieved')]
+    #[ApiResponse(404, description: 'User not found')]
     public function mine(Request $request): Response
     {
         $user = $request->attributes->get('user');

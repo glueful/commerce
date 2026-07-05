@@ -8,10 +8,17 @@ use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Catalog\CatalogService;
 use Glueful\Extensions\Commerce\Catalog\ProductRepository;
 use Glueful\Extensions\Commerce\Catalog\VariantRepository;
+use Glueful\Extensions\Commerce\Http\DTOs\CreateProductData;
+use Glueful\Extensions\Commerce\Http\DTOs\CreateVariantData;
+use Glueful\Extensions\Commerce\Http\DTOs\UpdateProductData;
+use Glueful\Extensions\Commerce\Http\DTOs\UpdateVariantData;
 use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Glueful\Http\Exceptions\Client\NotFoundException;
 use Glueful\Http\Response;
+use Glueful\Routing\Attributes\ApiOperation;
+use Glueful\Routing\Attributes\ApiRequestBody;
+use Glueful\Routing\Attributes\ApiResponse;
 use Glueful\Validation\ValidationException;
 use Symfony\Component\HttpFoundation\Request;
 
@@ -34,6 +41,8 @@ final class AdminProductController
             : new SentinelTenantResolver();
     }
 
+    #[ApiOperation(summary: 'List products', tags: ['Commerce Admin'])]
+    #[ApiResponse(200, description: 'Products retrieved')]
     public function index(Request $request): Response
     {
         $tenant = $this->tenants->tenantUuid($this->context);
@@ -45,11 +54,18 @@ final class AdminProductController
         return Response::success($rows, 'Products retrieved');
     }
 
+    #[ApiOperation(summary: 'Get a product', tags: ['Commerce Admin'])]
+    #[ApiResponse(200, description: 'Product retrieved')]
+    #[ApiResponse(404, description: 'Product not found')]
     public function show(Request $request, string $uuid): Response
     {
         return Response::success($this->product($uuid), 'Product retrieved');
     }
 
+    #[ApiOperation(summary: 'Create a product', tags: ['Commerce Admin'])]
+    #[ApiRequestBody(schema: CreateProductData::class)]
+    #[ApiResponse(201, description: 'Product created')]
+    #[ApiResponse(422, description: 'Validation failed')]
     public function store(Request $request): Response
     {
         try {
@@ -62,6 +78,10 @@ final class AdminProductController
         }
     }
 
+    #[ApiOperation(summary: 'Update a product', tags: ['Commerce Admin'])]
+    #[ApiRequestBody(schema: UpdateProductData::class)]
+    #[ApiResponse(200, description: 'Product updated')]
+    #[ApiResponse(422, description: 'Validation failed')]
     public function update(Request $request, string $uuid): Response
     {
         try {
@@ -73,6 +93,10 @@ final class AdminProductController
         }
     }
 
+    #[ApiOperation(summary: 'Create a product variant', tags: ['Commerce Admin'])]
+    #[ApiRequestBody(schema: CreateVariantData::class)]
+    #[ApiResponse(201, description: 'Variant created')]
+    #[ApiResponse(422, description: 'Validation failed')]
     public function storeVariant(Request $request, string $uuid): Response
     {
         try {
@@ -85,6 +109,11 @@ final class AdminProductController
         }
     }
 
+    #[ApiOperation(summary: 'Update a product variant', tags: ['Commerce Admin'])]
+    #[ApiRequestBody(schema: UpdateVariantData::class)]
+    #[ApiResponse(200, description: 'Variant updated')]
+    #[ApiResponse(404, description: 'Variant not found')]
+    #[ApiResponse(422, description: 'Validation failed')]
     public function updateVariant(Request $request, string $uuid): Response
     {
         try {
