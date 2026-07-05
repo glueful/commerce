@@ -16,5 +16,6 @@
 - Added storefront product, cart, checkout, and guest order APIs with header-only bearer tokens.
 - Added admin catalog, stock, discount, and order APIs.
 - Added runtime request DTOs plus OpenAPI operation/response metadata for Commerce HTTP APIs.
+- Added pagination for admin and customer order listing APIs.
 - Added maintenance CLI commands and `commerce:diagnose`.
 - Added tenant-mode resolver wiring, fail-closed tenant context handling, tenant table registration, and `commerce:tenancy:adopt`.

@@ -142,6 +142,8 @@ final class HttpDocumentationTest extends CommerceTestCase
     {
         $methods = [
             [ProductController::class, 'index'],
+            [AdminOrderController::class, 'index'],
+            [OrderController::class, 'mine'],
         ];
 
         foreach ($methods as [$controller, $name]) {

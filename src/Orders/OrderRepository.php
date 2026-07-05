@@ -60,6 +60,39 @@ final class OrderRepository
         return array_map(fn (array $row): array => $this->decodeJson($row), $query->get());
     }
 
+    /**
+     * @param array<string,mixed> $filters
+     * @return array{items: list<array<string,mixed>>, total: int}
+     */
+    public function paginatedFor(
+        ApplicationContext $context,
+        string $tenant,
+        array $filters,
+        int $page,
+        int $perPage,
+    ): array {
+        $count = db($context)->table('commerce_orders')->where('tenant_uuid', '=', $tenant);
+        $rows = db($context)->table('commerce_orders')->where('tenant_uuid', '=', $tenant);
+
+        foreach (['status', 'user_uuid'] as $field) {
+            if (isset($filters[$field])) {
+                $count->where($field, '=', (string) $filters[$field]);
+                $rows->where($field, '=', (string) $filters[$field]);
+            }
+        }
+
+        return [
+            'items' => array_map(
+                fn (array $row): array => $this->decodeJson($row),
+                $rows->orderBy('created_at', 'DESC')
+                    ->limit($perPage)
+                    ->offset(max(0, $page - 1) * $perPage)
+                    ->get()
+            ),
+            'total' => $count->count(),
+        ];
+    }
+
     public function transition(ApplicationContext $context, string $tenant, string $uuid, string $to): void
     {
         $order = $this->findByUuid($context, $tenant, $uuid);

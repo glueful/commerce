@@ -15,6 +15,7 @@ use Glueful\Extensions\Commerce\Contracts\TaxCalculator;
 use Glueful\Extensions\Commerce\Discounts\DiscountRepository;
 use Glueful\Extensions\Commerce\Discounts\DiscountService;
 use Glueful\Extensions\Commerce\Http\DTOs\CheckoutPlaceData;
+use Glueful\Extensions\Commerce\Http\DTOs\OrderListQuery;
 use Glueful\Extensions\Commerce\Http\Storefront\CartController;
 use Glueful\Extensions\Commerce\Http\Storefront\CheckoutController;
 use Glueful\Extensions\Commerce\Http\Storefront\OrderController;
@@ -128,15 +129,35 @@ final class StorefrontTest extends CommerceTestCase
         self::assertSame('SKU-HTTP-SHORT', $body['error']['details']['short'][0]['sku']);
     }
 
-    /** @return array{order: array<string,mixed>, guest_token: string, payment: array<string,mixed>} */
-    private function placeSimpleOrder(): array
+    public function testMyOrdersListIsPaginatedAndScopedToCurrentUser(): void
     {
-        [$token] = $this->seedCartWithLine('SKU-HTTP', 5, 1, 1000);
+        $this->placeSimpleOrder('SKU-MINE-A', 'user-a');
+        $this->placeSimpleOrder('SKU-MINE-B', 'user-a');
+        $this->placeSimpleOrder('SKU-MINE-C', 'user-b');
+
+        $request = Request::create('/commerce/orders?page=1&per_page=1', 'GET');
+        $request->attributes->set('user', ['uuid' => 'user-a']);
+
+        $response = $this->orderController()->mine(new OrderListQuery(page: 1, per_page: 1), $request);
+        $body = $this->json($response);
+
+        self::assertSame(200, $response->getStatusCode());
+        self::assertSame(1, $body['current_page']);
+        self::assertSame(1, $body['per_page']);
+        self::assertSame(2, $body['total']);
+        self::assertCount(1, $body['data']);
+        self::assertSame('user-a', $body['data'][0]['user_uuid']);
+    }
+
+    /** @return array{order: array<string,mixed>, guest_token: string, payment: array<string,mixed>} */
+    private function placeSimpleOrder(string $sku = 'SKU-HTTP', ?string $userUuid = null): array
+    {
+        [$token] = $this->seedCartWithLine($sku, 5, 1, 1000);
 
         return $this->checkout()->placeOrder(
             $this->context,
             $token,
-            ['email' => 'buyer@example.com', 'user_uuid' => null],
+            ['email' => 'buyer@example.com', 'user_uuid' => $userUuid],
             ['shipping' => ['country' => 'US'], 'billing' => ['country' => 'US']],
             'std'
         );

@@ -6,6 +6,7 @@ namespace Glueful\Extensions\Commerce\Http\Admin;
 
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Http\DTOs\FulfillOrderData;
+use Glueful\Extensions\Commerce\Http\DTOs\OrderListQuery;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
 use Glueful\Extensions\Commerce\Orders\OrderPaymentService;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
@@ -37,10 +38,24 @@ final class AdminOrderController
 
     #[ApiOperation(summary: 'List orders', tags: ['Commerce Admin'])]
     #[ApiResponse(200, description: 'Orders retrieved')]
-    public function index(Request $request): Response
+    public function index(OrderListQuery $query, Request $request): Response
     {
-        return Response::success(
-            $this->orders->listFor($this->context, $this->tenants->tenantUuid($this->context)),
+        $page = max(1, $query->page ?? 1);
+        $perPage = max(1, min(100, $query->per_page ?? 24));
+        $result = $this->orders->paginatedFor(
+            $this->context,
+            $this->tenants->tenantUuid($this->context),
+            array_filter(['status' => $query->status], static fn (mixed $value): bool => $value !== null),
+            $page,
+            $perPage
+        );
+
+        return Response::paginated(
+            $result['items'],
+            $result['total'],
+            $page,
+            $perPage,
+            null,
             'Orders retrieved'
         );
     }

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Commerce\Http\Storefront;
 
 use Glueful\Bootstrap\ApplicationContext;
+use Glueful\Extensions\Commerce\Http\DTOs\OrderListQuery;
 use Glueful\Extensions\Commerce\Orders\CheckoutService;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
 use Glueful\Extensions\Commerce\Support\TokenHasher;
@@ -58,7 +59,7 @@ final class OrderController
     #[ApiOperation(summary: 'List the authenticated user orders', tags: ['Commerce Storefront'])]
     #[ApiResponse(200, description: 'Orders retrieved')]
     #[ApiResponse(404, description: 'User not found')]
-    public function mine(Request $request): Response
+    public function mine(OrderListQuery $query, Request $request): Response
     {
         $user = $request->attributes->get('user');
         $userUuid = is_array($user) && isset($user['uuid']) ? (string) $user['uuid'] : '';
@@ -66,12 +67,20 @@ final class OrderController
             throw new NotFoundException('Resource not found.');
         }
 
-        $orders = array_values(array_filter(
-            $this->orders->listFor($this->context, $this->tenants->tenantUuid($this->context)),
-            fn (array $order): bool => ($order['user_uuid'] ?? null) === $userUuid
-        ));
+        $page = max(1, $query->page ?? 1);
+        $perPage = max(1, min(100, $query->per_page ?? 24));
+        $result = $this->orders->paginatedFor(
+            $this->context,
+            $this->tenants->tenantUuid($this->context),
+            array_filter([
+                'user_uuid' => $userUuid,
+                'status' => $query->status,
+            ], static fn (mixed $value): bool => $value !== null),
+            $page,
+            $perPage
+        );
 
-        return Response::success($orders, 'Orders retrieved');
+        return Response::paginated($result['items'], $result['total'], $page, $perPage, null, 'Orders retrieved');
     }
 
     /** @return array<string,mixed> */

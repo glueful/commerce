@@ -15,6 +15,7 @@ use Glueful\Extensions\Commerce\Contracts\TaxCalculator;
 use Glueful\Extensions\Commerce\Discounts\DiscountRepository;
 use Glueful\Extensions\Commerce\Discounts\DiscountService;
 use Glueful\Extensions\Commerce\Http\DTOs\FulfillOrderData;
+use Glueful\Extensions\Commerce\Http\DTOs\OrderListQuery;
 use Glueful\Extensions\Commerce\Http\DTOs\StockAdjustmentData;
 use Glueful\Extensions\Commerce\Http\Admin\AdminOrderController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminStockController;
@@ -99,6 +100,23 @@ final class AdminTest extends CommerceTestCase
         self::assertSame('fulfilled', $row['status']);
         self::assertSame('fulfilled', $row['fulfillment_status']);
         self::assertSame('TRACK123', $row['tracking_ref']);
+    }
+
+    public function testAdminOrderListIsPaginated(): void
+    {
+        $this->placeOrder('SKU-ADMIN-PAGE-A', 3, 1);
+        $this->placeOrder('SKU-ADMIN-PAGE-B', 3, 1);
+        $this->placeOrder('SKU-ADMIN-PAGE-C', 3, 1);
+
+        $request = Request::create('/commerce/admin/orders?page=2&per_page=2', 'GET');
+        $response = $this->orderController()->index(new OrderListQuery(page: 2, per_page: 2), $request);
+        $body = $this->json($response);
+
+        self::assertSame(200, $response->getStatusCode());
+        self::assertSame(2, $body['current_page']);
+        self::assertSame(2, $body['per_page']);
+        self::assertSame(3, $body['total']);
+        self::assertCount(1, $body['data']);
     }
 
     public function testInvalidOrderTransitionReturnsConflict(): void
@@ -214,6 +232,15 @@ final class AdminTest extends CommerceTestCase
         self::assertIsArray($row);
 
         return $row;
+    }
+
+    /** @return array<string,mixed> */
+    private function json(\Symfony\Component\HttpFoundation\Response $response): array
+    {
+        $decoded = json_decode((string) $response->getContent(), true);
+        self::assertIsArray($decoded);
+
+        return $decoded;
     }
 
     private function shipping(): ShippingRateProvider
