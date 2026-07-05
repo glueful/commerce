@@ -35,9 +35,12 @@ use Glueful\Extensions\Commerce\Payments\ManualPaymentCollector;
 use Glueful\Extensions\Commerce\Payments\OrderPaymentConfirmationHandler;
 use Glueful\Extensions\Commerce\Pricing\PricingEngine;
 use Glueful\Extensions\Commerce\Shipping\ConfigShippingRateProvider;
+use Glueful\Extensions\Commerce\Tenancy\FailClosedTenantResolver;
 use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
+use Glueful\Extensions\Commerce\Tenancy\TenantAdopter;
 use Glueful\Extensions\Commerce\Tax\FlatRateTaxCalculator;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
+use Glueful\Extensions\Contracts\Tenancy\TenantTableRegistry;
 use Glueful\Extensions\Contracts\Payments\PaymentCollector;
 use Glueful\Extensions\Contracts\Payments\PaymentConfirmationHandler;
 use Glueful\Extensions\ServiceProvider;
@@ -124,6 +127,10 @@ final class CommerceServiceProvider extends ServiceProvider
                 'shared' => true,
                 'autowire' => true,
             ],
+            TenantAdopter::class => [
+                'class' => TenantAdopter::class,
+                'shared' => true,
+            ],
             ExpiryService::class => [
                 'factory' => [self::class, 'makeExpiryService'],
                 'shared' => true,
@@ -170,64 +177,32 @@ final class CommerceServiceProvider extends ServiceProvider
 
     public static function makeCatalogService(ContainerInterface $container): CatalogService
     {
-        $tenantResolver = $container->has(CurrentTenantResolver::class)
-            ? $container->get(CurrentTenantResolver::class)
-            : new SentinelTenantResolver();
-
-        if (!$tenantResolver instanceof CurrentTenantResolver) {
-            throw new \RuntimeException('Configured tenant resolver does not implement CurrentTenantResolver.');
-        }
-
         return new CatalogService(
             $container->get(ProductRepository::class),
             $container->get(VariantRepository::class),
-            $tenantResolver,
+            self::tenantResolver($container),
             $container->get(StockRepository::class)
         );
     }
 
     public static function makeInventoryService(ContainerInterface $container): InventoryService
     {
-        $tenantResolver = $container->has(CurrentTenantResolver::class)
-            ? $container->get(CurrentTenantResolver::class)
-            : new SentinelTenantResolver();
-
-        if (!$tenantResolver instanceof CurrentTenantResolver) {
-            throw new \RuntimeException('Configured tenant resolver does not implement CurrentTenantResolver.');
-        }
-
         return new InventoryService(
             $container->get(StockRepository::class),
-            $tenantResolver
+            self::tenantResolver($container)
         );
     }
 
     public static function makeDiscountService(ContainerInterface $container): DiscountService
     {
-        $tenantResolver = $container->has(CurrentTenantResolver::class)
-            ? $container->get(CurrentTenantResolver::class)
-            : new SentinelTenantResolver();
-
-        if (!$tenantResolver instanceof CurrentTenantResolver) {
-            throw new \RuntimeException('Configured tenant resolver does not implement CurrentTenantResolver.');
-        }
-
         return new DiscountService(
             $container->get(DiscountRepository::class),
-            $tenantResolver
+            self::tenantResolver($container)
         );
     }
 
     public static function makeCartService(ContainerInterface $container): CartService
     {
-        $tenantResolver = $container->has(CurrentTenantResolver::class)
-            ? $container->get(CurrentTenantResolver::class)
-            : new SentinelTenantResolver();
-
-        if (!$tenantResolver instanceof CurrentTenantResolver) {
-            throw new \RuntimeException('Configured tenant resolver does not implement CurrentTenantResolver.');
-        }
-
         return new CartService(
             $container->get(CartRepository::class),
             $container->get(VariantRepository::class),
@@ -235,19 +210,12 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(StockRepository::class),
             $container->get(DiscountRepository::class),
             $container->get(PricingEngine::class),
-            $tenantResolver
+            self::tenantResolver($container)
         );
     }
 
     public static function makeCheckoutService(ContainerInterface $container): CheckoutService
     {
-        $tenantResolver = $container->has(CurrentTenantResolver::class)
-            ? $container->get(CurrentTenantResolver::class)
-            : new SentinelTenantResolver();
-        if (!$tenantResolver instanceof CurrentTenantResolver) {
-            throw new \RuntimeException('Configured tenant resolver does not implement CurrentTenantResolver.');
-        }
-
         return new CheckoutService(
             $container->get(CartService::class),
             $container->get(DiscountRepository::class),
@@ -259,7 +227,7 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(OrderNumberGenerator::class),
             $container->get(OrderRepository::class),
             self::makePaymentCollector($container),
-            $tenantResolver
+            self::tenantResolver($container)
         );
     }
 
@@ -276,36 +244,44 @@ final class CommerceServiceProvider extends ServiceProvider
         return $collector;
     }
 
-    public static function makeExpiryService(ContainerInterface $container): ExpiryService
-    {
-        $tenantResolver = $container->has(CurrentTenantResolver::class)
-            ? $container->get(CurrentTenantResolver::class)
-            : new SentinelTenantResolver();
+    public static function makeTenantResolver(
+        ContainerInterface $container,
+        ApplicationContext $context
+    ): CurrentTenantResolver {
+        if (!(bool) config($context, 'commerce.tenancy.enabled', false)) {
+            return new SentinelTenantResolver();
+        }
+
+        if (!$container->has(CurrentTenantResolver::class)) {
+            throw new \RuntimeException(
+                'commerce.tenancy.enabled requires a bound CurrentTenantResolver (install glueful/tenancy).'
+            );
+        }
+
+        $tenantResolver = $container->get(CurrentTenantResolver::class);
         if (!$tenantResolver instanceof CurrentTenantResolver) {
             throw new \RuntimeException('Configured tenant resolver does not implement CurrentTenantResolver.');
         }
 
+        return new FailClosedTenantResolver($tenantResolver);
+    }
+
+    public static function makeExpiryService(ContainerInterface $container): ExpiryService
+    {
         return new ExpiryService(
             $container->get(OrderRepository::class),
             $container->get(StockRepository::class),
-            $tenantResolver
+            self::tenantResolver($container)
         );
     }
 
     public static function makeOrderPaymentConfirmationHandler(
         ContainerInterface $container
     ): OrderPaymentConfirmationHandler {
-        $tenantResolver = $container->has(CurrentTenantResolver::class)
-            ? $container->get(CurrentTenantResolver::class)
-            : new SentinelTenantResolver();
-        if (!$tenantResolver instanceof CurrentTenantResolver) {
-            throw new \RuntimeException('Configured tenant resolver does not implement CurrentTenantResolver.');
-        }
-
         return new OrderPaymentConfirmationHandler(
             $container->get(OrderRepository::class),
             $container->get(OrderPaymentService::class),
-            $tenantResolver
+            self::tenantResolver($container)
         );
     }
 
@@ -398,6 +374,21 @@ final class CommerceServiceProvider extends ServiceProvider
     public function boot(ApplicationContext $context): void
     {
         try {
+            $container = container($context);
+            if ($container->has(TenantTableRegistry::class)) {
+                $registry = $container->get(TenantTableRegistry::class);
+                if ($registry instanceof TenantTableRegistry) {
+                    $registry->register(\Glueful\Extensions\Commerce\Support\DiagnosticsReport::tenantTables());
+                }
+            }
+        } catch (\Throwable $e) {
+            error_log('[Commerce] Failed to register tenant tables: ' . $e->getMessage());
+            if ($this->bootEnv() !== 'production') {
+                throw $e;
+            }
+        }
+
+        try {
             $this->loadRoutesFrom(__DIR__ . '/../routes.php');
         } catch (\Throwable $e) {
             error_log('[Commerce] Failed to load routes: ' . $e->getMessage());
@@ -432,13 +423,11 @@ final class CommerceServiceProvider extends ServiceProvider
 
     private static function tenantResolver(ContainerInterface $container): CurrentTenantResolver
     {
-        $tenantResolver = $container->has(CurrentTenantResolver::class)
-            ? $container->get(CurrentTenantResolver::class)
-            : new SentinelTenantResolver();
-        if (!$tenantResolver instanceof CurrentTenantResolver) {
-            throw new \RuntimeException('Configured tenant resolver does not implement CurrentTenantResolver.');
+        $context = $container->get(ApplicationContext::class);
+        if (!$context instanceof ApplicationContext) {
+            throw new \RuntimeException('ApplicationContext service is required to resolve commerce tenancy.');
         }
 
-        return $tenantResolver;
+        return self::makeTenantResolver($container, $context);
     }
 }
