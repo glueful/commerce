@@ -9,6 +9,8 @@ use Glueful\Database\Migrations\MigrationPriority;
 use Glueful\Extensions\Commerce\Catalog\CatalogService;
 use Glueful\Extensions\Commerce\Catalog\ProductRepository;
 use Glueful\Extensions\Commerce\Catalog\VariantRepository;
+use Glueful\Extensions\Commerce\Inventory\InventoryService;
+use Glueful\Extensions\Commerce\Inventory\StockRepository;
 use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Glueful\Extensions\ServiceProvider;
@@ -38,6 +40,14 @@ final class CommerceServiceProvider extends ServiceProvider
                 'factory' => [self::class, 'makeCatalogService'],
                 'shared' => true,
             ],
+            StockRepository::class => [
+                'class' => StockRepository::class,
+                'shared' => true,
+            ],
+            InventoryService::class => [
+                'factory' => [self::class, 'makeInventoryService'],
+                'shared' => true,
+            ],
         ];
     }
 
@@ -54,6 +64,23 @@ final class CommerceServiceProvider extends ServiceProvider
         return new CatalogService(
             $container->get(ProductRepository::class),
             $container->get(VariantRepository::class),
+            $tenantResolver,
+            $container->get(StockRepository::class)
+        );
+    }
+
+    public static function makeInventoryService(ContainerInterface $container): InventoryService
+    {
+        $tenantResolver = $container->has(CurrentTenantResolver::class)
+            ? $container->get(CurrentTenantResolver::class)
+            : new SentinelTenantResolver();
+
+        if (!$tenantResolver instanceof CurrentTenantResolver) {
+            throw new \RuntimeException('Configured tenant resolver does not implement CurrentTenantResolver.');
+        }
+
+        return new InventoryService(
+            $container->get(StockRepository::class),
             $tenantResolver
         );
     }

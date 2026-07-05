@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Commerce\Catalog;
 
 use Glueful\Bootstrap\ApplicationContext;
+use Glueful\Extensions\Commerce\Inventory\StockRepository;
 use Glueful\Extensions\Commerce\Support\Money;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Glueful\Helpers\Utils;
@@ -16,7 +17,9 @@ final class CatalogService
         private ProductRepository $products,
         private VariantRepository $variants,
         private CurrentTenantResolver $tenants,
+        private ?StockRepository $stock = null,
     ) {
+        $this->stock ??= new StockRepository();
     }
 
     /**
@@ -65,13 +68,7 @@ final class CatalogService
                 'status' => (string) ($variant['status'] ?? 'active'),
             ]);
 
-            db($context)->table('commerce_stock')->insert([
-                'uuid' => Utils::generateNanoID(),
-                'tenant_uuid' => $tenant,
-                'variant_uuid' => $variantUuid,
-                'quantity' => 0,
-                'tracked' => $type === 'physical' ? 1 : 0,
-            ]);
+            $this->stock->ensureRow($context, $tenant, $variantUuid, $type === 'physical');
 
             $created[] = $this->variants->findByUuid($context, $tenant, $variantUuid);
         }
@@ -115,13 +112,7 @@ final class CatalogService
             'status' => (string) ($variant['status'] ?? 'active'),
         ]);
 
-        db($context)->table('commerce_stock')->insert([
-            'uuid' => Utils::generateNanoID(),
-            'tenant_uuid' => $tenant,
-            'variant_uuid' => $variantUuid,
-            'quantity' => 0,
-            'tracked' => ($product['type'] ?? 'physical') === 'physical' ? 1 : 0,
-        ]);
+        $this->stock->ensureRow($context, $tenant, $variantUuid, ($product['type'] ?? 'physical') === 'physical');
 
         $created = $this->variants->findByUuid($context, $tenant, $variantUuid);
         if ($created === null) {
