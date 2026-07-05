@@ -18,7 +18,13 @@ abstract class CommerceTestCase extends TestCase
     protected array $bindings = [];
 
     /** @var list<class-string> migration classes to run */
-    protected const MIGRATIONS = [];
+    protected const MIGRATIONS = [
+        \Glueful\Extensions\Commerce\Database\Migrations\CreateCommerceCatalogTables::class,
+        \Glueful\Extensions\Commerce\Database\Migrations\CreateCommerceInventoryTables::class,
+        \Glueful\Extensions\Commerce\Database\Migrations\CreateCommerceCartTables::class,
+        \Glueful\Extensions\Commerce\Database\Migrations\CreateCommerceOrderTables::class,
+        \Glueful\Extensions\Commerce\Database\Migrations\CreateCommerceDiscountTables::class,
+    ];
 
     protected function setUp(): void
     {
