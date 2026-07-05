@@ -17,6 +17,8 @@ use Glueful\Extensions\Commerce\Discounts\DiscountRepository;
 use Glueful\Extensions\Commerce\Discounts\DiscountService;
 use Glueful\Extensions\Commerce\Inventory\InventoryService;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
+use Glueful\Extensions\Commerce\Orders\OrderNumberGenerator;
+use Glueful\Extensions\Commerce\Orders\OrderRepository;
 use Glueful\Extensions\Commerce\Pricing\PricingEngine;
 use Glueful\Extensions\Commerce\Shipping\ConfigShippingRateProvider;
 use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
@@ -83,6 +85,14 @@ final class CommerceServiceProvider extends ServiceProvider
             ],
             ShippingRateProvider::class => [
                 'class' => ConfigShippingRateProvider::class,
+                'shared' => true,
+            ],
+            OrderNumberGenerator::class => [
+                'class' => OrderNumberGenerator::class,
+                'shared' => true,
+            ],
+            OrderRepository::class => [
+                'class' => OrderRepository::class,
                 'shared' => true,
             ],
         ];
