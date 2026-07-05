@@ -11,12 +11,16 @@ use Glueful\Extensions\Commerce\Catalog\ProductRepository;
 use Glueful\Extensions\Commerce\Catalog\VariantRepository;
 use Glueful\Extensions\Commerce\Cart\CartRepository;
 use Glueful\Extensions\Commerce\Cart\CartService;
+use Glueful\Extensions\Commerce\Contracts\ShippingRateProvider;
+use Glueful\Extensions\Commerce\Contracts\TaxCalculator;
 use Glueful\Extensions\Commerce\Discounts\DiscountRepository;
 use Glueful\Extensions\Commerce\Discounts\DiscountService;
 use Glueful\Extensions\Commerce\Inventory\InventoryService;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
 use Glueful\Extensions\Commerce\Pricing\PricingEngine;
+use Glueful\Extensions\Commerce\Shipping\ConfigShippingRateProvider;
 use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
+use Glueful\Extensions\Commerce\Tax\FlatRateTaxCalculator;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Glueful\Extensions\ServiceProvider;
 use Psr\Container\ContainerInterface;
@@ -71,6 +75,14 @@ final class CommerceServiceProvider extends ServiceProvider
             ],
             CartService::class => [
                 'factory' => [self::class, 'makeCartService'],
+                'shared' => true,
+            ],
+            TaxCalculator::class => [
+                'class' => FlatRateTaxCalculator::class,
+                'shared' => true,
+            ],
+            ShippingRateProvider::class => [
+                'class' => ConfigShippingRateProvider::class,
                 'shared' => true,
             ],
         ];
