@@ -23,12 +23,14 @@ use Glueful\Extensions\Commerce\Orders\ExpiryService;
 use Glueful\Extensions\Commerce\Orders\OrderPaymentService;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
 use Glueful\Extensions\Commerce\Payments\ManualPaymentCollector;
+use Glueful\Extensions\Commerce\Payments\OrderPaymentConfirmationHandler;
 use Glueful\Extensions\Commerce\Pricing\PricingEngine;
 use Glueful\Extensions\Commerce\Shipping\ConfigShippingRateProvider;
 use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
 use Glueful\Extensions\Commerce\Tax\FlatRateTaxCalculator;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Glueful\Extensions\Contracts\Payments\PaymentCollector;
+use Glueful\Extensions\Contracts\Payments\PaymentConfirmationHandler;
 use Glueful\Extensions\ServiceProvider;
 use Psr\Container\ContainerInterface;
 
@@ -113,6 +115,11 @@ final class CommerceServiceProvider extends ServiceProvider
                 'factory' => [self::class, 'makeExpiryService'],
                 'shared' => true,
             ],
+            OrderPaymentConfirmationHandler::class => [
+                'factory' => [self::class, 'makeOrderPaymentConfirmationHandler'],
+                'shared' => true,
+                'tags' => [PaymentConfirmationHandler::CONTAINER_TAG],
+            ],
         ];
     }
 
@@ -196,13 +203,6 @@ final class CommerceServiceProvider extends ServiceProvider
             throw new \RuntimeException('Configured tenant resolver does not implement CurrentTenantResolver.');
         }
 
-        $collector = $container->has(PaymentCollector::class)
-            ? $container->get(PaymentCollector::class)
-            : new ManualPaymentCollector();
-        if (!$collector instanceof PaymentCollector) {
-            throw new \RuntimeException('Configured payment collector does not implement PaymentCollector.');
-        }
-
         return new CheckoutService(
             $container->get(CartService::class),
             $container->get(DiscountRepository::class),
@@ -213,9 +213,22 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(TaxCalculator::class),
             $container->get(OrderNumberGenerator::class),
             $container->get(OrderRepository::class),
-            $collector,
+            self::makePaymentCollector($container),
             $tenantResolver
         );
+    }
+
+    public static function makePaymentCollector(ContainerInterface $container): PaymentCollector
+    {
+        $collector = $container->has(PaymentCollector::class)
+            ? $container->get(PaymentCollector::class)
+            : new ManualPaymentCollector();
+
+        if (!$collector instanceof PaymentCollector) {
+            throw new \RuntimeException('Configured payment collector does not implement PaymentCollector.');
+        }
+
+        return $collector;
     }
 
     public static function makeExpiryService(ContainerInterface $container): ExpiryService
@@ -230,6 +243,23 @@ final class CommerceServiceProvider extends ServiceProvider
         return new ExpiryService(
             $container->get(OrderRepository::class),
             $container->get(StockRepository::class),
+            $tenantResolver
+        );
+    }
+
+    public static function makeOrderPaymentConfirmationHandler(
+        ContainerInterface $container
+    ): OrderPaymentConfirmationHandler {
+        $tenantResolver = $container->has(CurrentTenantResolver::class)
+            ? $container->get(CurrentTenantResolver::class)
+            : new SentinelTenantResolver();
+        if (!$tenantResolver instanceof CurrentTenantResolver) {
+            throw new \RuntimeException('Configured tenant resolver does not implement CurrentTenantResolver.');
+        }
+
+        return new OrderPaymentConfirmationHandler(
+            $container->get(OrderRepository::class),
+            $container->get(OrderPaymentService::class),
             $tenantResolver
         );
     }

@@ -92,4 +92,9 @@ abstract class CommerceTestCase extends TestCase
     {
         $this->bindings[$id] = $service;
     }
+
+    protected function contextContainer(): ContainerInterface
+    {
+        return $this->context->getContainer();
+    }
 }
