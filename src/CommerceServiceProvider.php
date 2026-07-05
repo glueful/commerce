@@ -48,6 +48,18 @@ use Psr\Container\ContainerInterface;
 
 final class CommerceServiceProvider extends ServiceProvider
 {
+    private static ?string $cachedVersion = null;
+
+    public static function composerVersion(): string
+    {
+        if (self::$cachedVersion === null) {
+            $composer = json_decode((string) file_get_contents(__DIR__ . '/../composer.json'), true);
+            self::$cachedVersion = (string) ($composer['extra']['glueful']['version'] ?? '0.0.0');
+        }
+
+        return self::$cachedVersion;
+    }
+
     /**
      * Commerce binds nothing under shared contract ids. Factories that need the
      * tenant resolver or payment collector resolve the shared contract if bound,
@@ -366,6 +378,16 @@ final class CommerceServiceProvider extends ServiceProvider
         return 'Commerce primitives: products, carts, orders, inventory, discounts, checkout, payments.';
     }
 
+    public function getName(): string
+    {
+        return 'Commerce';
+    }
+
+    public function getVersion(): string
+    {
+        return self::composerVersion();
+    }
+
     public function register(ApplicationContext $context): void
     {
         $this->mergeConfig('commerce', require __DIR__ . '/../config/commerce.php');
@@ -404,6 +426,17 @@ final class CommerceServiceProvider extends ServiceProvider
             if ($this->bootEnv() !== 'production') {
                 throw $e;
             }
+        }
+
+        try {
+            $this->app->get(\Glueful\Extensions\ExtensionManager::class)->registerMeta(self::class, [
+                'slug' => 'commerce',
+                'name' => $this->getName(),
+                'version' => $this->getVersion(),
+                'description' => $this->getDescription(),
+            ]);
+        } catch (\Throwable $e) {
+            error_log('[Commerce] Failed to register extension metadata: ' . $e->getMessage());
         }
 
         try {
