@@ -9,6 +9,7 @@ use Glueful\Database\Migrations\MigrationPriority;
 use Glueful\Extensions\Commerce\Catalog\CatalogService;
 use Glueful\Extensions\Commerce\Catalog\ProductRepository;
 use Glueful\Extensions\Commerce\Catalog\VariantRepository;
+use Glueful\Extensions\Commerce\Cart\CartPruner;
 use Glueful\Extensions\Commerce\Cart\CartRepository;
 use Glueful\Extensions\Commerce\Cart\CartService;
 use Glueful\Extensions\Commerce\Contracts\ShippingRateProvider;
@@ -92,6 +93,10 @@ final class CommerceServiceProvider extends ServiceProvider
             ],
             CartService::class => [
                 'factory' => [self::class, 'makeCartService'],
+                'shared' => true,
+            ],
+            CartPruner::class => [
+                'class' => CartPruner::class,
                 'shared' => true,
             ],
             TaxCalculator::class => [
@@ -405,6 +410,15 @@ final class CommerceServiceProvider extends ServiceProvider
             $this->loadMigrationsFrom(__DIR__ . '/../migrations', MigrationPriority::DEPENDENT, 'glueful/commerce');
         } catch (\Throwable $e) {
             error_log('[Commerce] Failed to register migrations: ' . $e->getMessage());
+            if ($this->bootEnv() !== 'production') {
+                throw $e;
+            }
+        }
+
+        try {
+            $this->discoverCommands('Glueful\\Extensions\\Commerce\\Console', __DIR__ . '/Console');
+        } catch (\Throwable $e) {
+            error_log('[Commerce] Failed to discover commands: ' . $e->getMessage());
             if ($this->bootEnv() !== 'production') {
                 throw $e;
             }
