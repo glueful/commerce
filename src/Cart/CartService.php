@@ -199,6 +199,7 @@ final class CartService
                 'product_uuid' => (string) $product['uuid'],
                 'variant_uuid' => (string) $variant['uuid'],
                 'unit_price' => (int) $variant['price'],
+                'currency' => (string) $variant['currency'],
                 'quantity' => (int) $line['quantity'],
                 'sku' => (string) $variant['sku'],
                 'product_name' => (string) $product['name'],

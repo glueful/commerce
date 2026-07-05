@@ -18,12 +18,17 @@ use Glueful\Extensions\Commerce\Discounts\DiscountService;
 use Glueful\Extensions\Commerce\Inventory\InventoryService;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
 use Glueful\Extensions\Commerce\Orders\OrderNumberGenerator;
+use Glueful\Extensions\Commerce\Orders\CheckoutService;
+use Glueful\Extensions\Commerce\Orders\ExpiryService;
+use Glueful\Extensions\Commerce\Orders\OrderPaymentService;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
+use Glueful\Extensions\Commerce\Payments\ManualPaymentCollector;
 use Glueful\Extensions\Commerce\Pricing\PricingEngine;
 use Glueful\Extensions\Commerce\Shipping\ConfigShippingRateProvider;
 use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
 use Glueful\Extensions\Commerce\Tax\FlatRateTaxCalculator;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
+use Glueful\Extensions\Contracts\Payments\PaymentCollector;
 use Glueful\Extensions\ServiceProvider;
 use Psr\Container\ContainerInterface;
 
@@ -93,6 +98,19 @@ final class CommerceServiceProvider extends ServiceProvider
             ],
             OrderRepository::class => [
                 'class' => OrderRepository::class,
+                'shared' => true,
+            ],
+            CheckoutService::class => [
+                'factory' => [self::class, 'makeCheckoutService'],
+                'shared' => true,
+            ],
+            OrderPaymentService::class => [
+                'class' => OrderPaymentService::class,
+                'shared' => true,
+                'autowire' => true,
+            ],
+            ExpiryService::class => [
+                'factory' => [self::class, 'makeExpiryService'],
                 'shared' => true,
             ],
         ];
@@ -165,6 +183,53 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(StockRepository::class),
             $container->get(DiscountRepository::class),
             $container->get(PricingEngine::class),
+            $tenantResolver
+        );
+    }
+
+    public static function makeCheckoutService(ContainerInterface $container): CheckoutService
+    {
+        $tenantResolver = $container->has(CurrentTenantResolver::class)
+            ? $container->get(CurrentTenantResolver::class)
+            : new SentinelTenantResolver();
+        if (!$tenantResolver instanceof CurrentTenantResolver) {
+            throw new \RuntimeException('Configured tenant resolver does not implement CurrentTenantResolver.');
+        }
+
+        $collector = $container->has(PaymentCollector::class)
+            ? $container->get(PaymentCollector::class)
+            : new ManualPaymentCollector();
+        if (!$collector instanceof PaymentCollector) {
+            throw new \RuntimeException('Configured payment collector does not implement PaymentCollector.');
+        }
+
+        return new CheckoutService(
+            $container->get(CartService::class),
+            $container->get(DiscountRepository::class),
+            $container->get(DiscountService::class),
+            $container->get(StockRepository::class),
+            $container->get(PricingEngine::class),
+            $container->get(ShippingRateProvider::class),
+            $container->get(TaxCalculator::class),
+            $container->get(OrderNumberGenerator::class),
+            $container->get(OrderRepository::class),
+            $collector,
+            $tenantResolver
+        );
+    }
+
+    public static function makeExpiryService(ContainerInterface $container): ExpiryService
+    {
+        $tenantResolver = $container->has(CurrentTenantResolver::class)
+            ? $container->get(CurrentTenantResolver::class)
+            : new SentinelTenantResolver();
+        if (!$tenantResolver instanceof CurrentTenantResolver) {
+            throw new \RuntimeException('Configured tenant resolver does not implement CurrentTenantResolver.');
+        }
+
+        return new ExpiryService(
+            $container->get(OrderRepository::class),
+            $container->get(StockRepository::class),
             $tenantResolver
         );
     }
