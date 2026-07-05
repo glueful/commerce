@@ -15,6 +15,10 @@ use Glueful\Extensions\Commerce\Contracts\ShippingRateProvider;
 use Glueful\Extensions\Commerce\Contracts\TaxCalculator;
 use Glueful\Extensions\Commerce\Discounts\DiscountRepository;
 use Glueful\Extensions\Commerce\Discounts\DiscountService;
+use Glueful\Extensions\Commerce\Http\Storefront\CartController;
+use Glueful\Extensions\Commerce\Http\Storefront\CheckoutController;
+use Glueful\Extensions\Commerce\Http\Storefront\OrderController;
+use Glueful\Extensions\Commerce\Http\Storefront\ProductController;
 use Glueful\Extensions\Commerce\Inventory\InventoryService;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
 use Glueful\Extensions\Commerce\Orders\OrderNumberGenerator;
@@ -119,6 +123,22 @@ final class CommerceServiceProvider extends ServiceProvider
                 'factory' => [self::class, 'makeOrderPaymentConfirmationHandler'],
                 'shared' => true,
                 'tags' => [PaymentConfirmationHandler::CONTAINER_TAG],
+            ],
+            ProductController::class => [
+                'factory' => [self::class, 'makeProductController'],
+                'shared' => true,
+            ],
+            CartController::class => [
+                'factory' => [self::class, 'makeCartController'],
+                'shared' => true,
+            ],
+            CheckoutController::class => [
+                'factory' => [self::class, 'makeCheckoutController'],
+                'shared' => true,
+            ],
+            OrderController::class => [
+                'factory' => [self::class, 'makeOrderController'],
+                'shared' => true,
             ],
         ];
     }
@@ -264,6 +284,43 @@ final class CommerceServiceProvider extends ServiceProvider
         );
     }
 
+    public static function makeProductController(ContainerInterface $container): ProductController
+    {
+        return new ProductController(
+            $container->get(ApplicationContext::class),
+            $container->get(ProductRepository::class),
+            $container->get(VariantRepository::class),
+            self::tenantResolver($container)
+        );
+    }
+
+    public static function makeCartController(ContainerInterface $container): CartController
+    {
+        return new CartController(
+            $container->get(ApplicationContext::class),
+            $container->get(CartService::class)
+        );
+    }
+
+    public static function makeCheckoutController(ContainerInterface $container): CheckoutController
+    {
+        return new CheckoutController(
+            $container->get(ApplicationContext::class),
+            $container->get(CartService::class),
+            $container->get(CheckoutService::class)
+        );
+    }
+
+    public static function makeOrderController(ContainerInterface $container): OrderController
+    {
+        return new OrderController(
+            $container->get(ApplicationContext::class),
+            $container->get(OrderRepository::class),
+            $container->get(CheckoutService::class),
+            self::tenantResolver($container)
+        );
+    }
+
     public function getDescription(): string
     {
         return 'Commerce primitives: products, carts, orders, inventory, discounts, checkout, payments.';
@@ -277,6 +334,15 @@ final class CommerceServiceProvider extends ServiceProvider
     public function boot(ApplicationContext $context): void
     {
         try {
+            $this->loadRoutesFrom(__DIR__ . '/../routes.php');
+        } catch (\Throwable $e) {
+            error_log('[Commerce] Failed to load routes: ' . $e->getMessage());
+            if ($this->bootEnv() !== 'production') {
+                throw $e;
+            }
+        }
+
+        try {
             $this->loadMigrationsFrom(__DIR__ . '/../migrations', MigrationPriority::DEPENDENT, 'glueful/commerce');
         } catch (\Throwable $e) {
             error_log('[Commerce] Failed to register migrations: ' . $e->getMessage());
@@ -289,5 +355,17 @@ final class CommerceServiceProvider extends ServiceProvider
     private function bootEnv(): string
     {
         return (string) ($_ENV['APP_ENV'] ?? (getenv('APP_ENV') !== false ? getenv('APP_ENV') : 'production'));
+    }
+
+    private static function tenantResolver(ContainerInterface $container): CurrentTenantResolver
+    {
+        $tenantResolver = $container->has(CurrentTenantResolver::class)
+            ? $container->get(CurrentTenantResolver::class)
+            : new SentinelTenantResolver();
+        if (!$tenantResolver instanceof CurrentTenantResolver) {
+            throw new \RuntimeException('Configured tenant resolver does not implement CurrentTenantResolver.');
+        }
+
+        return $tenantResolver;
     }
 }

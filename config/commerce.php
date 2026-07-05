@@ -23,6 +23,12 @@ return [
         'ttl_days' => (int) env('COMMERCE_CART_TTL_DAYS', 30),
     ],
 
+    'rate_limits' => [
+        'cart' => [(int) env('COMMERCE_CART_RATE_LIMIT', 60), 60],
+        'checkout' => [(int) env('COMMERCE_CHECKOUT_RATE_LIMIT', 30), 60],
+        'orders' => [(int) env('COMMERCE_ORDER_RATE_LIMIT', 60), 60],
+    ],
+
     'orders' => [
         'expiry_minutes' => (int) env('COMMERCE_ORDER_EXPIRY_MINUTES', 60),
         // {seq} placeholder, zero-padded to 6.
