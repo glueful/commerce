@@ -9,10 +9,13 @@ use Glueful\Database\Migrations\MigrationPriority;
 use Glueful\Extensions\Commerce\Catalog\CatalogService;
 use Glueful\Extensions\Commerce\Catalog\ProductRepository;
 use Glueful\Extensions\Commerce\Catalog\VariantRepository;
+use Glueful\Extensions\Commerce\Cart\CartRepository;
+use Glueful\Extensions\Commerce\Cart\CartService;
 use Glueful\Extensions\Commerce\Discounts\DiscountRepository;
 use Glueful\Extensions\Commerce\Discounts\DiscountService;
 use Glueful\Extensions\Commerce\Inventory\InventoryService;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
+use Glueful\Extensions\Commerce\Pricing\PricingEngine;
 use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Glueful\Extensions\ServiceProvider;
@@ -56,6 +59,18 @@ final class CommerceServiceProvider extends ServiceProvider
             ],
             DiscountService::class => [
                 'factory' => [self::class, 'makeDiscountService'],
+                'shared' => true,
+            ],
+            PricingEngine::class => [
+                'class' => PricingEngine::class,
+                'shared' => true,
+            ],
+            CartRepository::class => [
+                'class' => CartRepository::class,
+                'shared' => true,
+            ],
+            CartService::class => [
+                'factory' => [self::class, 'makeCartService'],
                 'shared' => true,
             ],
         ];
@@ -107,6 +122,27 @@ final class CommerceServiceProvider extends ServiceProvider
 
         return new DiscountService(
             $container->get(DiscountRepository::class),
+            $tenantResolver
+        );
+    }
+
+    public static function makeCartService(ContainerInterface $container): CartService
+    {
+        $tenantResolver = $container->has(CurrentTenantResolver::class)
+            ? $container->get(CurrentTenantResolver::class)
+            : new SentinelTenantResolver();
+
+        if (!$tenantResolver instanceof CurrentTenantResolver) {
+            throw new \RuntimeException('Configured tenant resolver does not implement CurrentTenantResolver.');
+        }
+
+        return new CartService(
+            $container->get(CartRepository::class),
+            $container->get(VariantRepository::class),
+            $container->get(ProductRepository::class),
+            $container->get(StockRepository::class),
+            $container->get(DiscountRepository::class),
+            $container->get(PricingEngine::class),
             $tenantResolver
         );
     }
