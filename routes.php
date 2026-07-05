@@ -6,6 +6,10 @@ use Glueful\Extensions\Commerce\Http\Storefront\CartController;
 use Glueful\Extensions\Commerce\Http\Storefront\CheckoutController;
 use Glueful\Extensions\Commerce\Http\Storefront\OrderController;
 use Glueful\Extensions\Commerce\Http\Storefront\ProductController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminDiscountController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminOrderController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminProductController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminStockController;
 use Glueful\Routing\Router;
 
 /** @var Router $router */
@@ -48,4 +52,29 @@ $router->group(['prefix' => '/commerce'], function (Router $router) use ($rate):
     $router->get('/orders/{number}', [OrderController::class, 'show'])->middleware($orderRate);
     $router->post('/orders/{number}/payment', [OrderController::class, 'retryPayment'])->middleware($orderRate);
     $router->get('/orders', [OrderController::class, 'mine'])->middleware(['auth', $orderRate]);
+});
+
+$router->group(['prefix' => '/commerce/admin', 'middleware' => ['auth']], function (Router $router): void {
+    $read = 'require_scope:commerce:read';
+    $write = 'require_scope:commerce:write';
+
+    $router->get('/products', [AdminProductController::class, 'index'])->middleware($read);
+    $router->post('/products', [AdminProductController::class, 'store'])->middleware($write);
+    $router->get('/products/{uuid}', [AdminProductController::class, 'show'])->middleware($read);
+    $router->patch('/products/{uuid}', [AdminProductController::class, 'update'])->middleware($write);
+    $router->post('/products/{uuid}/variants', [AdminProductController::class, 'storeVariant'])->middleware($write);
+    $router->patch('/variants/{uuid}', [AdminProductController::class, 'updateVariant'])->middleware($write);
+
+    $router->post('/stock/{variantUuid}/adjust', [AdminStockController::class, 'adjust'])->middleware($write);
+
+    $router->get('/discounts', [AdminDiscountController::class, 'index'])->middleware($read);
+    $router->post('/discounts', [AdminDiscountController::class, 'store'])->middleware($write);
+    $router->patch('/discounts/{uuid}', [AdminDiscountController::class, 'update'])->middleware($write);
+
+    $router->get('/orders', [AdminOrderController::class, 'index'])->middleware($read);
+    $router->get('/orders/{uuid}', [AdminOrderController::class, 'show'])->middleware($read);
+    $router->post('/orders/{uuid}/cancel', [AdminOrderController::class, 'cancel'])->middleware($write);
+    $router->post('/orders/{uuid}/mark-paid', [AdminOrderController::class, 'markPaid'])->middleware($write);
+    $router->post('/orders/{uuid}/fulfill', [AdminOrderController::class, 'fulfill'])->middleware($write);
+    $router->post('/orders/{uuid}/mark-refunded', [AdminOrderController::class, 'markRefunded'])->middleware($write);
 });

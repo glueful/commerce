@@ -15,6 +15,10 @@ use Glueful\Extensions\Commerce\Contracts\ShippingRateProvider;
 use Glueful\Extensions\Commerce\Contracts\TaxCalculator;
 use Glueful\Extensions\Commerce\Discounts\DiscountRepository;
 use Glueful\Extensions\Commerce\Discounts\DiscountService;
+use Glueful\Extensions\Commerce\Http\Admin\AdminDiscountController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminOrderController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminProductController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminStockController;
 use Glueful\Extensions\Commerce\Http\Storefront\CartController;
 use Glueful\Extensions\Commerce\Http\Storefront\CheckoutController;
 use Glueful\Extensions\Commerce\Http\Storefront\OrderController;
@@ -138,6 +142,22 @@ final class CommerceServiceProvider extends ServiceProvider
             ],
             OrderController::class => [
                 'factory' => [self::class, 'makeOrderController'],
+                'shared' => true,
+            ],
+            AdminProductController::class => [
+                'factory' => [self::class, 'makeAdminProductController'],
+                'shared' => true,
+            ],
+            AdminStockController::class => [
+                'factory' => [self::class, 'makeAdminStockController'],
+                'shared' => true,
+            ],
+            AdminDiscountController::class => [
+                'factory' => [self::class, 'makeAdminDiscountController'],
+                'shared' => true,
+            ],
+            AdminOrderController::class => [
+                'factory' => [self::class, 'makeAdminOrderController'],
                 'shared' => true,
             ],
         ];
@@ -317,6 +337,45 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(ApplicationContext::class),
             $container->get(OrderRepository::class),
             $container->get(CheckoutService::class),
+            self::tenantResolver($container)
+        );
+    }
+
+    public static function makeAdminProductController(ContainerInterface $container): AdminProductController
+    {
+        return new AdminProductController(
+            $container->get(ApplicationContext::class),
+            $container->get(CatalogService::class),
+            $container->get(ProductRepository::class),
+            $container->get(VariantRepository::class),
+            self::tenantResolver($container)
+        );
+    }
+
+    public static function makeAdminStockController(ContainerInterface $container): AdminStockController
+    {
+        return new AdminStockController(
+            $container->get(ApplicationContext::class),
+            $container->get(InventoryService::class)
+        );
+    }
+
+    public static function makeAdminDiscountController(ContainerInterface $container): AdminDiscountController
+    {
+        return new AdminDiscountController(
+            $container->get(ApplicationContext::class),
+            $container->get(DiscountRepository::class),
+            self::tenantResolver($container)
+        );
+    }
+
+    public static function makeAdminOrderController(ContainerInterface $container): AdminOrderController
+    {
+        return new AdminOrderController(
+            $container->get(ApplicationContext::class),
+            $container->get(OrderRepository::class),
+            $container->get(StockRepository::class),
+            $container->get(OrderPaymentService::class),
             self::tenantResolver($container)
         );
     }
