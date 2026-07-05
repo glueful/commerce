@@ -7,13 +7,13 @@ namespace Glueful\Extensions\Commerce\Http\Storefront;
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Catalog\ProductRepository;
 use Glueful\Extensions\Commerce\Catalog\VariantRepository;
+use Glueful\Extensions\Commerce\Http\DTOs\ProductListQuery;
 use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Glueful\Http\Exceptions\Client\NotFoundException;
 use Glueful\Http\Response;
 use Glueful\Routing\Attributes\ApiOperation;
 use Glueful\Routing\Attributes\ApiResponse;
-use Glueful\Routing\Attributes\QueryParam;
 use Symfony\Component\HttpFoundation\Request;
 
 final class ProductController
@@ -32,13 +32,11 @@ final class ProductController
     }
 
     #[ApiOperation(summary: 'List active products', tags: ['Commerce Storefront'])]
-    #[QueryParam('page', type: 'integer', description: 'Page number')]
-    #[QueryParam('per_page', type: 'integer', description: 'Items per page')]
     #[ApiResponse(200, description: 'Products retrieved')]
-    public function index(Request $request): Response
+    public function index(ProductListQuery $query): Response
     {
-        $page = max(1, (int) $request->query->get('page', 1));
-        $perPage = max(1, min(100, (int) $request->query->get('per_page', 24)));
+        $page = max(1, $query->page ?? 1);
+        $perPage = max(1, min(100, $query->per_page ?? 24));
         $tenant = $this->tenants->tenantUuid($this->context);
         $result = $this->products->listActive($this->context, $tenant, $page, $perPage);
 

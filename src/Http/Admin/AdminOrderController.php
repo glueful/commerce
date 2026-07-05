@@ -15,14 +15,11 @@ use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Glueful\Http\Exceptions\Client\NotFoundException;
 use Glueful\Http\Response;
 use Glueful\Routing\Attributes\ApiOperation;
-use Glueful\Routing\Attributes\ApiRequestBody;
 use Glueful\Routing\Attributes\ApiResponse;
 use Symfony\Component\HttpFoundation\Request;
 
 final class AdminOrderController
 {
-    use ReadsAdminInput;
-
     public function __construct(
         private ApplicationContext $context,
         private ?OrderRepository $orders = null,
@@ -91,16 +88,14 @@ final class AdminOrderController
     }
 
     #[ApiOperation(summary: 'Fulfill an order', tags: ['Commerce Admin'])]
-    #[ApiRequestBody(schema: FulfillOrderData::class)]
     #[ApiResponse(200, description: 'Order fulfilled')]
     #[ApiResponse(409, description: 'Invalid order transition')]
-    public function fulfill(Request $request, string $uuid): Response
+    public function fulfill(FulfillOrderData $input, Request $request, string $uuid): Response
     {
         try {
             $tenant = $this->tenants->tenantUuid($this->context);
             $order = $this->order($uuid);
             OrderStateMachine::assertTransition((string) $order['status'], 'fulfilled');
-            $input = $this->input($request);
 
             db($this->context)->table('commerce_orders')
                 ->where('tenant_uuid', '=', $tenant)
@@ -108,7 +103,7 @@ final class AdminOrderController
                 ->update([
                     'status' => 'fulfilled',
                     'fulfillment_status' => 'fulfilled',
-                    'tracking_ref' => isset($input['tracking_ref']) ? (string) $input['tracking_ref'] : null,
+                    'tracking_ref' => $input->tracking_ref,
                     'updated_at' => db($this->context)->getDriver()->formatDateTime(),
                 ]);
             $this->orders->recordEvent($this->context, $uuid, 'status:fulfilled');

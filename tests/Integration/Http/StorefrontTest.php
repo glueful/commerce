@@ -14,6 +14,7 @@ use Glueful\Extensions\Commerce\Contracts\ShippingRateProvider;
 use Glueful\Extensions\Commerce\Contracts\TaxCalculator;
 use Glueful\Extensions\Commerce\Discounts\DiscountRepository;
 use Glueful\Extensions\Commerce\Discounts\DiscountService;
+use Glueful\Extensions\Commerce\Http\DTOs\CheckoutPlaceData;
 use Glueful\Extensions\Commerce\Http\Storefront\CartController;
 use Glueful\Extensions\Commerce\Http\Storefront\CheckoutController;
 use Glueful\Extensions\Commerce\Http\Storefront\OrderController;
@@ -112,7 +113,14 @@ final class StorefrontTest extends CommerceTestCase
         $request->headers->set('X-Cart-Token', $token);
         $request->headers->set('Content-Type', 'application/json');
 
-        $response = $this->checkoutController()->place($request);
+        $response = $this->checkoutController()->place(
+            new CheckoutPlaceData(
+                buyer: ['email' => 'buyer@example.com'],
+                addresses: ['shipping' => ['country' => 'US'], 'billing' => ['country' => 'US']],
+                shipping_method: 'std'
+            ),
+            $request
+        );
         $body = $this->json($response);
 
         self::assertSame(409, $response->getStatusCode());

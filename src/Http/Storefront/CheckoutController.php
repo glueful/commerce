@@ -13,7 +13,6 @@ use Glueful\Extensions\Commerce\Orders\InsufficientStockException;
 use Glueful\Http\Exceptions\Client\NotFoundException;
 use Glueful\Http\Response;
 use Glueful\Routing\Attributes\ApiOperation;
-use Glueful\Routing\Attributes\ApiRequestBody;
 use Glueful\Routing\Attributes\ApiResponse;
 use Glueful\Validation\ValidationException;
 use Symfony\Component\HttpFoundation\Request;
@@ -32,20 +31,18 @@ final class CheckoutController
     }
 
     #[ApiOperation(summary: 'Quote checkout totals', tags: ['Commerce Storefront'])]
-    #[ApiRequestBody(schema: CheckoutQuoteData::class)]
     #[ApiResponse(200, description: 'Checkout quoted')]
     #[ApiResponse(422, description: 'Validation failed')]
-    public function quote(Request $request): Response
+    public function quote(CheckoutQuoteData $input, Request $request): Response
     {
         try {
-            $input = $this->input($request);
             $cart = $this->cart($request);
 
             return Response::success($this->checkout->quote(
                 $this->context,
                 $cart,
-                is_array($input['shipping_address'] ?? null) ? $input['shipping_address'] : [],
-                isset($input['shipping_method']) ? (string) $input['shipping_method'] : null
+                $input->shipping_address,
+                $input->shipping_method
             ), 'Checkout quoted');
         } catch (ValidationException $e) {
             return Response::validation($e->firstErrors());
@@ -53,20 +50,18 @@ final class CheckoutController
     }
 
     #[ApiOperation(summary: 'Place an order from the current cart', tags: ['Commerce Storefront'])]
-    #[ApiRequestBody(schema: CheckoutPlaceData::class)]
     #[ApiResponse(201, description: 'Order placed')]
     #[ApiResponse(409, description: 'Insufficient stock')]
     #[ApiResponse(422, description: 'Validation failed')]
-    public function place(Request $request): Response
+    public function place(CheckoutPlaceData $input, Request $request): Response
     {
         try {
-            $input = $this->input($request);
             $placed = $this->checkout->placeOrder(
                 $this->context,
                 $this->cartToken($request),
-                $this->buyer($request, $input),
-                is_array($input['addresses'] ?? null) ? $input['addresses'] : [],
-                isset($input['shipping_method']) ? (string) $input['shipping_method'] : null
+                $this->buyer($request, $input->buyer),
+                $input->addresses,
+                $input->shipping_method
             );
 
             return Response::created($placed, 'Order placed');
@@ -93,10 +88,9 @@ final class CheckoutController
         return $cart;
     }
 
-    /** @param array<string,mixed> $input @return array{email: string, user_uuid?: string|null} */
-    private function buyer(Request $request, array $input): array
+    /** @param array<string,mixed> $buyer @return array{email: string, user_uuid?: string|null} */
+    private function buyer(Request $request, array $buyer): array
     {
-        $buyer = is_array($input['buyer'] ?? null) ? $input['buyer'] : [];
         $user = $request->attributes->get('user');
         $userUuid = is_array($user) && isset($user['uuid']) ? (string) $user['uuid'] : null;
 

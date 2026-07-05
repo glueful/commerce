@@ -15,6 +15,6 @@
 - Added payment confirmation handling through `glueful/extension-contracts`, including amount/currency checks and late-payment rejection events.
 - Added storefront product, cart, checkout, and guest order APIs with header-only bearer tokens.
 - Added admin catalog, stock, discount, and order APIs.
-- Added typed request-body DTO schemas and OpenAPI operation/response metadata for Commerce HTTP APIs.
+- Added runtime request DTOs plus OpenAPI operation/response metadata for Commerce HTTP APIs.
 - Added maintenance CLI commands and `commerce:diagnose`.
 - Added tenant-mode resolver wiring, fail-closed tenant context handling, tenant table registration, and `commerce:tenancy:adopt`.

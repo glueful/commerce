@@ -12,7 +12,6 @@ use Glueful\Extensions\Commerce\Http\DTOs\UpdateCartLineData;
 use Glueful\Http\Exceptions\Client\NotFoundException;
 use Glueful\Http\Response;
 use Glueful\Routing\Attributes\ApiOperation;
-use Glueful\Routing\Attributes\ApiRequestBody;
 use Glueful\Routing\Attributes\ApiResponse;
 use Glueful\Validation\ValidationException;
 use Symfony\Component\HttpFoundation\Request;
@@ -49,18 +48,16 @@ final class CartController
     }
 
     #[ApiOperation(summary: 'Add a line to the current cart', tags: ['Commerce Storefront'])]
-    #[ApiRequestBody(schema: AddCartLineData::class)]
     #[ApiResponse(200, description: 'Cart updated')]
     #[ApiResponse(422, description: 'Validation failed')]
-    public function addLine(Request $request): Response
+    public function addLine(AddCartLineData $input, Request $request): Response
     {
         try {
-            $input = $this->input($request);
             $cart = $this->carts->addLine(
                 $this->context,
                 $this->cart($request),
-                (string) ($input['variant_uuid'] ?? ''),
-                (int) ($input['quantity'] ?? 0)
+                $input->variant_uuid,
+                $input->quantity
             );
 
             return Response::success($this->carts->view($this->context, $cart), 'Cart updated');
@@ -70,18 +67,16 @@ final class CartController
     }
 
     #[ApiOperation(summary: 'Update a cart line quantity', tags: ['Commerce Storefront'])]
-    #[ApiRequestBody(schema: UpdateCartLineData::class)]
     #[ApiResponse(200, description: 'Cart updated')]
     #[ApiResponse(422, description: 'Validation failed')]
-    public function updateLine(Request $request, string $uuid): Response
+    public function updateLine(UpdateCartLineData $input, Request $request, string $uuid): Response
     {
         try {
-            $input = $this->input($request);
             $cart = $this->carts->setLineQuantity(
                 $this->context,
                 $this->cart($request),
                 $uuid,
-                (int) ($input['quantity'] ?? 0)
+                $input->quantity
             );
 
             return Response::success($this->carts->view($this->context, $cart), 'Cart updated');
@@ -105,17 +100,15 @@ final class CartController
     }
 
     #[ApiOperation(summary: 'Apply a discount code to the current cart', tags: ['Commerce Storefront'])]
-    #[ApiRequestBody(schema: ApplyDiscountData::class)]
     #[ApiResponse(200, description: 'Discount applied')]
     #[ApiResponse(422, description: 'Validation failed')]
-    public function applyDiscount(Request $request): Response
+    public function applyDiscount(ApplyDiscountData $input, Request $request): Response
     {
         try {
-            $input = $this->input($request);
             $cart = $this->carts->applyDiscount(
                 $this->context,
                 $this->cart($request),
-                (string) ($input['code'] ?? '')
+                $input->code
             );
 
             return Response::success($this->carts->view($this->context, $cart), 'Discount applied');

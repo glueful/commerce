@@ -14,6 +14,8 @@ use Glueful\Extensions\Commerce\Contracts\ShippingRateProvider;
 use Glueful\Extensions\Commerce\Contracts\TaxCalculator;
 use Glueful\Extensions\Commerce\Discounts\DiscountRepository;
 use Glueful\Extensions\Commerce\Discounts\DiscountService;
+use Glueful\Extensions\Commerce\Http\DTOs\FulfillOrderData;
+use Glueful\Extensions\Commerce\Http\DTOs\StockAdjustmentData;
 use Glueful\Extensions\Commerce\Http\Admin\AdminOrderController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminStockController;
 use Glueful\Extensions\Commerce\Inventory\InventoryService;
@@ -42,7 +44,11 @@ final class AdminTest extends CommerceTestCase
         ], JSON_THROW_ON_ERROR));
         $request->headers->set('Content-Type', 'application/json');
 
-        $response = $this->stockController()->adjust($request, $variantUuid);
+        $response = $this->stockController()->adjust(
+            new StockAdjustmentData(delta: 3, reason: 'manual'),
+            $request,
+            $variantUuid
+        );
 
         self::assertSame(200, $response->getStatusCode());
         self::assertSame(5, (new StockRepository())->quantity($this->context, '', $variantUuid));
@@ -82,7 +88,11 @@ final class AdminTest extends CommerceTestCase
         ], JSON_THROW_ON_ERROR));
         $request->headers->set('Content-Type', 'application/json');
 
-        $response = $this->orderController()->fulfill($request, (string) $placed['order']['uuid']);
+        $response = $this->orderController()->fulfill(
+            new FulfillOrderData(tracking_ref: 'TRACK123'),
+            $request,
+            (string) $placed['order']['uuid']
+        );
         $row = $this->orderRow((string) $placed['order']['uuid']);
 
         self::assertSame(200, $response->getStatusCode());
@@ -96,6 +106,7 @@ final class AdminTest extends CommerceTestCase
         [$placed] = $this->placeOrder('SKU-BAD-TRANSITION', 3, 1);
 
         $response = $this->orderController()->fulfill(
+            new FulfillOrderData(),
             Request::create('/commerce/admin/orders/' . $placed['order']['uuid'] . '/fulfill', 'POST'),
             (string) $placed['order']['uuid']
         );

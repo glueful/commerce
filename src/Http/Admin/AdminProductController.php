@@ -10,6 +10,7 @@ use Glueful\Extensions\Commerce\Catalog\ProductRepository;
 use Glueful\Extensions\Commerce\Catalog\VariantRepository;
 use Glueful\Extensions\Commerce\Http\DTOs\CreateProductData;
 use Glueful\Extensions\Commerce\Http\DTOs\CreateVariantData;
+use Glueful\Extensions\Commerce\Http\DTOs\ProductVariantData;
 use Glueful\Extensions\Commerce\Http\DTOs\UpdateProductData;
 use Glueful\Extensions\Commerce\Http\DTOs\UpdateVariantData;
 use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
@@ -63,14 +64,13 @@ final class AdminProductController
     }
 
     #[ApiOperation(summary: 'Create a product', tags: ['Commerce Admin'])]
-    #[ApiRequestBody(schema: CreateProductData::class)]
     #[ApiResponse(201, description: 'Product created')]
     #[ApiResponse(422, description: 'Validation failed')]
-    public function store(Request $request): Response
+    public function store(CreateProductData $input, Request $request): Response
     {
         try {
             return Response::created(
-                $this->catalog->createProduct($this->context, $this->input($request)),
+                $this->catalog->createProduct($this->context, $this->createProductPayload($input)),
                 'Product created'
             );
         } catch (ValidationException $e) {
@@ -94,14 +94,13 @@ final class AdminProductController
     }
 
     #[ApiOperation(summary: 'Create a product variant', tags: ['Commerce Admin'])]
-    #[ApiRequestBody(schema: CreateVariantData::class)]
     #[ApiResponse(201, description: 'Variant created')]
     #[ApiResponse(422, description: 'Validation failed')]
-    public function storeVariant(Request $request, string $uuid): Response
+    public function storeVariant(CreateVariantData $input, Request $request, string $uuid): Response
     {
         try {
             return Response::created(
-                $this->catalog->createVariant($this->context, $uuid, $this->input($request)),
+                $this->catalog->createVariant($this->context, $uuid, $this->variantPayload($input)),
                 'Variant created'
             );
         } catch (ValidationException $e) {
@@ -141,5 +140,49 @@ final class AdminProductController
         $product['variants'] = $this->variants->forProduct($this->context, $tenant, $uuid);
 
         return $product;
+    }
+
+    /** @return array<string,mixed> */
+    private function createProductPayload(CreateProductData $input): array
+    {
+        return array_filter([
+            'slug' => $input->slug,
+            'name' => $input->name,
+            'description' => $input->description,
+            'type' => $input->type,
+            'status' => $input->status,
+            'options' => $input->options,
+            'metadata' => $input->metadata,
+            'variants' => array_map(
+                fn (ProductVariantData $variant): array => $this->productVariantPayload($variant),
+                $input->variants
+            ),
+        ], static fn (mixed $value): bool => $value !== null);
+    }
+
+    /** @return array<string,mixed> */
+    private function variantPayload(CreateVariantData $input): array
+    {
+        return array_filter([
+            'sku' => $input->sku,
+            'option_values' => $input->option_values,
+            'price' => $input->price,
+            'compare_at_price' => $input->compare_at_price,
+            'currency' => $input->currency,
+            'status' => $input->status,
+        ], static fn (mixed $value): bool => $value !== null);
+    }
+
+    /** @return array<string,mixed> */
+    private function productVariantPayload(ProductVariantData $input): array
+    {
+        return array_filter([
+            'sku' => $input->sku,
+            'option_values' => $input->option_values,
+            'price' => $input->price,
+            'compare_at_price' => $input->compare_at_price,
+            'currency' => $input->currency,
+            'status' => $input->status,
+        ], static fn (mixed $value): bool => $value !== null);
     }
 }

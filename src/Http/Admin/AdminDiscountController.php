@@ -44,13 +44,12 @@ final class AdminDiscountController
     }
 
     #[ApiOperation(summary: 'Create a discount', tags: ['Commerce Admin'])]
-    #[ApiRequestBody(schema: CreateDiscountData::class)]
     #[ApiResponse(201, description: 'Discount created')]
     #[ApiResponse(422, description: 'Validation failed')]
-    public function store(Request $request): Response
+    public function store(CreateDiscountData $input, Request $request): Response
     {
         try {
-            $row = $this->validated($this->input($request));
+            $row = $this->validated($this->createPayload($input));
             $row['uuid'] = Utils::generateNanoID();
             $row['tenant_uuid'] = $this->tenants->tenantUuid($this->context);
             $row['usage_count'] = 0;
@@ -109,5 +108,21 @@ final class AdminDiscountController
         }
 
         return $input;
+    }
+
+    /** @return array<string,mixed> */
+    private function createPayload(CreateDiscountData $input): array
+    {
+        return array_filter([
+            'code' => $input->code,
+            'type' => $input->type,
+            'value' => $input->value,
+            'min_subtotal' => $input->min_subtotal,
+            'usage_limit' => $input->usage_limit,
+            'once_per_buyer' => $input->once_per_buyer,
+            'status' => $input->status,
+            'starts_at' => $input->starts_at,
+            'ends_at' => $input->ends_at,
+        ], static fn (mixed $value): bool => $value !== null);
     }
 }
