@@ -6,7 +6,13 @@ namespace Glueful\Extensions\Commerce;
 
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Database\Migrations\MigrationPriority;
+use Glueful\Extensions\Commerce\Catalog\CatalogService;
+use Glueful\Extensions\Commerce\Catalog\ProductRepository;
+use Glueful\Extensions\Commerce\Catalog\VariantRepository;
+use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
+use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Glueful\Extensions\ServiceProvider;
+use Psr\Container\ContainerInterface;
 
 final class CommerceServiceProvider extends ServiceProvider
 {
@@ -19,7 +25,37 @@ final class CommerceServiceProvider extends ServiceProvider
      */
     public static function services(): array
     {
-        return [];
+        return [
+            ProductRepository::class => [
+                'class' => ProductRepository::class,
+                'shared' => true,
+            ],
+            VariantRepository::class => [
+                'class' => VariantRepository::class,
+                'shared' => true,
+            ],
+            CatalogService::class => [
+                'factory' => [self::class, 'makeCatalogService'],
+                'shared' => true,
+            ],
+        ];
+    }
+
+    public static function makeCatalogService(ContainerInterface $container): CatalogService
+    {
+        $tenantResolver = $container->has(CurrentTenantResolver::class)
+            ? $container->get(CurrentTenantResolver::class)
+            : new SentinelTenantResolver();
+
+        if (!$tenantResolver instanceof CurrentTenantResolver) {
+            throw new \RuntimeException('Configured tenant resolver does not implement CurrentTenantResolver.');
+        }
+
+        return new CatalogService(
+            $container->get(ProductRepository::class),
+            $container->get(VariantRepository::class),
+            $tenantResolver
+        );
     }
 
     public function getDescription(): string
