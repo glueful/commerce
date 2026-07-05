@@ -9,6 +9,8 @@ use Glueful\Database\Migrations\MigrationPriority;
 use Glueful\Extensions\Commerce\Catalog\CatalogService;
 use Glueful\Extensions\Commerce\Catalog\ProductRepository;
 use Glueful\Extensions\Commerce\Catalog\VariantRepository;
+use Glueful\Extensions\Commerce\Discounts\DiscountRepository;
+use Glueful\Extensions\Commerce\Discounts\DiscountService;
 use Glueful\Extensions\Commerce\Inventory\InventoryService;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
 use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
@@ -48,6 +50,14 @@ final class CommerceServiceProvider extends ServiceProvider
                 'factory' => [self::class, 'makeInventoryService'],
                 'shared' => true,
             ],
+            DiscountRepository::class => [
+                'class' => DiscountRepository::class,
+                'shared' => true,
+            ],
+            DiscountService::class => [
+                'factory' => [self::class, 'makeDiscountService'],
+                'shared' => true,
+            ],
         ];
     }
 
@@ -81,6 +91,22 @@ final class CommerceServiceProvider extends ServiceProvider
 
         return new InventoryService(
             $container->get(StockRepository::class),
+            $tenantResolver
+        );
+    }
+
+    public static function makeDiscountService(ContainerInterface $container): DiscountService
+    {
+        $tenantResolver = $container->has(CurrentTenantResolver::class)
+            ? $container->get(CurrentTenantResolver::class)
+            : new SentinelTenantResolver();
+
+        if (!$tenantResolver instanceof CurrentTenantResolver) {
+            throw new \RuntimeException('Configured tenant resolver does not implement CurrentTenantResolver.');
+        }
+
+        return new DiscountService(
+            $container->get(DiscountRepository::class),
             $tenantResolver
         );
     }
