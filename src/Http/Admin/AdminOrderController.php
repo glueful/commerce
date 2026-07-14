@@ -11,10 +11,13 @@ use Glueful\Extensions\Commerce\Events\OrderNoteAdded;
 use Glueful\Extensions\Commerce\Http\DTOs\CreateOrderNoteData;
 use Glueful\Extensions\Commerce\Http\DTOs\FulfillOrderData;
 use Glueful\Extensions\Commerce\Http\DTOs\OrderListQuery;
+use Glueful\Extensions\Commerce\Invoices\InvoiceData;
+use Glueful\Extensions\Commerce\Invoices\SellerIdentityProvider;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
 use Glueful\Extensions\Commerce\Orders\OrderPaymentService;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
 use Glueful\Extensions\Commerce\Orders\OrderStateMachine;
+use Glueful\Extensions\Commerce\Orders\Refunds\RefundRepository;
 use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Glueful\Http\Exceptions\Client\NotFoundException;
@@ -33,6 +36,8 @@ final class AdminOrderController
         private ?StockRepository $stock = null,
         private ?OrderPaymentService $payments = null,
         private ?CurrentTenantResolver $tenants = null,
+        private ?RefundRepository $refunds = null,
+        private ?SellerIdentityProvider $sellerIdentity = null,
     ) {
         $this->orders ??= app($context, OrderRepository::class);
         $this->stock ??= app($context, StockRepository::class);
@@ -40,6 +45,8 @@ final class AdminOrderController
         $this->tenants ??= container($context)->has(CurrentTenantResolver::class)
             ? container($context)->get(CurrentTenantResolver::class)
             : new SentinelTenantResolver();
+        $this->refunds ??= app($context, RefundRepository::class);
+        $this->sellerIdentity ??= app($context, SellerIdentityProvider::class);
     }
 
     #[ApiOperation(summary: 'List orders', tags: ['Commerce Admin'])]
@@ -176,6 +183,24 @@ final class AdminOrderController
         }
 
         return Response::success(['order_uuid' => $uuid, 'note' => $note], 'Note added');
+    }
+
+    #[ApiOperation(summary: 'Get invoice data for an order', tags: ['Commerce Admin'])]
+    #[ApiResponse(200, description: 'Invoice data retrieved')]
+    #[ApiResponse(404, description: 'Order not found')]
+    public function invoiceData(Request $request, string $uuid): Response
+    {
+        $tenant = $this->tenants->tenantUuid($this->context);
+        // Tenant-scoped 404 guard first (non-revealing), before any further reads.
+        $order = $this->order($uuid);
+        $lines = $this->orders->linesForOrder($this->context, $tenant, $uuid);
+        $refunds = $this->refunds->listForOrder($this->context, $tenant, $uuid);
+        $seller = $this->sellerIdentity->forTenant($this->context, $tenant);
+
+        return Response::success(
+            InvoiceData::build($this->context, $order, $lines, $refunds, $seller),
+            'Invoice data retrieved'
+        );
     }
 
     private function releaseStock(string $tenant, string $orderUuid): void

@@ -38,4 +38,25 @@ return [
     'tenancy' => [
         'enabled' => (bool) env('COMMERCE_TENANCY_ENABLED', false),
     ],
+
+    // Null-tolerant: invoice-data serializes each key as null, never omitted, when unset.
+    'seller' => [
+        'name' => env('COMMERCE_SELLER_NAME'),
+        'address' => env('COMMERCE_SELLER_ADDRESS'),
+        'tax_id' => env('COMMERCE_SELLER_TAX_ID'),
+    ],
+
+    'email' => [
+        // Master switch: OFF by default. Operators opt in after configuring an email
+        // channel and reviewing seller/template data — this preserves existing-install
+        // behavior even when an email channel is already present.
+        'enabled' => (bool) env('COMMERCE_EMAIL_ENABLED', false),
+        'templates' => [
+            'order_placed' => true,
+            'order_paid' => true,
+            'order_fulfilled' => true,
+            'order_refunded' => true,
+            'order_note' => true,
+        ],
+    ],
 ];

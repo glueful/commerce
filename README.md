@@ -58,7 +58,10 @@ Base path: `/commerce/admin`, authenticated with `commerce:read` or
 - Products: list, show, create, update, create variant, update variant
 - Stock: adjust a variant and write a movement ledger row
 - Discounts: list, create, update
-- Orders: list, show, cancel, mark paid, fulfill, mark refunded
+- Orders: list, show, cancel, mark paid, fulfill
+- Refunds: issue (manual or gateway, idempotency-key required), list for an order
+- Order notes: add (internal/customer visibility, optional customer notify)
+- Invoice data: structured JSON payload (seller, buyer, lines, totals, completed refunds)
 
 ## Configuration
 
@@ -77,6 +80,23 @@ return [
         'number_format' => env('COMMERCE_ORDER_NUMBER_FORMAT', 'ORD-{seq}'),
     ],
     'tenancy' => ['enabled' => (bool) env('COMMERCE_TENANCY_ENABLED', false)],
+    'seller' => [
+        'name' => env('COMMERCE_SELLER_NAME'),
+        'address' => env('COMMERCE_SELLER_ADDRESS'),
+        'tax_id' => env('COMMERCE_SELLER_TAX_ID'),
+    ],
+    'email' => [
+        // Master switch: OFF by default, even if a NotificationService/email channel
+        // is already active for other reasons.
+        'enabled' => (bool) env('COMMERCE_EMAIL_ENABLED', false),
+        'templates' => [
+            'order_placed' => true,
+            'order_paid' => true,
+            'order_fulfilled' => true,
+            'order_refunded' => true,
+            'order_note' => true,
+        ],
+    ],
 ];
 ```
 

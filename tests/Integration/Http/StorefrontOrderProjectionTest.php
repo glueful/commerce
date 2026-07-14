@@ -16,6 +16,7 @@ use Glueful\Extensions\Commerce\Discounts\DiscountRepository;
 use Glueful\Extensions\Commerce\Discounts\DiscountService;
 use Glueful\Extensions\Commerce\Http\Admin\AdminOrderController;
 use Glueful\Extensions\Commerce\Http\Storefront\OrderController;
+use Glueful\Extensions\Commerce\Invoices\ConfigSellerIdentityProvider;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
 use Glueful\Extensions\Commerce\Orders\CheckoutService;
 use Glueful\Extensions\Commerce\Orders\OrderNumberGenerator;
@@ -276,7 +277,9 @@ final class StorefrontOrderProjectionTest extends CommerceTestCase
             new OrderRepository(),
             new StockRepository(),
             new OrderPaymentService(new OrderRepository()),
-            new SentinelTenantResolver()
+            new SentinelTenantResolver(),
+            new RefundRepository(),
+            new ConfigSellerIdentityProvider()
         );
     }
 

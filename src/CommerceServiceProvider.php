@@ -6,6 +6,7 @@ namespace Glueful\Extensions\Commerce;
 
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Database\Migrations\MigrationPriority;
+use Glueful\Events\EventService;
 use Glueful\Extensions\Commerce\Catalog\CatalogService;
 use Glueful\Extensions\Commerce\Catalog\ProductRepository;
 use Glueful\Extensions\Commerce\Catalog\VariantRepository;
@@ -16,6 +17,11 @@ use Glueful\Extensions\Commerce\Contracts\ShippingRateProvider;
 use Glueful\Extensions\Commerce\Contracts\TaxCalculator;
 use Glueful\Extensions\Commerce\Discounts\DiscountRepository;
 use Glueful\Extensions\Commerce\Discounts\DiscountService;
+use Glueful\Extensions\Commerce\Events\OrderFulfilled;
+use Glueful\Extensions\Commerce\Events\OrderNoteAdded;
+use Glueful\Extensions\Commerce\Events\OrderPaid;
+use Glueful\Extensions\Commerce\Events\OrderPlaced;
+use Glueful\Extensions\Commerce\Events\RefundCompleted;
 use Glueful\Extensions\Commerce\Http\Admin\AdminDiscountController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminOrderController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminProductController;
@@ -25,8 +31,13 @@ use Glueful\Extensions\Commerce\Http\Storefront\CartController;
 use Glueful\Extensions\Commerce\Http\Storefront\CheckoutController;
 use Glueful\Extensions\Commerce\Http\Storefront\OrderController;
 use Glueful\Extensions\Commerce\Http\Storefront\ProductController;
+use Glueful\Extensions\Commerce\Invoices\ConfigSellerIdentityProvider;
+use Glueful\Extensions\Commerce\Invoices\SellerIdentityProvider;
 use Glueful\Extensions\Commerce\Inventory\InventoryService;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
+use Glueful\Extensions\Commerce\Mail\CommerceMailer;
+use Glueful\Extensions\Commerce\Mail\NotificationCommerceMailer;
+use Glueful\Extensions\Commerce\Mail\OrderMailListener;
 use Glueful\Extensions\Commerce\Orders\OrderNumberGenerator;
 use Glueful\Extensions\Commerce\Orders\CheckoutService;
 use Glueful\Extensions\Commerce\Orders\ExpiryService;
@@ -149,6 +160,18 @@ final class CommerceServiceProvider extends ServiceProvider
             ],
             RefundService::class => [
                 'factory' => [self::class, 'makeRefundService'],
+                'shared' => true,
+            ],
+            SellerIdentityProvider::class => [
+                'class' => ConfigSellerIdentityProvider::class,
+                'shared' => true,
+            ],
+            CommerceMailer::class => [
+                'class' => NotificationCommerceMailer::class,
+                'shared' => true,
+            ],
+            OrderMailListener::class => [
+                'factory' => [self::class, 'makeOrderMailListener'],
                 'shared' => true,
             ],
             TenantAdopter::class => [
@@ -411,7 +434,9 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(OrderRepository::class),
             $container->get(StockRepository::class),
             $container->get(OrderPaymentService::class),
-            self::tenantResolver($container)
+            self::tenantResolver($container),
+            $container->get(RefundRepository::class),
+            $container->get(SellerIdentityProvider::class)
         );
     }
 
@@ -423,6 +448,14 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(RefundRepository::class),
             $container->get(RefundService::class),
             self::tenantResolver($container)
+        );
+    }
+
+    public static function makeOrderMailListener(ContainerInterface $container): OrderMailListener
+    {
+        return new OrderMailListener(
+            $container->get(ApplicationContext::class),
+            $container->get(CommerceMailer::class)
         );
     }
 
@@ -476,6 +509,26 @@ final class CommerceServiceProvider extends ServiceProvider
             $this->loadMigrationsFrom(__DIR__ . '/../migrations', MigrationPriority::DEPENDENT, 'glueful/commerce');
         } catch (\Throwable $e) {
             error_log('[Commerce] Failed to register migrations: ' . $e->getMessage());
+            if ($this->bootEnv() !== 'production') {
+                throw $e;
+            }
+        }
+
+        try {
+            $container = container($context);
+            if ($container->has(EventService::class)) {
+                $events = $container->get(EventService::class);
+                if ($events instanceof EventService) {
+                    $listener = $container->get(OrderMailListener::class);
+                    $events->addListener(OrderPlaced::class, [$listener, 'onOrderPlaced']);
+                    $events->addListener(OrderPaid::class, [$listener, 'onOrderPaid']);
+                    $events->addListener(OrderFulfilled::class, [$listener, 'onOrderFulfilled']);
+                    $events->addListener(RefundCompleted::class, [$listener, 'onRefundCompleted']);
+                    $events->addListener(OrderNoteAdded::class, [$listener, 'onOrderNoteAdded']);
+                }
+            }
+        } catch (\Throwable $e) {
+            error_log('[Commerce] Failed to register mail listeners: ' . $e->getMessage());
             if ($this->bootEnv() !== 'production') {
                 throw $e;
             }

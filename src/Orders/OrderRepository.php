@@ -178,6 +178,24 @@ SQL,
     }
 
     /**
+     * Tenant-constrained order line read: joins through `commerce_orders` since
+     * `commerce_order_lines` carries no `tenant_uuid` column of its own — no bare
+     * child-table lookup. Used by the invoice-data endpoint.
+     *
+     * @return list<array<string,mixed>>
+     */
+    public function linesForOrder(ApplicationContext $context, string $tenant, string $orderUuid): array
+    {
+        return db($context)->table('commerce_order_lines')
+            ->join('commerce_orders', 'commerce_order_lines.order_uuid', '=', 'commerce_orders.uuid')
+            ->select(['commerce_order_lines.*'])
+            ->where('commerce_orders.tenant_uuid', '=', $tenant)
+            ->where('commerce_order_lines.order_uuid', '=', $orderUuid)
+            ->orderBy('commerce_order_lines.id', 'ASC')
+            ->get();
+    }
+
+    /**
      * @param array<string,mixed> $order
      * @param array<string,mixed> $line
      * @return array<string,mixed>

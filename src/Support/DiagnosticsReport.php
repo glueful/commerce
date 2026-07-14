@@ -14,6 +14,7 @@ use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
 use Glueful\Extensions\Contracts\Payments\PaymentCollector;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Glueful\Extensions\Contracts\Tenancy\TenantTableRegistry;
+use Glueful\Notifications\Services\NotificationDispatcher;
 
 final class DiagnosticsReport
 {
@@ -54,7 +55,36 @@ final class DiagnosticsReport
                 'has_current_tenant_resolver' => $container->has(CurrentTenantResolver::class),
                 'has_tenant_table_registry' => $container->has(TenantTableRegistry::class),
             ],
+            'email' => self::emailStatus($context),
         ];
+    }
+
+    /**
+     * `disabled` when the master `commerce.email.enabled` switch is off; otherwise
+     * `active` only when the `email` channel is registered AND available on the shared
+     * `NotificationDispatcher`, `inactive` when it is not. `NotificationDispatcher`/
+     * `NotificationService` presence alone is never the signal — core always binds them
+     * with only the `database` channel registered.
+     */
+    private static function emailStatus(ApplicationContext $context): string
+    {
+        if (!(bool) config($context, 'commerce.email.enabled', false)) {
+            return 'disabled';
+        }
+
+        $container = container($context);
+        if (!$container->has(NotificationDispatcher::class)) {
+            return 'inactive';
+        }
+
+        $dispatcher = $container->get(NotificationDispatcher::class);
+        if (!$dispatcher instanceof NotificationDispatcher) {
+            return 'inactive';
+        }
+
+        return in_array('email', $dispatcher->getChannelManager()->getActiveChannelNames(), true)
+            ? 'active'
+            : 'inactive';
     }
 
     /**

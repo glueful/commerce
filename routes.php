@@ -80,4 +80,5 @@ $router->group(['prefix' => '/commerce/admin', 'middleware' => ['auth']], functi
     $router->post('/orders/{uuid}/refunds', [AdminRefundController::class, 'store'])->middleware($write);
     $router->get('/orders/{uuid}/refunds', [AdminRefundController::class, 'index'])->middleware($read);
     $router->post('/orders/{uuid}/notes', [AdminOrderController::class, 'addNote'])->middleware($write);
+    $router->get('/orders/{uuid}/invoice-data', [AdminOrderController::class, 'invoiceData'])->middleware($read);
 });
