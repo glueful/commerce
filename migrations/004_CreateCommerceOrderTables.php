@@ -29,6 +29,8 @@ final class CreateCommerceOrderTables implements MigrationInterface
                 $table->bigInteger('shipping_total')->default(0);
                 $table->bigInteger('tax_total')->default(0);
                 $table->bigInteger('grand_total');
+                $table->bigInteger('refunded_total')->default(0);
+                $table->bigInteger('refund_revision')->default(0);
                 $table->string('discount_code', 64)->nullable();
                 $table->string('shipping_method', 64)->nullable();
                 $table->json('addresses')->nullable();
@@ -69,6 +71,8 @@ final class CreateCommerceOrderTables implements MigrationInterface
                 $table->string('order_uuid', 12);
                 $table->string('type', 48);
                 $table->json('payload')->nullable();
+                $table->string('actor_uuid', 12)->nullable();
+                $table->string('visibility', 16)->default('internal');
                 $table->timestamp('created_at')->default('CURRENT_TIMESTAMP');
 
                 $table->unique('uuid');

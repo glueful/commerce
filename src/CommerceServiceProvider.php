@@ -31,6 +31,8 @@ use Glueful\Extensions\Commerce\Orders\CheckoutService;
 use Glueful\Extensions\Commerce\Orders\ExpiryService;
 use Glueful\Extensions\Commerce\Orders\OrderPaymentService;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
+use Glueful\Extensions\Commerce\Orders\Refunds\RefundRepository;
+use Glueful\Extensions\Commerce\Orders\Refunds\RefundService;
 use Glueful\Extensions\Commerce\Payments\ManualPaymentCollector;
 use Glueful\Extensions\Commerce\Payments\OrderPaymentConfirmationHandler;
 use Glueful\Extensions\Commerce\Pricing\PricingEngine;
@@ -43,6 +45,7 @@ use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Glueful\Extensions\Contracts\Tenancy\TenantTableRegistry;
 use Glueful\Extensions\Contracts\Payments\PaymentCollector;
 use Glueful\Extensions\Contracts\Payments\PaymentConfirmationHandler;
+use Glueful\Extensions\Contracts\Payments\RefundCollector;
 use Glueful\Extensions\ServiceProvider;
 use Psr\Container\ContainerInterface;
 
@@ -138,6 +141,14 @@ final class CommerceServiceProvider extends ServiceProvider
                 'class' => OrderPaymentService::class,
                 'shared' => true,
                 'autowire' => true,
+            ],
+            RefundRepository::class => [
+                'class' => RefundRepository::class,
+                'shared' => true,
+            ],
+            RefundService::class => [
+                'factory' => [self::class, 'makeRefundService'],
+                'shared' => true,
             ],
             TenantAdopter::class => [
                 'class' => TenantAdopter::class,
@@ -276,6 +287,31 @@ final class CommerceServiceProvider extends ServiceProvider
         }
 
         return new FailClosedTenantResolver($tenantResolver);
+    }
+
+    public static function makeRefundService(ContainerInterface $container): RefundService
+    {
+        return new RefundService(
+            $container->get(OrderRepository::class),
+            $container->get(RefundRepository::class),
+            $container->get(StockRepository::class),
+            self::tenantResolver($container),
+            self::makeRefundCollector($container)
+        );
+    }
+
+    private static function makeRefundCollector(ContainerInterface $container): ?RefundCollector
+    {
+        if (!$container->has(RefundCollector::class)) {
+            return null;
+        }
+
+        $collector = $container->get(RefundCollector::class);
+        if (!$collector instanceof RefundCollector) {
+            throw new \RuntimeException('Configured refund collector does not implement RefundCollector.');
+        }
+
+        return $collector;
     }
 
     public static function makeExpiryService(ContainerInterface $container): ExpiryService

@@ -111,6 +111,7 @@ final class DiagnosticsReport
             'commerce_cart_lines',
             'commerce_orders',
             'commerce_order_lines',
+            'commerce_refunds',
             'commerce_order_events',
             'commerce_sequences',
             'commerce_discounts',

@@ -19,6 +19,8 @@ final class MigrationsTest extends CommerceTestCase
             'commerce_cart_lines',
             'commerce_orders',
             'commerce_order_lines',
+            'commerce_refunds',
+            'commerce_refund_lines',
             'commerce_order_events',
             'commerce_sequences',
             'commerce_discounts',
@@ -29,6 +31,28 @@ final class MigrationsTest extends CommerceTestCase
         foreach ($tables as $table) {
             self::assertTrue($schema->hasTable($table), "missing table {$table}");
         }
+    }
+
+    public function testFoldedRefundColumnsExistOnOrdersAndOrderEvents(): void
+    {
+        $schema = $this->connection->getSchemaBuilder();
+
+        self::assertTrue(
+            $schema->hasColumn('commerce_orders', 'refunded_total'),
+            'commerce_orders missing refunded_total'
+        );
+        self::assertTrue(
+            $schema->hasColumn('commerce_orders', 'refund_revision'),
+            'commerce_orders missing refund_revision'
+        );
+        self::assertTrue(
+            $schema->hasColumn('commerce_order_events', 'actor_uuid'),
+            'commerce_order_events missing actor_uuid'
+        );
+        self::assertTrue(
+            $schema->hasColumn('commerce_order_events', 'visibility'),
+            'commerce_order_events missing visibility'
+        );
     }
 
     public function testSentinelTenantUniquenessActuallyEnforces(): void
@@ -140,6 +164,46 @@ final class MigrationsTest extends CommerceTestCase
                 'status' => 'active',
             ]);
             self::fail('duplicate sentinel discount code must be rejected');
+        } catch (\Throwable) {
+            $this->addToAssertionCount(1);
+        }
+    }
+
+    public function testRefundIdempotencyKeyUniquenessEnforcesUnderSentinel(): void
+    {
+        $db = $this->connection;
+
+        $db->table('commerce_orders')->insert([
+            'uuid' => 'order0000003',
+            'order_number' => '1002',
+            'email' => 'buyer3@example.com',
+            'guest_token_hash' => str_repeat('d', 64),
+            'currency' => 'USD',
+            'subtotal' => 1000,
+            'grand_total' => 1000,
+        ]);
+
+        $db->table('commerce_refunds')->insert([
+            'uuid' => 'rfnd00000001',
+            'order_uuid' => 'order0000003',
+            'idempotency_key' => 'idem-key-001',
+            'request_fingerprint' => str_repeat('e', 64),
+            'amount' => 500,
+            'currency' => 'USD',
+            'method' => 'manual',
+        ]);
+
+        try {
+            $db->table('commerce_refunds')->insert([
+                'uuid' => 'rfnd00000002',
+                'order_uuid' => 'order0000003',
+                'idempotency_key' => 'idem-key-001',
+                'request_fingerprint' => str_repeat('f', 64),
+                'amount' => 500,
+                'currency' => 'USD',
+                'method' => 'manual',
+            ]);
+            self::fail('duplicate sentinel refund idempotency key must be rejected');
         } catch (\Throwable) {
             $this->addToAssertionCount(1);
         }

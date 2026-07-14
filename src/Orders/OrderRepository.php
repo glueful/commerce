@@ -93,6 +93,30 @@ final class OrderRepository
         ];
     }
 
+    /**
+     * Affected-row-checked serialization primitive for refund mutations. Every
+     * issue/reserve/finalize transaction claims the order this way before reading any
+     * state or capacity; validation and capacity reads only ever happen after the claim
+     * succeeds. Returns false for an unknown or cross-tenant order.
+     */
+    public function claimRefundMutation(ApplicationContext $context, string $tenant, string $uuid): bool
+    {
+        $affected = db($context)->table('commerce_orders')->executeModification(
+            <<<'SQL'
+UPDATE commerce_orders
+SET refund_revision = refund_revision + 1, updated_at = ?
+WHERE tenant_uuid = ? AND uuid = ?
+SQL,
+            [
+                db($context)->getDriver()->formatDateTime(),
+                $tenant,
+                $uuid,
+            ]
+        );
+
+        return $affected === 1;
+    }
+
     public function transition(ApplicationContext $context, string $tenant, string $uuid, string $to): void
     {
         $order = $this->findByUuid($context, $tenant, $uuid);
@@ -113,13 +137,21 @@ final class OrderRepository
     }
 
     /** @param array<string,mixed> $payload */
-    public function recordEvent(ApplicationContext $context, string $orderUuid, string $type, array $payload = []): void
-    {
+    public function recordEvent(
+        ApplicationContext $context,
+        string $orderUuid,
+        string $type,
+        array $payload = [],
+        ?string $actorUuid = null,
+        string $visibility = 'internal'
+    ): void {
         db($context)->table('commerce_order_events')->insert([
             'uuid' => Utils::generateNanoID(),
             'order_uuid' => $orderUuid,
             'type' => $type,
             'payload' => $payload === [] ? null : json_encode($payload, JSON_THROW_ON_ERROR),
+            'actor_uuid' => $actorUuid,
+            'visibility' => $visibility,
         ]);
     }
 
