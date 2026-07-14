@@ -8,6 +8,7 @@ use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Http\DTOs\OrderListQuery;
 use Glueful\Extensions\Commerce\Orders\CheckoutService;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
+use Glueful\Extensions\Commerce\Orders\Refunds\RefundRepository;
 use Glueful\Extensions\Commerce\Support\TokenHasher;
 use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
@@ -25,12 +26,14 @@ final class OrderController
         private ?OrderRepository $orders = null,
         private ?CheckoutService $checkout = null,
         private ?CurrentTenantResolver $tenants = null,
+        private ?RefundRepository $refunds = null,
     ) {
         $this->orders ??= app($context, OrderRepository::class);
         $this->checkout ??= app($context, CheckoutService::class);
         $this->tenants ??= container($context)->has(CurrentTenantResolver::class)
             ? container($context)->get(CurrentTenantResolver::class)
             : new SentinelTenantResolver();
+        $this->refunds ??= app($context, RefundRepository::class);
     }
 
     #[ApiOperation(summary: 'Get an order by number', tags: ['Commerce Storefront'])]
@@ -86,17 +89,74 @@ final class OrderController
     /** @return array<string,mixed> */
     private function authorizedOrder(Request $request, string $number): array
     {
-        $order = $this->orders->findByNumber($this->context, $this->tenants->tenantUuid($this->context), $number);
+        $tenant = $this->tenants->tenantUuid($this->context);
+        $order = $this->orders->findByNumber($this->context, $tenant, $number);
         if ($order === null) {
             throw $this->notFound();
         }
 
         if ($this->userOwns($request, $order) || $this->tokenMatches($request, $order)) {
             unset($order['guest_token_hash']);
+            $orderUuid = (string) $order['uuid'];
+            $order['refunds'] = $this->refundsProjection($tenant, $orderUuid);
+            $order['notes'] = $this->notesProjection($tenant, $orderUuid);
+
             return $order;
         }
 
         throw $this->notFound();
+    }
+
+    /**
+     * Completed refunds only, sanitized to exactly {date, amount_minor, method}. Never
+     * exposes reason, status, provider_ref, idempotency_key, or initiated_by.
+     *
+     * @return list<array{date: mixed, amount_minor: int, method: string}>
+     */
+    private function refundsProjection(string $tenant, string $orderUuid): array
+    {
+        $completed = array_filter(
+            $this->refunds->listForOrder($this->context, $tenant, $orderUuid),
+            static fn (array $refund): bool => ($refund['status'] ?? null) === 'completed'
+        );
+
+        return array_values(array_map(
+            static fn (array $refund): array => [
+                'date' => $refund['completed_at'],
+                'amount_minor' => (int) $refund['amount'],
+                'method' => (string) $refund['method'],
+            ],
+            $completed
+        ));
+    }
+
+    /**
+     * Customer-visible notes only ({@see \Glueful\Extensions\Commerce\Http\Admin\AdminOrderController::addNote()}
+     * records these as `type = 'note.added'`). Internal notes and every other internal
+     * event type (status transitions, refund.completed/failed, payment events, ...) never
+     * reach this projection.
+     *
+     * @return list<array{date: mixed, body: string}>
+     */
+    private function notesProjection(string $tenant, string $orderUuid): array
+    {
+        $notes = array_filter(
+            $this->orders->eventsForOrder($this->context, $tenant, $orderUuid),
+            static fn (array $event): bool =>
+                ($event['type'] ?? null) === 'note.added' && ($event['visibility'] ?? null) === 'customer'
+        );
+
+        return array_values(array_map(
+            static function (array $event): array {
+                $payload = is_array($event['payload'] ?? null) ? $event['payload'] : [];
+
+                return [
+                    'date' => $event['created_at'],
+                    'body' => (string) ($payload['body'] ?? ''),
+                ];
+            },
+            $notes
+        ));
     }
 
     /** @param array<string,mixed> $order */

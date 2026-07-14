@@ -7,6 +7,7 @@ namespace Glueful\Extensions\Commerce\Tests\Integration\Http;
 use Glueful\Extensions\Commerce\Http\Admin\AdminDiscountController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminOrderController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminProductController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminRefundController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminStockController;
 use Glueful\Extensions\Commerce\Http\Storefront\CartController;
 use Glueful\Extensions\Commerce\Http\Storefront\CheckoutController;
@@ -32,6 +33,7 @@ final class HttpDocumentationTest extends CommerceTestCase
         yield 'admin stock' => [AdminStockController::class];
         yield 'admin discounts' => [AdminDiscountController::class];
         yield 'admin orders' => [AdminOrderController::class];
+        yield 'admin refunds' => [AdminRefundController::class];
     }
 
     /** @dataProvider controllers */
@@ -67,6 +69,8 @@ final class HttpDocumentationTest extends CommerceTestCase
             [AdminDiscountController::class, 'store'],
             [AdminDiscountController::class, 'update'],
             [AdminOrderController::class, 'fulfill'],
+            [AdminOrderController::class, 'addNote'],
+            [AdminRefundController::class, 'store'],
         ];
 
         foreach ($methods as [$controller, $name]) {
@@ -110,6 +114,8 @@ final class HttpDocumentationTest extends CommerceTestCase
             [AdminStockController::class, 'adjust'],
             [AdminDiscountController::class, 'store'],
             [AdminOrderController::class, 'fulfill'],
+            [AdminOrderController::class, 'addNote'],
+            [AdminRefundController::class, 'store'],
         ];
 
         foreach ($methods as [$controller, $name]) {

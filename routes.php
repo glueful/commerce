@@ -9,6 +9,7 @@ use Glueful\Extensions\Commerce\Http\Storefront\ProductController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminDiscountController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminOrderController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminProductController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminRefundController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminStockController;
 use Glueful\Routing\Router;
 
@@ -76,5 +77,7 @@ $router->group(['prefix' => '/commerce/admin', 'middleware' => ['auth']], functi
     $router->post('/orders/{uuid}/cancel', [AdminOrderController::class, 'cancel'])->middleware($write);
     $router->post('/orders/{uuid}/mark-paid', [AdminOrderController::class, 'markPaid'])->middleware($write);
     $router->post('/orders/{uuid}/fulfill', [AdminOrderController::class, 'fulfill'])->middleware($write);
-    $router->post('/orders/{uuid}/mark-refunded', [AdminOrderController::class, 'markRefunded'])->middleware($write);
+    $router->post('/orders/{uuid}/refunds', [AdminRefundController::class, 'store'])->middleware($write);
+    $router->get('/orders/{uuid}/refunds', [AdminRefundController::class, 'index'])->middleware($read);
+    $router->post('/orders/{uuid}/notes', [AdminOrderController::class, 'addNote'])->middleware($write);
 });

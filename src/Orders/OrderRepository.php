@@ -156,6 +156,28 @@ SQL,
     }
 
     /**
+     * Tenant-constrained event read: joins through `commerce_orders` since
+     * `commerce_order_events` carries no `tenant_uuid` column of its own. Returns every
+     * event regardless of visibility — callers (e.g. the admin `show()` endpoint) are
+     * the trusted, full-visibility surface; storefront-facing reads must filter by
+     * `visibility` themselves.
+     *
+     * @return list<array<string,mixed>>
+     */
+    public function eventsForOrder(ApplicationContext $context, string $tenant, string $orderUuid): array
+    {
+        $rows = db($context)->table('commerce_order_events')
+            ->join('commerce_orders', 'commerce_order_events.order_uuid', '=', 'commerce_orders.uuid')
+            ->select(['commerce_order_events.*'])
+            ->where('commerce_orders.tenant_uuid', '=', $tenant)
+            ->where('commerce_order_events.order_uuid', '=', $orderUuid)
+            ->orderBy('commerce_order_events.id', 'ASC')
+            ->get();
+
+        return array_map(fn (array $row): array => $this->decodeEventPayload($row), $rows);
+    }
+
+    /**
      * @param array<string,mixed> $order
      * @param array<string,mixed> $line
      * @return array<string,mixed>
@@ -204,6 +226,20 @@ SQL,
                 $decoded = json_decode($row[$column], true);
                 $row[$column] = is_array($decoded) ? $decoded : null;
             }
+        }
+
+        return $row;
+    }
+
+    /**
+     * @param array<string,mixed> $row
+     * @return array<string,mixed>
+     */
+    private function decodeEventPayload(array $row): array
+    {
+        if (isset($row['payload']) && is_string($row['payload']) && $row['payload'] !== '') {
+            $decoded = json_decode($row['payload'], true);
+            $row['payload'] = is_array($decoded) ? $decoded : null;
         }
 
         return $row;

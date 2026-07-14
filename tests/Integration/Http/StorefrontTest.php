@@ -23,6 +23,7 @@ use Glueful\Extensions\Commerce\Inventory\StockRepository;
 use Glueful\Extensions\Commerce\Orders\CheckoutService;
 use Glueful\Extensions\Commerce\Orders\OrderNumberGenerator;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
+use Glueful\Extensions\Commerce\Orders\Refunds\RefundRepository;
 use Glueful\Extensions\Commerce\Payments\ManualPaymentCollector;
 use Glueful\Extensions\Commerce\Pricing\PricingEngine;
 use Glueful\Extensions\Commerce\Pricing\ShippingQuote;
@@ -175,7 +176,13 @@ final class StorefrontTest extends CommerceTestCase
 
     private function orderController(): OrderController
     {
-        return new OrderController($this->context, new OrderRepository(), $this->checkout());
+        return new OrderController(
+            $this->context,
+            new OrderRepository(),
+            $this->checkout(),
+            new SentinelTenantResolver(),
+            new RefundRepository()
+        );
     }
 
     private function checkout(): CheckoutService

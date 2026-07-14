@@ -19,6 +19,7 @@ use Glueful\Extensions\Commerce\Discounts\DiscountService;
 use Glueful\Extensions\Commerce\Http\Admin\AdminDiscountController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminOrderController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminProductController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminRefundController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminStockController;
 use Glueful\Extensions\Commerce\Http\Storefront\CartController;
 use Glueful\Extensions\Commerce\Http\Storefront\CheckoutController;
@@ -195,6 +196,10 @@ final class CommerceServiceProvider extends ServiceProvider
                 'factory' => [self::class, 'makeAdminOrderController'],
                 'shared' => true,
             ],
+            AdminRefundController::class => [
+                'factory' => [self::class, 'makeAdminRefundController'],
+                'shared' => true,
+            ],
         ];
     }
 
@@ -366,7 +371,8 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(ApplicationContext::class),
             $container->get(OrderRepository::class),
             $container->get(CheckoutService::class),
-            self::tenantResolver($container)
+            self::tenantResolver($container),
+            $container->get(RefundRepository::class)
         );
     }
 
@@ -405,6 +411,17 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(OrderRepository::class),
             $container->get(StockRepository::class),
             $container->get(OrderPaymentService::class),
+            self::tenantResolver($container)
+        );
+    }
+
+    public static function makeAdminRefundController(ContainerInterface $container): AdminRefundController
+    {
+        return new AdminRefundController(
+            $container->get(ApplicationContext::class),
+            $container->get(OrderRepository::class),
+            $container->get(RefundRepository::class),
+            $container->get(RefundService::class),
             self::tenantResolver($container)
         );
     }

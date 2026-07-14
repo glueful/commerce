@@ -5,6 +5,10 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Commerce\Http\Admin;
 
 use Glueful\Bootstrap\ApplicationContext;
+use Glueful\Events\EventService;
+use Glueful\Extensions\Commerce\Events\OrderFulfilled;
+use Glueful\Extensions\Commerce\Events\OrderNoteAdded;
+use Glueful\Extensions\Commerce\Http\DTOs\CreateOrderNoteData;
 use Glueful\Extensions\Commerce\Http\DTOs\FulfillOrderData;
 use Glueful\Extensions\Commerce\Http\DTOs\OrderListQuery;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
@@ -21,6 +25,8 @@ use Symfony\Component\HttpFoundation\Request;
 
 final class AdminOrderController
 {
+    use ResolvesActor;
+
     public function __construct(
         private ApplicationContext $context,
         private ?OrderRepository $orders = null,
@@ -65,7 +71,14 @@ final class AdminOrderController
     #[ApiResponse(404, description: 'Order not found')]
     public function show(Request $request, string $uuid): Response
     {
-        return Response::success($this->order($uuid), 'Order retrieved');
+        $order = $this->order($uuid);
+        $order['events'] = $this->orders->eventsForOrder(
+            $this->context,
+            $this->tenants->tenantUuid($this->context),
+            $uuid
+        );
+
+        return Response::success($order, 'Order retrieved');
     }
 
     #[ApiOperation(summary: 'Cancel an order', tags: ['Commerce Admin'])]
@@ -122,25 +135,47 @@ final class AdminOrderController
                     'updated_at' => db($this->context)->getDriver()->formatDateTime(),
                 ]);
             $this->orders->recordEvent($this->context, $uuid, 'status:fulfilled');
+            $fulfilled = $this->order($uuid);
+            $this->dispatch(new OrderFulfilled($fulfilled));
 
-            return Response::success($this->order($uuid), 'Order fulfilled');
+            return Response::success($fulfilled, 'Order fulfilled');
         } catch (\DomainException $e) {
             return Response::error($e->getMessage(), 409);
         }
     }
 
-    #[ApiOperation(summary: 'Mark an order refunded', tags: ['Commerce Admin'])]
-    #[ApiResponse(200, description: 'Order marked refunded')]
-    #[ApiResponse(409, description: 'Invalid order transition')]
-    public function markRefunded(Request $request, string $uuid): Response
+    #[ApiOperation(summary: 'Add a note to an order', tags: ['Commerce Admin'])]
+    #[ApiResponse(200, description: 'Note added')]
+    #[ApiResponse(404, description: 'Order not found')]
+    #[ApiResponse(422, description: 'Validation failed')]
+    public function addNote(CreateOrderNoteData $input, Request $request, string $uuid): Response
     {
-        try {
-            $this->orders->transition($this->context, $this->tenants->tenantUuid($this->context), $uuid, 'refunded');
+        // Tenant-scoped 404 guard first (non-revealing), before any validation or write.
+        $order = $this->order($uuid);
 
-            return Response::success($this->order($uuid), 'Order marked refunded');
-        } catch (\DomainException $e) {
-            return Response::error($e->getMessage(), 409);
+        if ($input->notify && $input->visibility !== 'customer') {
+            return Response::validation([
+                'notify' => 'notify requires visibility to be customer.',
+            ]);
         }
+
+        $actorUuid = $this->actorUuid($request);
+        $note = [
+            'body' => $input->body,
+            'visibility' => $input->visibility,
+            'notify' => $input->notify,
+            'actor_uuid' => $actorUuid,
+        ];
+
+        $this->orders->recordEvent($this->context, $uuid, 'note.added', $note, $actorUuid, $input->visibility);
+
+        // recordEvent() is not transactional, so it's already durable by the time we get
+        // here; dispatching directly (no afterCommit) is correct.
+        if ($input->notify) {
+            $this->dispatch(new OrderNoteAdded($order, $note));
+        }
+
+        return Response::success(['order_uuid' => $uuid, 'note' => $note], 'Note added');
     }
 
     private function releaseStock(string $tenant, string $orderUuid): void
@@ -174,5 +209,13 @@ final class AdminOrderController
         }
 
         return $order;
+    }
+
+    private function dispatch(object $event): void
+    {
+        $container = container($this->context);
+        if ($container->has(EventService::class)) {
+            $container->get(EventService::class)->dispatch($event);
+        }
     }
 }
