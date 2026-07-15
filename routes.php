@@ -6,11 +6,15 @@ use Glueful\Extensions\Commerce\Http\Storefront\CartController;
 use Glueful\Extensions\Commerce\Http\Storefront\CheckoutController;
 use Glueful\Extensions\Commerce\Http\Storefront\OrderController;
 use Glueful\Extensions\Commerce\Http\Storefront\ProductController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminAttributeController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminCategoryController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminDiscountController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminMediaController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminOrderController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminProductController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminRefundController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminStockController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminTagController;
 use Glueful\Routing\Router;
 
 /** @var Router $router */
@@ -65,6 +69,35 @@ $router->group(['prefix' => '/commerce/admin', 'middleware' => ['auth']], functi
     $router->patch('/products/{uuid}', [AdminProductController::class, 'update'])->middleware($write);
     $router->post('/products/{uuid}/variants', [AdminProductController::class, 'storeVariant'])->middleware($write);
     $router->patch('/variants/{uuid}', [AdminProductController::class, 'updateVariant'])->middleware($write);
+    $router->put('/products/{uuid}/children', [AdminProductController::class, 'setChildren'])->middleware($write);
+
+    $router->post('/products/{uuid}/media', [AdminMediaController::class, 'attach'])->middleware($write);
+    $router->put('/products/{uuid}/media/order', [AdminMediaController::class, 'reorder'])->middleware($write);
+    $router->patch('/media/{uuid}', [AdminMediaController::class, 'update'])->middleware($write);
+    $router->delete('/media/{uuid}', [AdminMediaController::class, 'detach'])->middleware($write);
+
+    $router->get('/categories', [AdminCategoryController::class, 'index'])->middleware($read);
+    $router->post('/categories', [AdminCategoryController::class, 'store'])->middleware($write);
+    $router->patch('/categories/{uuid}', [AdminCategoryController::class, 'update'])->middleware($write);
+    $router->delete('/categories/{uuid}', [AdminCategoryController::class, 'destroy'])->middleware($write);
+    $router->put('/products/{uuid}/categories', [AdminCategoryController::class, 'setForProduct'])->middleware($write);
+
+    $router->get('/tags', [AdminTagController::class, 'index'])->middleware($read);
+    $router->post('/tags', [AdminTagController::class, 'store'])->middleware($write);
+    $router->delete('/tags/{uuid}', [AdminTagController::class, 'destroy'])->middleware($write);
+    $router->put('/products/{uuid}/tags', [AdminTagController::class, 'setForProduct'])->middleware($write);
+
+    $router->get('/attributes', [AdminAttributeController::class, 'index'])->middleware($read);
+    $router->post('/attributes', [AdminAttributeController::class, 'store'])->middleware($write);
+    $router->patch('/attributes/{uuid}', [AdminAttributeController::class, 'update'])->middleware($write);
+    $router->delete('/attributes/{uuid}', [AdminAttributeController::class, 'destroy'])->middleware($write);
+    $router->post('/attributes/{uuid}/values', [AdminAttributeController::class, 'storeValue'])->middleware($write);
+    $router->patch('/attribute-values/{uuid}', [AdminAttributeController::class, 'updateValue'])
+        ->middleware($write);
+    $router->delete('/attribute-values/{uuid}', [AdminAttributeController::class, 'destroyValue'])
+        ->middleware($write);
+    $router->put('/products/{uuid}/attributes', [AdminAttributeController::class, 'setForProduct'])
+        ->middleware($write);
 
     $router->post('/stock/{variantUuid}/adjust', [AdminStockController::class, 'adjust'])->middleware($write);
 

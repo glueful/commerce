@@ -7,8 +7,17 @@ namespace Glueful\Extensions\Commerce;
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Database\Migrations\MigrationPriority;
 use Glueful\Events\EventService;
+use Glueful\Extensions\Commerce\Catalog\AttributeRepository;
+use Glueful\Extensions\Commerce\Catalog\AttributeService;
 use Glueful\Extensions\Commerce\Catalog\CatalogService;
+use Glueful\Extensions\Commerce\Catalog\CategoryRepository;
+use Glueful\Extensions\Commerce\Catalog\CategoryService;
+use Glueful\Extensions\Commerce\Catalog\ProductChildrenRepository;
+use Glueful\Extensions\Commerce\Catalog\ProductMediaRepository;
+use Glueful\Extensions\Commerce\Catalog\ProductMediaService;
 use Glueful\Extensions\Commerce\Catalog\ProductRepository;
+use Glueful\Extensions\Commerce\Catalog\TagRepository;
+use Glueful\Extensions\Commerce\Catalog\TagService;
 use Glueful\Extensions\Commerce\Catalog\VariantRepository;
 use Glueful\Extensions\Commerce\Cart\CartPruner;
 use Glueful\Extensions\Commerce\Cart\CartRepository;
@@ -22,11 +31,15 @@ use Glueful\Extensions\Commerce\Events\OrderNoteAdded;
 use Glueful\Extensions\Commerce\Events\OrderPaid;
 use Glueful\Extensions\Commerce\Events\OrderPlaced;
 use Glueful\Extensions\Commerce\Events\RefundCompleted;
+use Glueful\Extensions\Commerce\Http\Admin\AdminAttributeController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminCategoryController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminDiscountController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminMediaController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminOrderController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminProductController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminRefundController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminStockController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminTagController;
 use Glueful\Extensions\Commerce\Http\Storefront\CartController;
 use Glueful\Extensions\Commerce\Http\Storefront\CheckoutController;
 use Glueful\Extensions\Commerce\Http\Storefront\OrderController;
@@ -59,6 +72,7 @@ use Glueful\Extensions\Contracts\Payments\PaymentCollector;
 use Glueful\Extensions\Contracts\Payments\PaymentConfirmationHandler;
 use Glueful\Extensions\Contracts\Payments\RefundCollector;
 use Glueful\Extensions\ServiceProvider;
+use Glueful\Repository\BlobRepository;
 use Psr\Container\ContainerInterface;
 
 final class CommerceServiceProvider extends ServiceProvider
@@ -93,8 +107,44 @@ final class CommerceServiceProvider extends ServiceProvider
                 'class' => VariantRepository::class,
                 'shared' => true,
             ],
+            ProductChildrenRepository::class => [
+                'class' => ProductChildrenRepository::class,
+                'shared' => true,
+            ],
             CatalogService::class => [
                 'factory' => [self::class, 'makeCatalogService'],
+                'shared' => true,
+            ],
+            ProductMediaRepository::class => [
+                'class' => ProductMediaRepository::class,
+                'shared' => true,
+            ],
+            ProductMediaService::class => [
+                'factory' => [self::class, 'makeProductMediaService'],
+                'shared' => true,
+            ],
+            CategoryRepository::class => [
+                'class' => CategoryRepository::class,
+                'shared' => true,
+            ],
+            CategoryService::class => [
+                'factory' => [self::class, 'makeCategoryService'],
+                'shared' => true,
+            ],
+            TagRepository::class => [
+                'class' => TagRepository::class,
+                'shared' => true,
+            ],
+            TagService::class => [
+                'factory' => [self::class, 'makeTagService'],
+                'shared' => true,
+            ],
+            AttributeRepository::class => [
+                'class' => AttributeRepository::class,
+                'shared' => true,
+            ],
+            AttributeService::class => [
+                'factory' => [self::class, 'makeAttributeService'],
                 'shared' => true,
             ],
             StockRepository::class => [
@@ -223,6 +273,22 @@ final class CommerceServiceProvider extends ServiceProvider
                 'factory' => [self::class, 'makeAdminRefundController'],
                 'shared' => true,
             ],
+            AdminMediaController::class => [
+                'factory' => [self::class, 'makeAdminMediaController'],
+                'shared' => true,
+            ],
+            AdminCategoryController::class => [
+                'factory' => [self::class, 'makeAdminCategoryController'],
+                'shared' => true,
+            ],
+            AdminTagController::class => [
+                'factory' => [self::class, 'makeAdminTagController'],
+                'shared' => true,
+            ],
+            AdminAttributeController::class => [
+                'factory' => [self::class, 'makeAdminAttributeController'],
+                'shared' => true,
+            ],
         ];
     }
 
@@ -232,7 +298,63 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(ProductRepository::class),
             $container->get(VariantRepository::class),
             self::tenantResolver($container),
-            $container->get(StockRepository::class)
+            $container->get(StockRepository::class),
+            $container->get(ProductChildrenRepository::class)
+        );
+    }
+
+    public static function makeProductMediaService(ContainerInterface $container): ProductMediaService
+    {
+        return new ProductMediaService(
+            $container->get(ProductRepository::class),
+            $container->get(VariantRepository::class),
+            $container->get(ProductMediaRepository::class),
+            self::tenantResolver($container),
+            self::makeBlobRepository($container)
+        );
+    }
+
+    /**
+     * Soft-resolved: `glueful/framework`'s blob subsystem is always present as a
+     * class, but only bound in the container when uploads are enabled. Media attach
+     * fails 422 (not a crash) when this returns null.
+     */
+    private static function makeBlobRepository(ContainerInterface $container): ?BlobRepository
+    {
+        if (!$container->has(BlobRepository::class)) {
+            return null;
+        }
+
+        $blobs = $container->get(BlobRepository::class);
+
+        return $blobs instanceof BlobRepository ? $blobs : null;
+    }
+
+    public static function makeCategoryService(ContainerInterface $container): CategoryService
+    {
+        return new CategoryService(
+            $container->get(CategoryRepository::class),
+            $container->get(ProductRepository::class),
+            self::tenantResolver($container),
+            self::makeBlobRepository($container)
+        );
+    }
+
+    public static function makeTagService(ContainerInterface $container): TagService
+    {
+        return new TagService(
+            $container->get(TagRepository::class),
+            $container->get(ProductRepository::class),
+            self::tenantResolver($container)
+        );
+    }
+
+    public static function makeAttributeService(ContainerInterface $container): AttributeService
+    {
+        return new AttributeService(
+            $container->get(AttributeRepository::class),
+            $container->get(ProductRepository::class),
+            self::tenantResolver($container)
         );
     }
 
@@ -367,7 +489,12 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(ApplicationContext::class),
             $container->get(ProductRepository::class),
             $container->get(VariantRepository::class),
-            self::tenantResolver($container)
+            self::tenantResolver($container),
+            $container->get(ProductMediaRepository::class),
+            $container->get(CategoryRepository::class),
+            $container->get(TagRepository::class),
+            $container->get(AttributeRepository::class),
+            $container->get(ProductChildrenRepository::class)
         );
     }
 
@@ -448,6 +575,38 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(RefundRepository::class),
             $container->get(RefundService::class),
             self::tenantResolver($container)
+        );
+    }
+
+    public static function makeAdminMediaController(ContainerInterface $container): AdminMediaController
+    {
+        return new AdminMediaController(
+            $container->get(ApplicationContext::class),
+            $container->get(ProductMediaService::class)
+        );
+    }
+
+    public static function makeAdminCategoryController(ContainerInterface $container): AdminCategoryController
+    {
+        return new AdminCategoryController(
+            $container->get(ApplicationContext::class),
+            $container->get(CategoryService::class)
+        );
+    }
+
+    public static function makeAdminTagController(ContainerInterface $container): AdminTagController
+    {
+        return new AdminTagController(
+            $container->get(ApplicationContext::class),
+            $container->get(TagService::class)
+        );
+    }
+
+    public static function makeAdminAttributeController(ContainerInterface $container): AdminAttributeController
+    {
+        return new AdminAttributeController(
+            $container->get(ApplicationContext::class),
+            $container->get(AttributeService::class)
         );
     }
 

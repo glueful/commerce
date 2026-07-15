@@ -11,6 +11,7 @@ use Glueful\Extensions\Commerce\Catalog\VariantRepository;
 use Glueful\Extensions\Commerce\Http\DTOs\CreateProductData;
 use Glueful\Extensions\Commerce\Http\DTOs\CreateVariantData;
 use Glueful\Extensions\Commerce\Http\DTOs\ProductVariantData;
+use Glueful\Extensions\Commerce\Http\DTOs\SetProductChildrenData;
 use Glueful\Extensions\Commerce\Http\DTOs\UpdateProductData;
 use Glueful\Extensions\Commerce\Http\DTOs\UpdateVariantData;
 use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
@@ -124,6 +125,21 @@ final class AdminProductController
             }
 
             return Response::success($variant, 'Variant updated');
+        } catch (ValidationException $e) {
+            return Response::validation($e->firstErrors());
+        }
+    }
+
+    #[ApiOperation(summary: 'Set the children attached to a grouped product', tags: ['Commerce Admin'])]
+    #[ApiResponse(200, description: 'Product children updated')]
+    #[ApiResponse(404, description: 'Product not found')]
+    #[ApiResponse(422, description: 'Validation failed')]
+    public function setChildren(SetProductChildrenData $input, Request $request, string $uuid): Response
+    {
+        try {
+            $children = $this->catalog->setProductChildren($this->context, $uuid, $input->child_uuids ?? []);
+
+            return Response::success($children, 'Product children updated');
         } catch (ValidationException $e) {
             return Response::validation($e->firstErrors());
         }

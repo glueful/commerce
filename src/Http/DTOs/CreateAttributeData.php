@@ -1,0 +1,21 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Glueful\Extensions\Commerce\Http\DTOs;
+
+use Glueful\Validation\Attributes\Rule;
+use Glueful\Validation\Contracts\RequestData;
+
+final class CreateAttributeData implements RequestData
+{
+    public function __construct(
+        #[Rule('required|string')]
+        public readonly string $slug,
+        #[Rule('required|string')]
+        public readonly string $name,
+        #[Rule('integer')]
+        public readonly ?int $position = null,
+    ) {
+    }
+}

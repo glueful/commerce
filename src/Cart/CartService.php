@@ -219,14 +219,31 @@ final class CartService
         return $line === null ? 0 : (int) $line['quantity'];
     }
 
+    /**
+     * Defense in depth: even though CatalogService now blocks variant creation
+     * for external/grouped products outright, a variant referencing one of them
+     * could still exist (e.g. seeded directly, or a future code path). Reject it
+     * here too, naming the offending type, rather than trusting the catalog side
+     * alone.
+     */
     private function assertVariantCanSupply(
         ApplicationContext $context,
         string $tenant,
         string $variantUuid,
         int $quantity,
     ): void {
-        if ($this->variants->findByUuid($context, $tenant, $variantUuid) === null) {
+        $variant = $this->variants->findByUuid($context, $tenant, $variantUuid);
+        if ($variant === null) {
             throw ValidationException::forField('variant_uuid', 'Variant not found.');
+        }
+
+        $product = $this->products->findByUuid($context, $tenant, (string) $variant['product_uuid']);
+        $type = $product !== null ? (string) ($product['type'] ?? 'physical') : 'physical';
+        if (!in_array($type, ['physical', 'digital'], true)) {
+            throw ValidationException::forField(
+                'variant_uuid',
+                "Products of type '{$type}' cannot be purchased."
+            );
         }
 
         if (

@@ -25,12 +25,44 @@ final class MigrationsTest extends CommerceTestCase
             'commerce_sequences',
             'commerce_discounts',
             'commerce_discount_redemptions',
+            'commerce_product_media',
+            'commerce_categories',
+            'commerce_product_categories',
+            'commerce_tags',
+            'commerce_product_tags',
+            'commerce_attributes',
+            'commerce_attribute_values',
+            'commerce_product_attributes',
+            'commerce_product_children',
+            'commerce_product_addons',
+            'commerce_reviews',
         ];
 
         $schema = $this->connection->getSchemaBuilder();
         foreach ($tables as $table) {
             self::assertTrue($schema->hasTable($table), "missing table {$table}");
         }
+    }
+
+    public function testFoldedCatalogBreadthColumnsExistOnProductsCartLinesAndOrderLines(): void
+    {
+        $schema = $this->connection->getSchemaBuilder();
+
+        self::assertTrue($schema->hasColumn('commerce_products', 'rating_sum'), 'commerce_products missing rating_sum');
+        self::assertTrue(
+            $schema->hasColumn('commerce_products', 'rating_count'),
+            'commerce_products missing rating_count'
+        );
+        self::assertTrue(
+            $schema->hasColumn('commerce_products', 'catalog_revision'),
+            'commerce_products missing catalog_revision'
+        );
+        self::assertTrue($schema->hasColumn('commerce_cart_lines', 'addons'), 'commerce_cart_lines missing addons');
+        self::assertTrue(
+            $schema->hasColumn('commerce_cart_lines', 'addons_hash'),
+            'commerce_cart_lines missing addons_hash'
+        );
+        self::assertTrue($schema->hasColumn('commerce_order_lines', 'addons'), 'commerce_order_lines missing addons');
     }
 
     public function testFoldedRefundColumnsExistOnOrdersAndOrderEvents(): void

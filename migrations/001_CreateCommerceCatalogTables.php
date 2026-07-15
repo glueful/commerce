@@ -23,6 +23,9 @@ final class CreateCommerceCatalogTables implements MigrationInterface
                 $table->string('status', 16)->default('draft');
                 $table->json('options')->nullable();
                 $table->json('metadata')->nullable();
+                $table->integer('rating_sum')->default(0);
+                $table->integer('rating_count')->default(0);
+                $table->integer('catalog_revision')->default(0);
                 $table->timestamp('created_at')->default('CURRENT_TIMESTAMP');
                 $table->timestamp('updated_at')->nullable();
                 $table->timestamp('deleted_at')->nullable();

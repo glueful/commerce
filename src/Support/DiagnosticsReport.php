@@ -146,6 +146,17 @@ final class DiagnosticsReport
             'commerce_sequences',
             'commerce_discounts',
             'commerce_discount_redemptions',
+            'commerce_product_media',
+            'commerce_categories',
+            'commerce_product_categories',
+            'commerce_tags',
+            'commerce_product_tags',
+            'commerce_attributes',
+            'commerce_attribute_values',
+            'commerce_product_attributes',
+            'commerce_product_children',
+            'commerce_product_addons',
+            'commerce_reviews',
         ];
     }
 
@@ -158,6 +169,11 @@ final class DiagnosticsReport
                 'commerce_cart_lines',
                 'commerce_order_lines',
                 'commerce_order_events',
+                'commerce_product_categories',
+                'commerce_product_tags',
+                'commerce_attribute_values',
+                'commerce_product_attributes',
+                'commerce_product_children',
             ], true)
         ));
     }

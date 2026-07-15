@@ -37,11 +37,13 @@ final class CreateCommerceCartTables implements MigrationInterface
                 $table->string('cart_uuid', 12);
                 $table->string('variant_uuid', 12);
                 $table->integer('quantity');
+                $table->json('addons')->nullable();
+                $table->string('addons_hash', 64)->default('');
                 $table->timestamp('created_at')->default('CURRENT_TIMESTAMP');
                 $table->timestamp('updated_at')->nullable();
 
                 $table->unique('uuid');
-                $table->unique(['cart_uuid', 'variant_uuid']);
+                $table->unique(['cart_uuid', 'variant_uuid', 'addons_hash']);
             });
         }
     }
