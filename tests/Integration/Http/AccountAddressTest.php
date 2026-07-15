@@ -168,6 +168,51 @@ final class AccountAddressTest extends CommerceTestCase
         $this->controller()->destroy($this->authed('useraddr009b'), (string) $created['uuid']);
     }
 
+    /**
+     * Deliberate pin (design spec §2 is silent, so the actual behavior is the
+     * contract): deleting the CURRENT default never auto-promotes a survivor.
+     * `AddressBookService::delete()` is a plain claim-then-delete -- it does not
+     * inspect the deleted row's default flags at all -- so an account can be left
+     * with zero default addresses until the customer explicitly picks a new one.
+     */
+    public function testDestroyingTheCurrentDefaultLeavesZeroDefaultsNoAutoPromotion(): void
+    {
+        $userUuid = 'useraddr014';
+        $default = $this->json($this->controller()->store(
+            new CreateAddressData(
+                address: ['country' => 'US'],
+                is_default_shipping: true,
+                is_default_billing: true
+            ),
+            $this->authed($userUuid)
+        ))['data'];
+        $survivor = $this->json($this->controller()->store(
+            new CreateAddressData(address: ['country' => 'CA']),
+            $this->authed($userUuid)
+        ))['data'];
+
+        $response = $this->controller()->destroy($this->authed($userUuid), (string) $default['uuid']);
+        self::assertSame(204, $response->getStatusCode());
+
+        $listed = $this->json($this->controller()->index($this->authed($userUuid)))['data'];
+        self::assertCount(1, $listed);
+        self::assertSame($survivor['uuid'], $listed[0]['uuid']);
+        self::assertFalse(
+            $listed[0]['is_default_shipping'],
+            'The survivor must NOT be auto-promoted to default shipping.'
+        );
+        self::assertFalse(
+            $listed[0]['is_default_billing'],
+            'The survivor must NOT be auto-promoted to default billing.'
+        );
+
+        $anyDefault = array_filter(
+            $listed,
+            static fn (array $row): bool => $row['is_default_shipping'] || $row['is_default_billing']
+        );
+        self::assertSame([], $anyDefault, 'Zero addresses may be flagged default after the default was deleted.');
+    }
+
     // -----------------------------------------------------------------
     // Default shipping/billing swap
     // -----------------------------------------------------------------

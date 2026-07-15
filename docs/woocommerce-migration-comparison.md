@@ -38,22 +38,40 @@ Short answer: **migration is possible only for a simple store today, not a serio
   are Layer 6 and not shipped yet — the storefront product payload already echoes
   categories/tags/attributes/media/rating read-only, but there is no browse/filter/
   submit API surface yet.
+- Customers, derived from orders rather than a bundled accounts table (`GET
+  /commerce/admin/customers` and `/{key}`, keyed by `user_uuid` or normalized guest
+  email, with soft username enrichment via `UserProviderInterface`). Caveat: no
+  first-class customer/account row — a "customer" is an aggregation over orders, not
+  a persisted profile; guest→user linking is an operator CLI
+  (`commerce:customers:link-guests`) today, not yet an admin HTTP action (an L6
+  API-parity candidate).
+- A storefront authenticated address book (`GET/POST /commerce/account/addresses`,
+  `PATCH/DELETE .../{uuid}`) with parent-claim-serialized default shipping/billing
+  swap-in-transaction, plus optional checkout integration
+  (`shipping_address_uuid`/`billing_address_uuid`) that snapshots a caller-owned
+  saved address into the order exactly like an inline address.
+- Full downloadable/digital product delivery: admin-managed download definitions on
+  digital variants (private-blob validated), a checkout-time entitlement snapshot
+  immune to later definition edits or deletes, snapshot-derived idempotent
+  self-healing grant issuance (quantity-aware across add-on-distinct lines,
+  overflow-guarded), two access paths (order-authenticated listing/minting and a
+  public email deep link) sharing one atomic guarded-mint primitive with
+  full-refund/expiry/revocation handling, a blob-access policy contributor enforcing
+  grant-aware VIEW/SIGN/DELETE rules, and deep links folded into the `order_paid`
+  transactional email on first issuance. Caveat: requires `glueful/framework` >= 1.70
+  (the generic, multi-contributor `BlobAccessPolicy` composite this feature's policy
+  backstop depends on); consumption is minted-signed-URL-based (a time-boxed URL per
+  mint), not a raw fetch-count meter.
 
-That works for: a custom headless storefront selling physical, grouped, or external/affiliate products, organized into categories/tags with attributes, media galleries, add-ons, and moderated reviews, with simple variants and basic checkout.
+That works for: a custom headless storefront selling physical, grouped, or external/affiliate products, organized into categories/tags with attributes, media galleries, add-ons, and moderated reviews, with simple variants and basic checkout, customer accounts backed by Users, saved addresses, and full digital-product delivery.
 
 ## What Is Missing Versus WooCommerce
 
-WooCommerce is much broader. It supports product types like simple, grouped, external/affiliate, variable, virtual, downloadable, and composite/bundle products, plus product editor/bulk tooling. Commerce now covers simple/variant, grouped, and external/affiliate products; composite/bundle products and true downloadable delivery are still missing.
+WooCommerce is much broader. It supports product types like simple, grouped, external/affiliate, variable, virtual, downloadable, and composite/bundle products, plus product editor/bulk tooling. Commerce now covers simple/variant, grouped, and external/affiliate products, plus downloadable delivery; composite/bundle products are still missing.
 
 Major gaps:
 
 - No migration/import tool from WooCommerce yet.
-- No customers/accounts model inside Commerce.
-- No downloadable/digital product *delivery*. The seams already exist — products carry a
-  `type` (shipping already skips `digital` lines; stock tracking already skips non-physical),
-  so only the delivery layer is missing. The framework's private blobs + signed URLs +
-  `BlobAccessPolicy` (1.67/1.68) are exactly that primitive: a downloads link table plus a
-  policy binding gated on "order paid" covers most of the feature.
 - No composite/bundle products (grouped and external/affiliate now work — see above).
 - No generated invoice documents (PDF/printable).
 - No tax-rate table/VAT rules UI.
@@ -93,15 +111,14 @@ deliberately last (an importer written before its target models exist gets rewri
 every model added; build the destination schema first, write the importer once against the
 final shape):
 
-1. Customers via Users integration (`user_uuid` + soft-resolved `UserProviderInterface`,
-   the same pattern the tenancy pack uses — not a Commerce-owned accounts table).
-2. Shipping/tax APIs and configuration surfaces.
-3. Reports/analytics APIs.
-4. API parity for WooCommerce resources needed by importers and app-level UIs.
-5. WooCommerce importer, written against the finished models above.
+1. Shipping/tax APIs and configuration surfaces.
+2. Reports/analytics APIs.
+3. API parity for WooCommerce resources needed by importers and app-level UIs.
+4. WooCommerce importer, written against the finished models above.
 
-(Refunds, order notes, transactional emails, and the whole product-media/categories/
-tags/attributes/reviews/add-ons/grouped-external-product-type batch — formerly items 1
-and 1a here — have shipped; see "What Can Migrate Today" above.)
+(Refunds, order notes, transactional emails, the whole product-media/categories/
+tags/attributes/reviews/add-ons/grouped-external-product-type batch, customers via
+Users integration, the storefront address book, and full digital-product delivery —
+formerly items 1 and 1a here — have shipped; see "What Can Migrate Today" above.)
 
 

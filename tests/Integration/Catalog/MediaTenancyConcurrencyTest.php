@@ -224,9 +224,13 @@ final class MediaTenancyConcurrencyTest extends CommerceTestCase
     }
 
     /**
-     * Idempotent pgsql-lane cleanup: media rows, blobs, and the race product
-     * (forceDelete — commerce_products carries deleted_at, so a plain delete()
-     * would soft-delete and strand the unique uuid for the next run).
+     * Idempotent pgsql-lane cleanup: media rows, blobs, and the race product all need
+     * forceDelete() -- both `commerce_products` AND the framework core `blobs` table
+     * carry a `deleted_at` column, so a plain delete() on either would soft-delete and
+     * strand the unique uuid for the next run (T10 fix: the blobs half of this was
+     * still a plain delete(), reproducibly leaving `blobracea002`/`blobraceb002`
+     * soft-deleted-but-present and breaking a second consecutive pgsql-lane run with
+     * a duplicate-key violation -- the previously-flagged backlog flake).
      *
      * @param list<string> $blobUuids
      */
@@ -236,7 +240,7 @@ final class MediaTenancyConcurrencyTest extends CommerceTestCase
             ->where('product_uuid', '=', $productUuid)
             ->delete();
         foreach ($blobUuids as $blobUuid) {
-            $connection->table('blobs')->where('uuid', '=', $blobUuid)->delete();
+            $connection->table('blobs')->where('uuid', '=', $blobUuid)->forceDelete();
         }
         $connection->table('commerce_products')
             ->where('uuid', '=', $productUuid)
