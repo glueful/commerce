@@ -386,7 +386,7 @@ final class GatewayRefundTest extends CommerceTestCase
         self::assertNotNull($order);
         $refunds = new RefundRepository();
         $refunds->insert($contextA, [
-            'uuid' => 'refundpgrace1',
+            'uuid' => 'refundpgrace',
             'tenant_uuid' => '',
             'order_uuid' => $orderUuid,
             'idempotency_key' => 'idem-race-a',
@@ -428,7 +428,7 @@ final class GatewayRefundTest extends CommerceTestCase
             ->where('status', '=', 'pending')
             ->get();
         self::assertCount(1, $pending, 'Exactly one pending refund must have committed.');
-        self::assertSame('refundpgrace1', $pending[0]['uuid']);
+        self::assertSame('refundpgrace', $pending[0]['uuid']);
     }
 
     /**
