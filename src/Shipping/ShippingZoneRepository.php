@@ -57,6 +57,18 @@ final class ShippingZoneRepository
             ->update($changes);
     }
 
+    /**
+     * Delegation existence check (spec §4): one index-covered query per quote
+     * deciding DB-vs-config -- a tenant with ANY zone row is wholly on the
+     * data-driven shipping path (no per-request mixing across sources, spec §3).
+     */
+    public function existsForTenant(ApplicationContext $context, string $tenant): bool
+    {
+        return db($context)->table('commerce_shipping_zones')
+            ->where('tenant_uuid', '=', $tenant)
+            ->count() > 0;
+    }
+
     public function delete(ApplicationContext $context, string $tenant, string $uuid): void
     {
         db($context)->table('commerce_shipping_zones')

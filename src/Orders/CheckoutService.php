@@ -7,6 +7,7 @@ namespace Glueful\Extensions\Commerce\Orders;
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Cart\CartService;
 use Glueful\Extensions\Commerce\Catalog\DownloadRepository;
+use Glueful\Extensions\Commerce\Contracts\LineTaxCalculator;
 use Glueful\Extensions\Commerce\Contracts\ShippingRateProvider;
 use Glueful\Extensions\Commerce\Contracts\TaxCalculator;
 use Glueful\Extensions\Commerce\Discounts\DiscountRepository;
@@ -15,7 +16,10 @@ use Glueful\Extensions\Commerce\Events\OrderPlaced;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
 use Glueful\Extensions\Commerce\Pricing\PricingEngine;
 use Glueful\Extensions\Commerce\Pricing\ShippingQuote;
+use Glueful\Extensions\Commerce\Pricing\TaxQuote;
+use Glueful\Extensions\Commerce\Pricing\Totals;
 use Glueful\Extensions\Commerce\Support\TokenHasher;
+use Glueful\Extensions\Commerce\Tax\DiscountAllocation;
 use Glueful\Extensions\Contracts\Payments\PayableReference;
 use Glueful\Extensions\Contracts\Payments\PaymentCollector;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
@@ -62,7 +66,7 @@ final class CheckoutService
         $shippingOptions = $this->shipping->quote($context, $lines, $shippingAddress);
         $shippingQuote = $this->selectShipping($shippingOptions, $shippingMethodId);
         $preTax = $this->pricing->price($lines, $discount, $shippingQuote, null);
-        $tax = $this->tax->quote($context, $preTax->grandTotal, $shippingAddress);
+        $tax = $this->resolveTax($context, $lines, $discount, $preTax, $shippingAddress);
 
         return [
             'totals' => $this->pricing->price($lines, $discount, $shippingQuote, $tax),
@@ -114,7 +118,7 @@ final class CheckoutService
         $shippingAddress = is_array($addresses['shipping'] ?? null) ? $addresses['shipping'] : [];
         $shippingQuote = $this->resolveShipping($context, $lines, $shippingAddress, $shippingMethodId);
         $preTax = $this->pricing->price($lines, $discount, $shippingQuote, null);
-        $taxQuote = $this->tax->quote($context, $preTax->grandTotal, $shippingAddress);
+        $taxQuote = $this->resolveTax($context, $lines, $discount, $preTax, $shippingAddress);
         $totals = $this->pricing->price($lines, $discount, $shippingQuote, $taxQuote);
         $buyerIdentity = DiscountService::buyerIdentity($buyer['user_uuid'] ?? null, (string) $buyer['email']);
         $guestToken = TokenHasher::generate();
@@ -292,6 +296,37 @@ final class CheckoutService
         }
 
         return $this->discounts->findByCode($context, $tenant, (string) $cart['discount_code']);
+    }
+
+    /**
+     * Optional-contract dispatch (design spec §4/§5): when the bound
+     * `TaxCalculator` ALSO implements `LineTaxCalculator`, builds the
+     * per-line detailed input (post-discount extended taxable amounts via
+     * {@see DiscountAllocation}, plus each line's resolved tax class) and
+     * calls `quoteDetailed()` with `$preTax->shippingTotal` -- the EFFECTIVE
+     * post-discount shipping amount ({@see PricingEngine::price()} already
+     * zeroes this for a `free_shipping` discount), never the originally
+     * selected shipping quote's raw amount. A legacy `TaxCalculator` gets the
+     * existing aggregate call byte-identically.
+     *
+     * @param list<array<string,mixed>> $lines
+     * @param array<string,mixed>|null $discount
+     * @param array<string,mixed> $shippingAddress
+     */
+    private function resolveTax(
+        ApplicationContext $context,
+        array $lines,
+        ?array $discount,
+        Totals $preTax,
+        array $shippingAddress
+    ): TaxQuote {
+        if (!$this->tax instanceof LineTaxCalculator) {
+            return $this->tax->quote($context, $preTax->grandTotal, $shippingAddress);
+        }
+
+        $taxableLines = DiscountAllocation::taxableLines($lines, $discount, $preTax->discountTotal);
+
+        return $this->tax->quoteDetailed($context, $taxableLines, $preTax->shippingTotal, $shippingAddress);
     }
 
     /**

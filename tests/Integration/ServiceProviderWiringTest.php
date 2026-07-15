@@ -39,8 +39,6 @@ use Glueful\Extensions\Commerce\Orders\OrderPaymentService;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
 use Glueful\Extensions\Commerce\Payments\OrderPaymentConfirmationHandler;
 use Glueful\Extensions\Commerce\Pricing\PricingEngine;
-use Glueful\Extensions\Commerce\Shipping\ConfigShippingRateProvider;
-use Glueful\Extensions\Commerce\Tax\FlatRateTaxCalculator;
 use Glueful\Extensions\Commerce\Tenancy\TenantAdopter;
 use Glueful\Extensions\Commerce\Tests\Support\CommerceTestCase;
 use Glueful\Extensions\Contracts\Payments\PaymentCollector;
@@ -78,10 +76,19 @@ final class ServiceProviderWiringTest extends CommerceTestCase
             self::assertArrayHasKey('factory', $services[$id], "Missing factory: {$id}");
         }
 
-        self::assertSame(FlatRateTaxCalculator::class, $services[TaxCalculator::class]['class']);
+        // TaxCalculator::class is the DelegatingTaxCalculator(Db, FlatRate)
+        // chain built by a factory (design spec §4), not a plain class
+        // definition -- see CommerceServiceProvider::makeTaxCalculator().
         self::assertSame(
-            ConfigShippingRateProvider::class,
-            $services[ShippingRateProvider::class]['class']
+            [CommerceServiceProvider::class, 'makeTaxCalculator'],
+            $services[TaxCalculator::class]['factory']
+        );
+        // ShippingRateProvider::class is the DelegatingShippingRateProvider(Db,
+        // Config) chain built by a factory (design spec §4), not a plain class
+        // definition -- see CommerceServiceProvider::makeShippingRateProvider().
+        self::assertSame(
+            [CommerceServiceProvider::class, 'makeShippingRateProvider'],
+            $services[ShippingRateProvider::class]['factory']
         );
     }
 

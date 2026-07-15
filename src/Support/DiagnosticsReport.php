@@ -8,7 +8,7 @@ use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Contracts\ShippingRateProvider;
 use Glueful\Extensions\Commerce\Contracts\TaxCalculator;
 use Glueful\Extensions\Commerce\Payments\ManualPaymentCollector;
-use Glueful\Extensions\Commerce\Shipping\ConfigShippingRateProvider;
+use Glueful\Extensions\Commerce\Shipping\DelegatingShippingRateProvider;
 use Glueful\Extensions\Commerce\Tax\FlatRateTaxCalculator;
 use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
 use Glueful\Extensions\Contracts\Payments\PaymentCollector;
@@ -41,7 +41,7 @@ final class DiagnosticsReport
                 'shipping_rate_provider' => self::contract(
                     $context,
                     ShippingRateProvider::class,
-                    ConfigShippingRateProvider::class
+                    DelegatingShippingRateProvider::class
                 ),
             ],
             'tenancy' => [

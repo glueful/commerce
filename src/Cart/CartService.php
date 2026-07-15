@@ -12,6 +12,7 @@ use Glueful\Extensions\Commerce\Discounts\DiscountRepository;
 use Glueful\Extensions\Commerce\Discounts\DiscountService;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
 use Glueful\Extensions\Commerce\Pricing\PricingEngine;
+use Glueful\Extensions\Commerce\Shipping\ShippingClassRepository;
 use Glueful\Extensions\Commerce\Support\TokenHasher;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Glueful\Helpers\Utils;
@@ -40,8 +41,10 @@ final class CartService
         private PricingEngine $pricing,
         private CurrentTenantResolver $tenants,
         private ?AddonRepository $addons = null,
+        private ?ShippingClassRepository $shippingClasses = null,
     ) {
         $this->addons ??= new AddonRepository();
+        $this->shippingClasses ??= new ShippingClassRepository();
     }
 
     /** @return array{cart: array<string,mixed>, token: string} */
@@ -227,13 +230,27 @@ final class CartService
      * loudly here is a deliberate defensive backstop against a corrupted row
      * rather than something callers are expected to catch routinely.
      *
+     * `line_uuid` (the cart line's own uuid, for deterministic discount-allocation
+     * ties, {@see \Glueful\Extensions\Commerce\Tax\DiscountAllocation}), `shipping_class`
+     * (the variant's resolved nullable shipping-class slug, for
+     * {@see \Glueful\Extensions\Commerce\Shipping\DbShippingRateProvider}'s
+     * `per_class_table` pricing), and `tax_class` (the product's resolved
+     * tax class, `null` normalizing to `'standard'`, for
+     * {@see \Glueful\Extensions\Commerce\Tax\DbTaxCalculator}'s per-line rate
+     * selection) are ADDITIVE keys layered onto the existing shape -- nothing
+     * else changes, `addons`/`addons_hash` untouched. `tax_class` needs no
+     * extra query -- the product row is already fetched to build this line.
+     * The shipping-class slug resolution is ONE batched query per cart
+     * (mirrors {@see ShippingClassRepository::slugsByUuids()}'s batch
+     * pattern), never one lookup per line.
+     *
      * @param array<string,mixed> $cart
      * @return list<array<string,mixed>>
      */
     public function pricedLines(ApplicationContext $context, array $cart): array
     {
         $tenant = $this->tenants->tenantUuid($context);
-        $priced = [];
+        $rows = [];
         foreach ($this->carts->lines($context, (string) $cart['uuid']) as $line) {
             $variant = $this->variants->findByUuid($context, $tenant, (string) $line['variant_uuid']);
             if ($variant === null) {
@@ -244,6 +261,21 @@ final class CartService
                 continue;
             }
 
+            $rows[] = ['line' => $line, 'variant' => $variant, 'product' => $product];
+        }
+
+        $classUuids = array_values(array_unique(array_filter(array_map(
+            static fn (array $row): ?string => $row['variant']['shipping_class_uuid'] ?? null,
+            $rows
+        ))));
+        $slugsByUuid = $this->shippingClasses->slugsByUuids($context, $tenant, $classUuids);
+
+        $priced = [];
+        foreach ($rows as $row) {
+            $line = $row['line'];
+            $variant = $row['variant'];
+            $product = $row['product'];
+
             $snapshot = is_array($line['addons'] ?? null) ? $line['addons'] : [];
             $unitPrice = (int) $variant['price'] + AddonSnapshot::delta($snapshot);
             if ($unitPrice < 0) {
@@ -253,7 +285,10 @@ final class CartService
                 );
             }
 
+            $classUuid = $variant['shipping_class_uuid'] ?? null;
+
             $priced[] = [
+                'line_uuid' => (string) $line['uuid'],
                 'product_uuid' => (string) $product['uuid'],
                 'variant_uuid' => (string) $variant['uuid'],
                 'unit_price' => $unitPrice,
@@ -264,6 +299,8 @@ final class CartService
                 'option_values' => $variant['option_values'] ?? [],
                 'type' => (string) ($product['type'] ?? 'physical'),
                 'addons' => $snapshot,
+                'shipping_class' => $classUuid !== null ? ($slugsByUuid[$classUuid] ?? null) : null,
+                'tax_class' => (string) ($product['tax_class'] ?? 'standard'),
             ];
         }
 

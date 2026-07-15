@@ -43,3 +43,4 @@
 - Added a storefront authenticated address book (`GET/POST /commerce/account/addresses`, `PATCH/DELETE /commerce/account/addresses/{uuid}`) with parent-claim serialization and default shipping/billing swap-in-transaction.
 - Added optional `shipping_address_uuid`/`billing_address_uuid` checkout integration that snapshots a caller-owned saved address into the order exactly like an inline address.
 - Added the address book to the admin customer detail endpoint when keyed by user uuid.
+- Added DB-backed shipping-zone rate quoting and line-level tax calculation (per-class tax rates, `shipping_taxable`, largest-remainder discount allocation into per-line taxable amounts) via delegating providers that fall back to config-based shipping/flat-rate tax byte-identically when a tenant has no zone or rate rows.

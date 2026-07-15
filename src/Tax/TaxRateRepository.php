@@ -42,6 +42,19 @@ final class TaxRateRepository
         return $query->orderBy('country', 'ASC')->orderBy('priority', 'ASC')->orderBy('uuid', 'ASC')->get();
     }
 
+    /**
+     * Delegation existence check (spec §4): one index-covered query per quote
+     * deciding DB-vs-flat-rate -- a tenant with ANY rate row is wholly on the
+     * data-driven tax path (mirrors
+     * {@see \Glueful\Extensions\Commerce\Shipping\ShippingZoneRepository::existsForTenant()}).
+     */
+    public function existsForTenant(ApplicationContext $context, string $tenant): bool
+    {
+        return db($context)->table('commerce_tax_rates')
+            ->where('tenant_uuid', '=', $tenant)
+            ->count() > 0;
+    }
+
     /** @param array<string,mixed> $changes */
     public function update(ApplicationContext $context, string $tenant, string $uuid, array $changes): void
     {

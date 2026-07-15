@@ -87,6 +87,8 @@ use Glueful\Extensions\Commerce\Payments\ManualPaymentCollector;
 use Glueful\Extensions\Commerce\Payments\OrderPaymentConfirmationHandler;
 use Glueful\Extensions\Commerce\Pricing\PricingEngine;
 use Glueful\Extensions\Commerce\Shipping\ConfigShippingRateProvider;
+use Glueful\Extensions\Commerce\Shipping\DbShippingRateProvider;
+use Glueful\Extensions\Commerce\Shipping\DelegatingShippingRateProvider;
 use Glueful\Extensions\Commerce\Shipping\ShippingClassRepository;
 use Glueful\Extensions\Commerce\Shipping\ShippingClassService;
 use Glueful\Extensions\Commerce\Shipping\ShippingZoneRepository;
@@ -94,6 +96,8 @@ use Glueful\Extensions\Commerce\Shipping\ShippingZoneService;
 use Glueful\Extensions\Commerce\Tenancy\FailClosedTenantResolver;
 use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
 use Glueful\Extensions\Commerce\Tenancy\TenantAdopter;
+use Glueful\Extensions\Commerce\Tax\DbTaxCalculator;
+use Glueful\Extensions\Commerce\Tax\DelegatingTaxCalculator;
 use Glueful\Extensions\Commerce\Tax\FlatRateTaxCalculator;
 use Glueful\Extensions\Commerce\Tax\TaxRateRepository;
 use Glueful\Extensions\Commerce\Tax\TaxRateService;
@@ -237,11 +241,11 @@ final class CommerceServiceProvider extends ServiceProvider
                 'shared' => true,
             ],
             TaxCalculator::class => [
-                'class' => FlatRateTaxCalculator::class,
+                'factory' => [self::class, 'makeTaxCalculator'],
                 'shared' => true,
             ],
             ShippingRateProvider::class => [
-                'class' => ConfigShippingRateProvider::class,
+                'factory' => [self::class, 'makeShippingRateProvider'],
                 'shared' => true,
             ],
             OrderNumberGenerator::class => [
@@ -558,7 +562,8 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(DiscountRepository::class),
             $container->get(PricingEngine::class),
             self::tenantResolver($container),
-            $container->get(AddonRepository::class)
+            $container->get(AddonRepository::class),
+            $container->get(ShippingClassRepository::class)
         );
     }
 
@@ -569,6 +574,43 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(ProductRepository::class),
             self::tenantResolver($container)
         );
+    }
+
+    /**
+     * The `ShippingRateProvider::class` default (design spec §4): a thin
+     * delegator that routes Db-vs-config per quote. Not registered as a
+     * standalone service in its own right -- {@see DbShippingRateProvider} and
+     * {@see ConfigShippingRateProvider} are only ever composed here, mirroring
+     * {@see self::makeTenantResolver()}'s "construct the concrete decorator
+     * inline" style rather than adding extra DI surface for internals nothing
+     * else consumes. An app that rebinds `ShippingRateProvider::class`
+     * replaces this whole chain outright (its DI definition wins).
+     */
+    public static function makeShippingRateProvider(ContainerInterface $container): ShippingRateProvider
+    {
+        $db = new DbShippingRateProvider(
+            $container->get(ShippingZoneRepository::class),
+            self::tenantResolver($container)
+        );
+
+        return new DelegatingShippingRateProvider($db, new ConfigShippingRateProvider());
+    }
+
+    /**
+     * The `TaxCalculator::class` default (design spec §4): a thin delegator
+     * that routes Db-vs-flat-rate per quote, mirroring
+     * {@see self::makeShippingRateProvider()}'s "construct the concrete
+     * decorator inline" style. An app that rebinds `TaxCalculator::class`
+     * replaces this whole chain outright (its DI definition wins).
+     */
+    public static function makeTaxCalculator(ContainerInterface $container): TaxCalculator
+    {
+        $db = new DbTaxCalculator(
+            $container->get(TaxRateRepository::class),
+            self::tenantResolver($container)
+        );
+
+        return new DelegatingTaxCalculator($db, new FlatRateTaxCalculator());
     }
 
     public static function makeCheckoutService(ContainerInterface $container): CheckoutService
