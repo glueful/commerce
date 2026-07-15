@@ -26,6 +26,7 @@ final class CreateCommerceCatalogTables implements MigrationInterface
                 $table->integer('rating_sum')->default(0);
                 $table->integer('rating_count')->default(0);
                 $table->integer('catalog_revision')->default(0);
+                $table->string('tax_class', 16)->nullable();
                 $table->timestamp('created_at')->default('CURRENT_TIMESTAMP');
                 $table->timestamp('updated_at')->nullable();
                 $table->timestamp('deleted_at')->nullable();
@@ -50,6 +51,7 @@ final class CreateCommerceCatalogTables implements MigrationInterface
                 $table->string('currency', 3);
                 $table->integer('position')->default(0);
                 $table->string('status', 16)->default('active');
+                $table->string('shipping_class_uuid', 12)->nullable();
                 $table->timestamp('created_at')->default('CURRENT_TIMESTAMP');
                 $table->timestamp('updated_at')->nullable();
 

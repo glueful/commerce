@@ -6,7 +6,9 @@ namespace Glueful\Extensions\Commerce\Catalog;
 
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
+use Glueful\Extensions\Commerce\Shipping\ShippingClassRepository;
 use Glueful\Extensions\Commerce\Support\Money;
+use Glueful\Extensions\Commerce\Support\OpenVocabularySlug;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Glueful\Helpers\Utils;
 use Glueful\Http\Exceptions\Client\NotFoundException;
@@ -56,9 +58,11 @@ final class CatalogService
         private CurrentTenantResolver $tenants,
         private ?StockRepository $stock = null,
         private ?ProductChildrenRepository $children = null,
+        private ?ShippingClassRepository $shippingClasses = null,
     ) {
         $this->stock ??= new StockRepository();
         $this->children ??= new ProductChildrenRepository();
+        $this->shippingClasses ??= new ShippingClassRepository();
     }
 
     /**
@@ -80,6 +84,7 @@ final class CatalogService
 
         $variants = $this->planCreationVariants($context, $tenant, $type, $input['variants'] ?? [], $storeCurrency);
         $slug = $this->requiredString($input, 'slug');
+        $taxClass = $this->normalizeTaxClass($input['tax_class'] ?? null);
 
         if ($this->products->findBySlug($context, $tenant, $slug) !== null) {
             throw ValidationException::forField('slug', 'Slug already in use.');
@@ -97,6 +102,7 @@ final class CatalogService
             'status' => (string) ($input['status'] ?? 'draft'),
             'options' => $input['options'] ?? null,
             'metadata' => $input['metadata'] ?? null,
+            'tax_class' => $taxClass,
         ]);
 
         $created = [];
@@ -113,6 +119,7 @@ final class CatalogService
                 'currency' => $storeCurrency,
                 'position' => $position,
                 'status' => (string) ($variant['status'] ?? 'active'),
+                'shipping_class_uuid' => $variant['shipping_class_uuid'] ?? null,
             ]);
 
             $this->stock->ensureRow($context, $tenant, $variantUuid, $type === 'physical');
@@ -125,7 +132,11 @@ final class CatalogService
             throw new \RuntimeException('Created product could not be reloaded.');
         }
 
-        $product['variants'] = array_values(array_filter($created));
+        $product['variants'] = $this->shippingClasses->attachResolvedSlugs(
+            $context,
+            $tenant,
+            array_values(array_filter($created))
+        );
 
         return $product;
     }
@@ -165,6 +176,7 @@ final class CatalogService
             'currency' => $storeCurrency,
             'position' => count($this->variants->forProduct($context, $tenant, $productUuid)),
             'status' => (string) ($variant['status'] ?? 'active'),
+            'shipping_class_uuid' => $variant['shipping_class_uuid'] ?? null,
         ]);
 
         $this->stock->ensureRow($context, $tenant, $variantUuid, ($product['type'] ?? 'physical') === 'physical');
@@ -174,7 +186,7 @@ final class CatalogService
             throw new \RuntimeException('Created variant could not be reloaded.');
         }
 
-        return $created;
+        return $this->shippingClasses->attachResolvedSlug($context, $tenant, $created);
     }
 
     /**
@@ -234,6 +246,13 @@ final class CatalogService
                 $metadata = $touchesMetadata ? $changes['metadata'] : ($current['metadata'] ?? null);
                 $this->assertExternalMetadata($metadata);
             }
+        }
+
+        // tax_class (spec §5): explicit null CLEARS (stored as null -> "standard"
+        // at the calculator); an omitted key PRESERVES the current value. Only a
+        // non-null value is run through the open-vocabulary normalizer.
+        if (array_key_exists('tax_class', $changes)) {
+            $changes['tax_class'] = $this->normalizeTaxClass($changes['tax_class']);
         }
 
         $this->products->update($context, $tenant, $productUuid, $changes);
@@ -321,7 +340,14 @@ final class CatalogService
         });
     }
 
-    /** @param array<string,mixed> $changes */
+    /**
+     * A `shipping_class_uuid` key present in $changes (spec §6) routes through
+     * the shared-claim protocol below regardless of whether it is a real change
+     * or a no-op reassertion; its ABSENCE preserves the current assignment via
+     * the plain write path unchanged from before this field existed.
+     *
+     * @param array<string,mixed> $changes
+     */
     public function updateVariant(ApplicationContext $context, string $variantUuid, array $changes): void
     {
         $tenant = $this->tenants->tenantUuid($context);
@@ -344,7 +370,84 @@ final class CatalogService
             }
         }
 
-        $this->variants->update($context, $tenant, $variantUuid, $changes);
+        if (!array_key_exists('shipping_class_uuid', $changes)) {
+            $this->variants->update($context, $tenant, $variantUuid, $changes);
+
+            return;
+        }
+
+        $this->updateVariantShippingClass($context, $tenant, $variantUuid, $changes);
+    }
+
+    /**
+     * The §6 shared-claim protocol for variant shipping-class assignment/clear:
+     * one transaction that resolves variant->product, claims the product's
+     * `catalog_revision`, claims the sorted-uuid union of the variant's CURRENT
+     * and PROPOSED shipping class (affected-row-checked revision bumps on
+     * `commerce_shipping_classes`), re-validates the proposed class still exists
+     * in-tenant, then writes. See {@see \Glueful\Extensions\Commerce\Shipping\ShippingClassService}'s
+     * class docblock for the full class-delete-vs-variant-assign race analysis
+     * this claim set serializes against. A `null` proposed value CLEARS the
+     * assignment; updateVariant() only reaches this method when
+     * `shipping_class_uuid` is present in $changes at all -- omission never calls
+     * this path.
+     *
+     * @param array<string,mixed> $changes
+     */
+    private function updateVariantShippingClass(
+        ApplicationContext $context,
+        string $tenant,
+        string $variantUuid,
+        array $changes
+    ): void {
+        $proposed = $changes['shipping_class_uuid'] ?? null;
+        if ($proposed !== null && (!is_string($proposed) || trim($proposed) === '')) {
+            throw ValidationException::forField(
+                'shipping_class_uuid',
+                'shipping_class_uuid must be a non-empty string or null.'
+            );
+        }
+
+        db($context)->transaction(function () use ($context, $tenant, $variantUuid, $changes, $proposed): void {
+            $variant = $this->variants->findByUuid($context, $tenant, $variantUuid);
+            if ($variant === null) {
+                throw new NotFoundException('Resource not found.');
+            }
+            $productUuid = (string) $variant['product_uuid'];
+
+            if (!$this->products->claimCatalogRevision($context, $tenant, $productUuid)) {
+                throw new NotFoundException('Resource not found.');
+            }
+
+            $current = $variant['shipping_class_uuid'] ?? null;
+            $claimSet = array_values(array_unique(array_filter(
+                [$current, $proposed],
+                static fn (mixed $uuid): bool => $uuid !== null
+            )));
+            sort($claimSet);
+
+            foreach ($claimSet as $classUuid) {
+                $claimed = $this->shippingClasses->claimRevision($context, $tenant, (string) $classUuid);
+                if (!$claimed && $classUuid === $proposed) {
+                    throw ValidationException::forField(
+                        'shipping_class_uuid',
+                        'shipping_class_uuid must reference an existing shipping class in this tenant.'
+                    );
+                }
+            }
+
+            // Post-claim re-read: the claim already proved the proposed class
+            // existed in-tenant at claim time, but this mirrors the house
+            // discipline of never deciding on a pre-claim snapshot alone.
+            if ($proposed !== null && $this->shippingClasses->findByUuid($context, $tenant, $proposed) === null) {
+                throw ValidationException::forField(
+                    'shipping_class_uuid',
+                    'shipping_class_uuid must reference an existing shipping class in this tenant.'
+                );
+            }
+
+            $this->variants->update($context, $tenant, $variantUuid, $changes);
+        });
     }
 
     private function storeCurrency(ApplicationContext $context): string
@@ -396,6 +499,16 @@ final class CatalogService
             if ($this->variants->findBySku($context, $tenant, $sku) !== null) {
                 throw ValidationException::forField("variants.{$index}.sku", 'SKU already in use.');
             }
+
+            $classUuid = $variant['shipping_class_uuid'] ?? null;
+            $classFound = $classUuid === null
+                || $this->shippingClasses->findByUuid($context, $tenant, (string) $classUuid) !== null;
+            if (!$classFound) {
+                throw ValidationException::forField(
+                    "variants.{$index}.shipping_class_uuid",
+                    'shipping_class_uuid must reference an existing shipping class in this tenant.'
+                );
+            }
         }
 
         /** @var list<array<string,mixed>> $variants */
@@ -430,6 +543,21 @@ final class CatalogService
         }
 
         return $this->validateVariants($context, $tenant, $raw, $storeCurrency);
+    }
+
+    /**
+     * tax_class (spec §5): null preserves/means "standard"; a non-null value
+     * must match the open-vocabulary rule shared with shipping-class slugs and
+     * tax-rate classes (an unmatched-but-well-formed class is allowed and simply
+     * taxes at 0 -- existence is never enforced here).
+     */
+    private function normalizeTaxClass(mixed $value): ?string
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        return OpenVocabularySlug::normalize((string) $value, 'tax_class');
     }
 
     private function assertValidType(string $type): void

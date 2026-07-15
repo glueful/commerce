@@ -184,6 +184,11 @@ final class DiagnosticsReport
             'commerce_customer_addresses',
             'commerce_downloads',
             'commerce_download_grants',
+            'commerce_shipping_zones',
+            'commerce_shipping_zone_locations',
+            'commerce_shipping_methods',
+            'commerce_shipping_classes',
+            'commerce_tax_rates',
         ];
     }
 
@@ -201,6 +206,8 @@ final class DiagnosticsReport
                 'commerce_attribute_values',
                 'commerce_product_attributes',
                 'commerce_product_children',
+                'commerce_shipping_zone_locations',
+                'commerce_shipping_methods',
             ], true)
         ));
     }

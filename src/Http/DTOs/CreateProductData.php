@@ -30,6 +30,8 @@ final class CreateProductData implements RequestData
         public readonly ?array $options = null,
         #[Rule('array')]
         public readonly ?array $metadata = null,
+        #[Rule('string')]
+        public readonly ?string $tax_class = null,
         #[ArrayOf(ProductVariantData::class)]
         #[Rule('required|array')]
         public readonly array $variants = [],

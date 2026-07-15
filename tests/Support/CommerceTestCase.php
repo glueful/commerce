@@ -27,6 +27,7 @@ abstract class CommerceTestCase extends TestCase
         \Glueful\Extensions\Commerce\Database\Migrations\CreateCommerceRefundTables::class,
         \Glueful\Extensions\Commerce\Database\Migrations\CreateCommerceCatalogBreadthTables::class,
         \Glueful\Extensions\Commerce\Database\Migrations\CreateCommerceCustomerDeliveryTables::class,
+        \Glueful\Extensions\Commerce\Database\Migrations\CreateCommerceShippingTaxTables::class,
     ];
 
     protected function setUp(): void

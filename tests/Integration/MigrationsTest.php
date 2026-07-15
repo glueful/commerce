@@ -40,6 +40,11 @@ final class MigrationsTest extends CommerceTestCase
             'commerce_customer_addresses',
             'commerce_downloads',
             'commerce_download_grants',
+            'commerce_shipping_zones',
+            'commerce_shipping_zone_locations',
+            'commerce_shipping_methods',
+            'commerce_shipping_classes',
+            'commerce_tax_rates',
         ];
 
         $schema = $this->connection->getSchemaBuilder();
@@ -70,6 +75,20 @@ final class MigrationsTest extends CommerceTestCase
         self::assertTrue(
             $schema->hasColumn('commerce_order_lines', 'downloads'),
             'commerce_order_lines missing downloads'
+        );
+    }
+
+    public function testFoldedShippingTaxColumnsExistOnVariantsAndProducts(): void
+    {
+        $schema = $this->connection->getSchemaBuilder();
+
+        self::assertTrue(
+            $schema->hasColumn('commerce_variants', 'shipping_class_uuid'),
+            'commerce_variants missing shipping_class_uuid'
+        );
+        self::assertTrue(
+            $schema->hasColumn('commerce_products', 'tax_class'),
+            'commerce_products missing tax_class'
         );
     }
 

@@ -53,8 +53,11 @@ use Glueful\Extensions\Commerce\Http\Admin\AdminOrderController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminProductController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminRefundController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminReviewController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminShippingClassController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminShippingZoneController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminStockController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminTagController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminTaxRateController;
 use Glueful\Extensions\Commerce\Http\Storefront\AccountAddressController;
 use Glueful\Extensions\Commerce\Http\Storefront\CartController;
 use Glueful\Extensions\Commerce\Http\Storefront\CheckoutController;
@@ -84,10 +87,16 @@ use Glueful\Extensions\Commerce\Payments\ManualPaymentCollector;
 use Glueful\Extensions\Commerce\Payments\OrderPaymentConfirmationHandler;
 use Glueful\Extensions\Commerce\Pricing\PricingEngine;
 use Glueful\Extensions\Commerce\Shipping\ConfigShippingRateProvider;
+use Glueful\Extensions\Commerce\Shipping\ShippingClassRepository;
+use Glueful\Extensions\Commerce\Shipping\ShippingClassService;
+use Glueful\Extensions\Commerce\Shipping\ShippingZoneRepository;
+use Glueful\Extensions\Commerce\Shipping\ShippingZoneService;
 use Glueful\Extensions\Commerce\Tenancy\FailClosedTenantResolver;
 use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
 use Glueful\Extensions\Commerce\Tenancy\TenantAdopter;
 use Glueful\Extensions\Commerce\Tax\FlatRateTaxCalculator;
+use Glueful\Extensions\Commerce\Tax\TaxRateRepository;
+use Glueful\Extensions\Commerce\Tax\TaxRateService;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Glueful\Extensions\Contracts\Tenancy\TenantTableRegistry;
 use Glueful\Extensions\Contracts\Payments\PaymentCollector;
@@ -397,6 +406,42 @@ final class CommerceServiceProvider extends ServiceProvider
                 'factory' => [self::class, 'makeAccountAddressController'],
                 'shared' => true,
             ],
+            ShippingZoneRepository::class => [
+                'class' => ShippingZoneRepository::class,
+                'shared' => true,
+            ],
+            ShippingZoneService::class => [
+                'factory' => [self::class, 'makeShippingZoneService'],
+                'shared' => true,
+            ],
+            AdminShippingZoneController::class => [
+                'factory' => [self::class, 'makeAdminShippingZoneController'],
+                'shared' => true,
+            ],
+            ShippingClassRepository::class => [
+                'class' => ShippingClassRepository::class,
+                'shared' => true,
+            ],
+            ShippingClassService::class => [
+                'factory' => [self::class, 'makeShippingClassService'],
+                'shared' => true,
+            ],
+            AdminShippingClassController::class => [
+                'factory' => [self::class, 'makeAdminShippingClassController'],
+                'shared' => true,
+            ],
+            TaxRateRepository::class => [
+                'class' => TaxRateRepository::class,
+                'shared' => true,
+            ],
+            TaxRateService::class => [
+                'factory' => [self::class, 'makeTaxRateService'],
+                'shared' => true,
+            ],
+            AdminTaxRateController::class => [
+                'factory' => [self::class, 'makeAdminTaxRateController'],
+                'shared' => true,
+            ],
         ];
     }
 
@@ -407,7 +452,8 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(VariantRepository::class),
             self::tenantResolver($container),
             $container->get(StockRepository::class),
-            $container->get(ProductChildrenRepository::class)
+            $container->get(ProductChildrenRepository::class),
+            $container->get(ShippingClassRepository::class)
         );
     }
 
@@ -672,7 +718,8 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(TagRepository::class),
             $container->get(AttributeRepository::class),
             $container->get(ProductChildrenRepository::class),
-            $container->get(AddonRepository::class)
+            $container->get(AddonRepository::class),
+            $container->get(ShippingClassRepository::class)
         );
     }
 
@@ -722,7 +769,8 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(CatalogService::class),
             $container->get(ProductRepository::class),
             $container->get(VariantRepository::class),
-            self::tenantResolver($container)
+            self::tenantResolver($container),
+            $container->get(ShippingClassRepository::class)
         );
     }
 
@@ -858,6 +906,57 @@ final class CommerceServiceProvider extends ServiceProvider
         return new AccountAddressController(
             $container->get(ApplicationContext::class),
             $container->get(AddressBookService::class)
+        );
+    }
+
+    public static function makeShippingZoneService(ContainerInterface $container): ShippingZoneService
+    {
+        return new ShippingZoneService(
+            $container->get(ShippingZoneRepository::class),
+            $container->get(ShippingClassRepository::class),
+            self::tenantResolver($container)
+        );
+    }
+
+    public static function makeAdminShippingZoneController(
+        ContainerInterface $container
+    ): AdminShippingZoneController {
+        return new AdminShippingZoneController(
+            $container->get(ApplicationContext::class),
+            $container->get(ShippingZoneService::class)
+        );
+    }
+
+    public static function makeShippingClassService(ContainerInterface $container): ShippingClassService
+    {
+        return new ShippingClassService(
+            $container->get(ShippingClassRepository::class),
+            self::tenantResolver($container)
+        );
+    }
+
+    public static function makeAdminShippingClassController(
+        ContainerInterface $container
+    ): AdminShippingClassController {
+        return new AdminShippingClassController(
+            $container->get(ApplicationContext::class),
+            $container->get(ShippingClassService::class)
+        );
+    }
+
+    public static function makeTaxRateService(ContainerInterface $container): TaxRateService
+    {
+        return new TaxRateService(
+            $container->get(TaxRateRepository::class),
+            self::tenantResolver($container)
+        );
+    }
+
+    public static function makeAdminTaxRateController(ContainerInterface $container): AdminTaxRateController
+    {
+        return new AdminTaxRateController(
+            $container->get(ApplicationContext::class),
+            $container->get(TaxRateService::class)
         );
     }
 

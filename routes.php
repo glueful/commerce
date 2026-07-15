@@ -20,8 +20,11 @@ use Glueful\Extensions\Commerce\Http\Admin\AdminOrderController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminProductController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminRefundController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminReviewController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminShippingClassController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminShippingZoneController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminStockController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminTagController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminTaxRateController;
 use Glueful\Routing\Router;
 
 /** @var Router $router */
@@ -158,4 +161,30 @@ $router->group(['prefix' => '/commerce/admin', 'middleware' => ['auth']], functi
     $router->post('/reviews/{uuid}/approve', [AdminReviewController::class, 'approve'])->middleware($write);
     $router->post('/reviews/{uuid}/spam', [AdminReviewController::class, 'spam'])->middleware($write);
     $router->delete('/reviews/{uuid}', [AdminReviewController::class, 'destroy'])->middleware($write);
+
+    $router->get('/shipping/zones', [AdminShippingZoneController::class, 'index'])->middleware($read);
+    $router->post('/shipping/zones', [AdminShippingZoneController::class, 'store'])->middleware($write);
+    $router->patch('/shipping/zones/{uuid}', [AdminShippingZoneController::class, 'update'])->middleware($write);
+    $router->delete('/shipping/zones/{uuid}', [AdminShippingZoneController::class, 'destroy'])->middleware($write);
+    $router->put('/shipping/zones/{uuid}/locations', [AdminShippingZoneController::class, 'setLocations'])
+        ->middleware($write);
+    $router->get('/shipping/zones/{uuid}/methods', [AdminShippingZoneController::class, 'indexMethods'])
+        ->middleware($read);
+    $router->post('/shipping/zones/{uuid}/methods', [AdminShippingZoneController::class, 'storeMethod'])
+        ->middleware($write);
+    $router->patch('/shipping/methods/{uuid}', [AdminShippingZoneController::class, 'updateMethod'])
+        ->middleware($write);
+    $router->delete('/shipping/methods/{uuid}', [AdminShippingZoneController::class, 'destroyMethod'])
+        ->middleware($write);
+
+    $router->get('/shipping/classes', [AdminShippingClassController::class, 'index'])->middleware($read);
+    $router->post('/shipping/classes', [AdminShippingClassController::class, 'store'])->middleware($write);
+    $router->patch('/shipping/classes/{uuid}', [AdminShippingClassController::class, 'update'])->middleware($write);
+    $router->delete('/shipping/classes/{uuid}', [AdminShippingClassController::class, 'destroy'])
+        ->middleware($write);
+
+    $router->get('/tax/rates', [AdminTaxRateController::class, 'index'])->middleware($read);
+    $router->post('/tax/rates', [AdminTaxRateController::class, 'store'])->middleware($write);
+    $router->patch('/tax/rates/{uuid}', [AdminTaxRateController::class, 'update'])->middleware($write);
+    $router->delete('/tax/rates/{uuid}', [AdminTaxRateController::class, 'destroy'])->middleware($write);
 });

@@ -23,6 +23,8 @@ final class CreateVariantData implements RequestData
         public readonly string $currency = '',
         #[Rule('string')]
         public readonly ?string $status = null,
+        #[Rule('string')]
+        public readonly ?string $shipping_class_uuid = null,
     ) {
     }
 }

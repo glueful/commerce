@@ -327,6 +327,9 @@ final class CatalogBreadthTenancyTest extends CommerceTestCase
             'commerce_customer_addresses',
             'commerce_downloads',
             'commerce_download_grants',
+            'commerce_shipping_zones',
+            'commerce_shipping_classes',
+            'commerce_tax_rates',
         ], DiagnosticsReport::tenantTables());
 
         // The join/child tables added alongside the six must never be treated as
@@ -337,6 +340,8 @@ final class CatalogBreadthTenancyTest extends CommerceTestCase
             'commerce_attribute_values',
             'commerce_product_attributes',
             'commerce_product_children',
+            'commerce_shipping_zone_locations',
+            'commerce_shipping_methods',
         ] as $joinTable) {
             self::assertNotContains($joinTable, DiagnosticsReport::tenantTables());
         }

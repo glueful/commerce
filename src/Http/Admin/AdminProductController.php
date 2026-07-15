@@ -14,6 +14,7 @@ use Glueful\Extensions\Commerce\Http\DTOs\ProductVariantData;
 use Glueful\Extensions\Commerce\Http\DTOs\SetProductChildrenData;
 use Glueful\Extensions\Commerce\Http\DTOs\UpdateProductData;
 use Glueful\Extensions\Commerce\Http\DTOs\UpdateVariantData;
+use Glueful\Extensions\Commerce\Shipping\ShippingClassRepository;
 use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Glueful\Http\Exceptions\Client\NotFoundException;
@@ -34,6 +35,7 @@ final class AdminProductController
         private ?ProductRepository $products = null,
         private ?VariantRepository $variants = null,
         private ?CurrentTenantResolver $tenants = null,
+        private ?ShippingClassRepository $shippingClasses = null,
     ) {
         $this->catalog ??= app($context, CatalogService::class);
         $this->products ??= app($context, ProductRepository::class);
@@ -41,6 +43,7 @@ final class AdminProductController
         $this->tenants ??= container($context)->has(CurrentTenantResolver::class)
             ? container($context)->get(CurrentTenantResolver::class)
             : new SentinelTenantResolver();
+        $this->shippingClasses ??= new ShippingClassRepository();
     }
 
     #[ApiOperation(summary: 'List products', tags: ['Commerce Admin'])]
@@ -123,6 +126,7 @@ final class AdminProductController
             if ($variant === null) {
                 throw new NotFoundException('Resource not found.');
             }
+            $variant = $this->shippingClasses->attachResolvedSlug($this->context, $tenant, $variant);
 
             return Response::success($variant, 'Variant updated');
         } catch (ValidationException $e) {
@@ -153,7 +157,11 @@ final class AdminProductController
         if ($product === null) {
             throw new NotFoundException('Resource not found.');
         }
-        $product['variants'] = $this->variants->forProduct($this->context, $tenant, $uuid);
+        $product['variants'] = $this->shippingClasses->attachResolvedSlugs(
+            $this->context,
+            $tenant,
+            $this->variants->forProduct($this->context, $tenant, $uuid)
+        );
 
         return $product;
     }
@@ -169,6 +177,7 @@ final class AdminProductController
             'status' => $input->status,
             'options' => $input->options,
             'metadata' => $input->metadata,
+            'tax_class' => $input->tax_class,
             'variants' => array_map(
                 fn (ProductVariantData $variant): array => $this->productVariantPayload($variant),
                 $input->variants
@@ -186,6 +195,7 @@ final class AdminProductController
             'compare_at_price' => $input->compare_at_price,
             'currency' => $input->currency,
             'status' => $input->status,
+            'shipping_class_uuid' => $input->shipping_class_uuid,
         ], static fn (mixed $value): bool => $value !== null);
     }
 
@@ -199,6 +209,7 @@ final class AdminProductController
             'compare_at_price' => $input->compare_at_price,
             'currency' => $input->currency,
             'status' => $input->status,
+            'shipping_class_uuid' => $input->shipping_class_uuid,
         ], static fn (mixed $value): bool => $value !== null);
     }
 }

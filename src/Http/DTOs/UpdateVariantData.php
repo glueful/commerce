@@ -7,6 +7,15 @@ namespace Glueful\Extensions\Commerce\Http\DTOs;
 use Glueful\Validation\Attributes\Rule;
 use Glueful\Validation\Contracts\RequestData;
 
+/**
+ * Documentation-only schema for `shipping_class_uuid` (see
+ * {@see UpdateCategoryData}): the controller reads the raw request body
+ * directly, so an explicit `null` clears the variant's shipping-class assignment
+ * while an omitted key preserves it -- a distinction this typed DTO cannot
+ * express, only the raw-body path
+ * {@see \Glueful\Extensions\Commerce\Catalog\CatalogService::updateVariant()}
+ * actually implements.
+ */
 final class UpdateVariantData implements RequestData
 {
     /** @param array<string,mixed>|null $option_values */
@@ -23,6 +32,8 @@ final class UpdateVariantData implements RequestData
         public readonly ?string $currency = null,
         #[Rule('string')]
         public readonly ?string $status = null,
+        #[Rule('string')]
+        public readonly ?string $shipping_class_uuid = null,
     ) {
     }
 }

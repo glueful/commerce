@@ -14,6 +14,7 @@ use Glueful\Extensions\Commerce\Catalog\ProductRepository;
 use Glueful\Extensions\Commerce\Catalog\TagRepository;
 use Glueful\Extensions\Commerce\Catalog\VariantRepository;
 use Glueful\Extensions\Commerce\Http\DTOs\ProductListQuery;
+use Glueful\Extensions\Commerce\Shipping\ShippingClassRepository;
 use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Glueful\Http\Exceptions\Client\NotFoundException;
@@ -35,6 +36,7 @@ final class ProductController
         private ?AttributeRepository $attributes = null,
         private ?ProductChildrenRepository $children = null,
         private ?AddonRepository $addons = null,
+        private ?ShippingClassRepository $shippingClasses = null,
     ) {
         $this->products ??= app($context, ProductRepository::class);
         $this->variants ??= app($context, VariantRepository::class);
@@ -47,6 +49,7 @@ final class ProductController
         $this->attributes ??= app($context, AttributeRepository::class);
         $this->children ??= app($context, ProductChildrenRepository::class);
         $this->addons ??= app($context, AddonRepository::class);
+        $this->shippingClasses ??= new ShippingClassRepository();
     }
 
     #[ApiOperation(summary: 'List active products', tags: ['Commerce Storefront'])]
@@ -58,17 +61,26 @@ final class ProductController
         $tenant = $this->tenants->tenantUuid($this->context);
         $result = $this->products->listActive($this->context, $tenant, $page, $perPage);
 
-        // Batched per-page: one variants-for-products query and one covers-for-products
-        // query instead of one of each per item (avoids an N+1 per page of results).
+        // Batched per-page: one variants-for-products query, one covers-for-products
+        // query, and one shipping-class slug lookup across every variant on the page
+        // -- instead of one of each per item (avoids an N+1 per page of results).
         $productUuids = array_map(static fn (array $product): string => (string) $product['uuid'], $result['items']);
         $variantsByProduct = $this->variants->forProducts($this->context, $tenant, $productUuids);
         $covers = $this->media->coversForProducts($this->context, $tenant, $productUuids);
+        $classSlugsByUuid = $this->shippingClasses->slugsByUuids(
+            $this->context,
+            $tenant,
+            $this->distinctShippingClassUuids($variantsByProduct)
+        );
 
         return Response::paginated(
             array_map(
-                function (array $product) use ($variantsByProduct, $covers): array {
+                function (array $product) use ($variantsByProduct, $covers, $classSlugsByUuid): array {
                     $uuid = (string) $product['uuid'];
-                    $product['variants'] = $variantsByProduct[$uuid] ?? [];
+                    $product['variants'] = array_map(
+                        fn (array $variant): array => $this->withShippingClassSlug($variant, $classSlugsByUuid),
+                        $variantsByProduct[$uuid] ?? []
+                    );
                     $cover = $covers[$uuid] ?? null;
                     $product['cover_url'] = $cover === null ? null : '/blobs/' . $cover['blob_uuid'];
 
@@ -115,9 +127,41 @@ final class ProductController
     /** @param array<string,mixed> $product @return array<string,mixed> */
     private function withVariants(string $tenant, array $product): array
     {
-        $product['variants'] = $this->variants->forProduct($this->context, $tenant, (string) $product['uuid']);
+        $variants = $this->variants->forProduct($this->context, $tenant, (string) $product['uuid']);
+        $product['variants'] = $this->shippingClasses->attachResolvedSlugs($this->context, $tenant, $variants);
 
         return $product;
+    }
+
+    /**
+     * @param array<string,list<array<string,mixed>>> $variantsByProduct
+     * @return list<string>
+     */
+    private function distinctShippingClassUuids(array $variantsByProduct): array
+    {
+        $uuids = [];
+        foreach ($variantsByProduct as $variants) {
+            foreach ($variants as $variant) {
+                if (($variant['shipping_class_uuid'] ?? null) !== null) {
+                    $uuids[] = (string) $variant['shipping_class_uuid'];
+                }
+            }
+        }
+
+        return array_values(array_unique($uuids));
+    }
+
+    /**
+     * @param array<string,mixed> $variant
+     * @param array<string,string> $slugsByUuid
+     * @return array<string,mixed>
+     */
+    private function withShippingClassSlug(array $variant, array $slugsByUuid): array
+    {
+        $classUuid = $variant['shipping_class_uuid'] ?? null;
+        $variant['shipping_class'] = $classUuid !== null ? ($slugsByUuid[$classUuid] ?? null) : null;
+
+        return $variant;
     }
 
     /**
