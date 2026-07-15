@@ -20,6 +20,10 @@ final class CheckoutPlaceData implements RequestData
         public readonly array $addresses = [],
         #[Rule('string')]
         public readonly ?string $shipping_method = null,
+        #[Rule('string')]
+        public readonly ?string $shipping_address_uuid = null,
+        #[Rule('string')]
+        public readonly ?string $billing_address_uuid = null,
     ) {
     }
 }

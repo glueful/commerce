@@ -159,7 +159,7 @@ final class OrderMailListener
      * `cover_url`/`url` fields the storefront controllers return in JSON responses
      * to a caller that already knows its own API origin. `routes.php` registers this
      * exact `/commerce/downloads/{token}` path with no framework-injected API prefix
-     * (plain `$router->group(['prefix' => '/commerce'], ...)`, never `versionGroup()`),
+     * (plain `$router->group(['prefix' => '/commerce'], ...)`, never `Router::apiVersion()`),
      * so prefixing with `app.urls.base` — the framework's own bare-origin config key
      * (see `api_url()`'s sibling doc comment in config/app.php) — reproduces the live
      * route exactly, without needing a live HTTP `Request` this listener never has.

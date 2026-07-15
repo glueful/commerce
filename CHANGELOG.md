@@ -38,3 +38,8 @@
 - Added order-authenticated digital-download listing and atomic signed-URL minting, plus a public email deep-link redemption route, sharing one guarded mint primitive with full-refund and expiry/revocation handling.
 - Added `CommerceDownloadBlobPolicy`, a blob-access policy contributor enforcing grant/definition-aware VIEW/INFO/DELETE/SIGN rules through the framework's composite blob-policy registry.
 - Added digital-download deep links to the `order_paid` transactional email on first grant issuance, with issuance failures isolated from mail delivery so the plain email always still sends.
+- Added order-derived admin customer aggregation (`GET /commerce/admin/customers` and `/{key}`, grouped by user uuid or normalized email) with soft username enrichment via `UserProviderInterface`.
+- Added `commerce:customers:link-guests`, an operator CLI that links guest orders to a resolvable user account by exact-match normalized email.
+- Added a storefront authenticated address book (`GET/POST /commerce/account/addresses`, `PATCH/DELETE /commerce/account/addresses/{uuid}`) with parent-claim serialization and default shipping/billing swap-in-transaction.
+- Added optional `shipping_address_uuid`/`billing_address_uuid` checkout integration that snapshots a caller-owned saved address into the order exactly like an inline address.
+- Added the address book to the admin customer detail endpoint when keyed by user uuid.

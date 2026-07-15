@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Glueful\Extensions\Commerce\Http\Storefront\AccountAddressController;
 use Glueful\Extensions\Commerce\Http\Storefront\CartController;
 use Glueful\Extensions\Commerce\Http\Storefront\CheckoutController;
 use Glueful\Extensions\Commerce\Http\Storefront\DownloadLinkController;
@@ -10,8 +11,10 @@ use Glueful\Extensions\Commerce\Http\Storefront\ProductController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminAddonController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminAttributeController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminCategoryController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminCustomerController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminDiscountController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminDownloadController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminGrantController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminMediaController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminOrderController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminProductController;
@@ -68,6 +71,13 @@ $router->group(['prefix' => '/commerce'], function (Router $router) use ($rate):
     $router->get('/downloads/{token}', [DownloadLinkController::class, 'show'])->middleware($rate('downloads', 60));
 });
 
+$router->group(['prefix' => '/commerce/account', 'middleware' => ['auth']], function (Router $router): void {
+    $router->get('/addresses', [AccountAddressController::class, 'index']);
+    $router->post('/addresses', [AccountAddressController::class, 'store']);
+    $router->patch('/addresses/{uuid}', [AccountAddressController::class, 'update']);
+    $router->delete('/addresses/{uuid}', [AccountAddressController::class, 'destroy']);
+});
+
 $router->group(['prefix' => '/commerce/admin', 'middleware' => ['auth']], function (Router $router): void {
     $read = 'require_scope:commerce:read';
     $write = 'require_scope:commerce:write';
@@ -84,6 +94,15 @@ $router->group(['prefix' => '/commerce/admin', 'middleware' => ['auth']], functi
     $router->post('/variants/{uuid}/downloads', [AdminDownloadController::class, 'attach'])->middleware($write);
     $router->patch('/downloads/{uuid}', [AdminDownloadController::class, 'update'])->middleware($write);
     $router->delete('/downloads/{uuid}', [AdminDownloadController::class, 'detach'])->middleware($write);
+
+    $router->post('/grants/{uuid}/revoke', [AdminGrantController::class, 'revoke'])->middleware($write);
+    $router->put('/grants/{uuid}/refund-access-override', [AdminGrantController::class, 'setOverride'])
+        ->middleware($write);
+    $router->delete('/grants/{uuid}/refund-access-override', [AdminGrantController::class, 'clearOverride'])
+        ->middleware($write);
+
+    $router->get('/customers', [AdminCustomerController::class, 'index'])->middleware($read);
+    $router->get('/customers/{key}', [AdminCustomerController::class, 'show'])->middleware($read);
 
     $router->post('/products/{uuid}/media', [AdminMediaController::class, 'attach'])->middleware($write);
     $router->put('/products/{uuid}/media/order', [AdminMediaController::class, 'reorder'])->middleware($write);

@@ -61,7 +61,13 @@ final class OrderRepository
     }
 
     /**
-     * @param array<string,mixed> $filters
+     * @param array<string,mixed> $filters 'status'/'user_uuid' (exact match), or
+     *     'email_normalized' (design spec §7 customer-detail email-keyed query —
+     *     the pre-existing 'user_uuid' exact-match filter alone cannot serve a
+     *     guest customer's recent-orders listing): every guest order whose
+     *     `LOWER(TRIM(email))` matches the already-normalized value, scoped to
+     *     `user_uuid IS NULL` so a linked order never double-counts under both
+     *     its owner's user-keyed listing and its old guest email.
      * @return array{items: list<array<string,mixed>>, total: int}
      */
     public function paginatedFor(
@@ -79,6 +85,12 @@ final class OrderRepository
                 $count->where($field, '=', (string) $filters[$field]);
                 $rows->where($field, '=', (string) $filters[$field]);
             }
+        }
+
+        if (isset($filters['email_normalized'])) {
+            $normalized = (string) $filters['email_normalized'];
+            $count->whereNull('user_uuid')->whereRaw('LOWER(TRIM(email)) = ?', [$normalized]);
+            $rows->whereNull('user_uuid')->whereRaw('LOWER(TRIM(email)) = ?', [$normalized]);
         }
 
         return [
@@ -117,6 +129,29 @@ SQL,
                 $tenant,
                 $uuid,
             ]
+        );
+
+        return $affected === 1;
+    }
+
+    /**
+     * Guarded stamp of `user_uuid` onto a guest order (design spec §7, guest
+     * linking, `commerce:customers:link-guests`): only when the order is
+     * CURRENTLY unlinked, so a concurrent link/checkout race can't silently
+     * overwrite an existing owner. Returns false for an unknown/cross-tenant
+     * order, an order that's already linked, or a race lost to a concurrent
+     * linker — the CLI caller treats any of those as "nothing changed" and
+     * reports it, never a hard failure.
+     */
+    public function linkGuestToUser(ApplicationContext $context, string $tenant, string $uuid, string $userUuid): bool
+    {
+        $affected = db($context)->table('commerce_orders')->executeModification(
+            <<<'SQL'
+UPDATE commerce_orders
+SET user_uuid = ?, updated_at = ?
+WHERE tenant_uuid = ? AND uuid = ? AND user_uuid IS NULL
+SQL,
+            [$userUuid, db($context)->getDriver()->formatDateTime(), $tenant, $uuid]
         );
 
         return $affected === 1;

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Glueful\Extensions\Commerce;
 
+use Glueful\Auth\Contracts\UserProviderInterface;
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Database\Migrations\MigrationPriority;
 use Glueful\Events\EventService;
@@ -30,6 +31,9 @@ use Glueful\Extensions\Commerce\Cart\CartRepository;
 use Glueful\Extensions\Commerce\Cart\CartService;
 use Glueful\Extensions\Commerce\Contracts\ShippingRateProvider;
 use Glueful\Extensions\Commerce\Contracts\TaxCalculator;
+use Glueful\Extensions\Commerce\Customers\AddressBookRepository;
+use Glueful\Extensions\Commerce\Customers\AddressBookService;
+use Glueful\Extensions\Commerce\Customers\CustomerAggregationRepository;
 use Glueful\Extensions\Commerce\Discounts\DiscountRepository;
 use Glueful\Extensions\Commerce\Discounts\DiscountService;
 use Glueful\Extensions\Commerce\Events\OrderFulfilled;
@@ -40,8 +44,10 @@ use Glueful\Extensions\Commerce\Events\RefundCompleted;
 use Glueful\Extensions\Commerce\Http\Admin\AdminAddonController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminAttributeController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminCategoryController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminCustomerController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminDiscountController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminDownloadController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminGrantController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminMediaController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminOrderController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminProductController;
@@ -49,6 +55,7 @@ use Glueful\Extensions\Commerce\Http\Admin\AdminRefundController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminReviewController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminStockController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminTagController;
+use Glueful\Extensions\Commerce\Http\Storefront\AccountAddressController;
 use Glueful\Extensions\Commerce\Http\Storefront\CartController;
 use Glueful\Extensions\Commerce\Http\Storefront\CheckoutController;
 use Glueful\Extensions\Commerce\Http\Storefront\DownloadLinkController;
@@ -366,6 +373,30 @@ final class CommerceServiceProvider extends ServiceProvider
                 'factory' => [self::class, 'makeAdminReviewController'],
                 'shared' => true,
             ],
+            AdminGrantController::class => [
+                'factory' => [self::class, 'makeAdminGrantController'],
+                'shared' => true,
+            ],
+            CustomerAggregationRepository::class => [
+                'class' => CustomerAggregationRepository::class,
+                'shared' => true,
+            ],
+            AdminCustomerController::class => [
+                'factory' => [self::class, 'makeAdminCustomerController'],
+                'shared' => true,
+            ],
+            AddressBookRepository::class => [
+                'class' => AddressBookRepository::class,
+                'shared' => true,
+            ],
+            AddressBookService::class => [
+                'factory' => [self::class, 'makeAddressBookService'],
+                'shared' => true,
+            ],
+            AccountAddressController::class => [
+                'factory' => [self::class, 'makeAccountAddressController'],
+                'shared' => true,
+            ],
         ];
     }
 
@@ -658,7 +689,9 @@ final class CommerceServiceProvider extends ServiceProvider
         return new CheckoutController(
             $container->get(ApplicationContext::class),
             $container->get(CartService::class),
-            $container->get(CheckoutService::class)
+            $container->get(CheckoutService::class),
+            $container->get(AddressBookRepository::class),
+            self::tenantResolver($container)
         );
     }
 
@@ -788,6 +821,62 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(ApplicationContext::class),
             $container->get(ReviewService::class)
         );
+    }
+
+    public static function makeAdminGrantController(ContainerInterface $container): AdminGrantController
+    {
+        return new AdminGrantController(
+            $container->get(ApplicationContext::class),
+            $container->get(DownloadGrantRepository::class),
+            $container->get(OrderRepository::class),
+            self::tenantResolver($container)
+        );
+    }
+
+    public static function makeAdminCustomerController(ContainerInterface $container): AdminCustomerController
+    {
+        return new AdminCustomerController(
+            $container->get(ApplicationContext::class),
+            $container->get(CustomerAggregationRepository::class),
+            $container->get(OrderRepository::class),
+            self::tenantResolver($container),
+            self::makeUserProvider($container),
+            $container->get(AddressBookRepository::class)
+        );
+    }
+
+    public static function makeAddressBookService(ContainerInterface $container): AddressBookService
+    {
+        return new AddressBookService(
+            $container->get(AddressBookRepository::class),
+            self::tenantResolver($container)
+        );
+    }
+
+    public static function makeAccountAddressController(ContainerInterface $container): AccountAddressController
+    {
+        return new AccountAddressController(
+            $container->get(ApplicationContext::class),
+            $container->get(AddressBookService::class)
+        );
+    }
+
+    /**
+     * Soft-resolved, same pattern as {@see self::makeBlobRepository()}: bound
+     * unconditionally in production (core's `NullUserProvider` fallback), but
+     * NOT bound at all in this test suite's lightweight containers unless a
+     * test explicitly injects one -- both cases must degrade to "no
+     * enrichment", never a crash.
+     */
+    private static function makeUserProvider(ContainerInterface $container): ?UserProviderInterface
+    {
+        if (!$container->has(UserProviderInterface::class)) {
+            return null;
+        }
+
+        $resolved = $container->get(UserProviderInterface::class);
+
+        return $resolved instanceof UserProviderInterface ? $resolved : null;
     }
 
     public static function makeOrderMailListener(ContainerInterface $container): OrderMailListener

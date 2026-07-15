@@ -134,6 +134,72 @@ SQL,
     }
 
     /**
+     * Guarded revoke (design spec §3/§8, operator kill-switch): sets
+     * `revoked_at` using database time, but ONLY when the grant isn't already
+     * revoked — the house pattern this codebase uses everywhere else for a
+     * one-shot state transition (e.g.
+     * {@see \Glueful\Extensions\Commerce\Catalog\ReviewService}'s guarded
+     * `claimTransition()`): a repeat call against an already-revoked grant
+     * affects zero rows, and the caller ({@see \Glueful\Extensions\Commerce\Http\Admin\AdminGrantController})
+     * classifies that as a 409, never a silent/idempotent 200.
+     */
+    public function revoke(ApplicationContext $context, string $tenant, string $uuid): bool
+    {
+        $utcNow = UtcNowSql::expression(db($context)->getDriverName());
+
+        $affected = db($context)->table('commerce_download_grants')->executeModification(
+            <<<SQL
+UPDATE commerce_download_grants
+SET revoked_at = {$utcNow}
+WHERE tenant_uuid = ? AND uuid = ? AND revoked_at IS NULL
+SQL,
+            [$tenant, $uuid]
+        );
+
+        return $affected === 1;
+    }
+
+    /**
+     * Guarded refund-access override SET (design spec §3/§8: the audited
+     * operator exception restoring access after a full refund) — only when
+     * not already set. Same guarded-claim/409-on-repeat house pattern as
+     * {@see self::revoke()}.
+     */
+    public function setOverride(ApplicationContext $context, string $tenant, string $uuid, ?string $actorUuid): bool
+    {
+        $utcNow = UtcNowSql::expression(db($context)->getDriverName());
+
+        $affected = db($context)->table('commerce_download_grants')->executeModification(
+            <<<SQL
+UPDATE commerce_download_grants
+SET refund_access_override_at = {$utcNow}, refund_access_override_by = ?
+WHERE tenant_uuid = ? AND uuid = ? AND refund_access_override_at IS NULL
+SQL,
+            [$actorUuid, $tenant, $uuid]
+        );
+
+        return $affected === 1;
+    }
+
+    /**
+     * Guarded refund-access override CLEAR — only when currently set. Same
+     * guarded-claim/409-on-repeat house pattern as {@see self::revoke()}.
+     */
+    public function clearOverride(ApplicationContext $context, string $tenant, string $uuid): bool
+    {
+        $affected = db($context)->table('commerce_download_grants')->executeModification(
+            <<<'SQL'
+UPDATE commerce_download_grants
+SET refund_access_override_at = NULL, refund_access_override_by = NULL
+WHERE tenant_uuid = ? AND uuid = ? AND refund_access_override_at IS NOT NULL
+SQL,
+            [$tenant, $uuid]
+        );
+
+        return $affected === 1;
+    }
+
+    /**
      * Read-only classification for a mint that affected zero rows (design spec §4.1):
      * distinguishes revoked/expired/exhausted so the caller can answer a coded 410.
      * "Blocked by full refund" is never returned here -- the caller's PHP-side gate
