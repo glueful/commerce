@@ -180,22 +180,31 @@ SQL,
     /**
      * Tenant-constrained order line read: joins through `commerce_orders` since
      * `commerce_order_lines` carries no `tenant_uuid` column of its own — no bare
-     * child-table lookup. Used by the invoice-data endpoint.
+     * child-table lookup. This is the ONE place order-line `addons` json is
+     * decoded (design spec §4) — every caller (invoice-data, storefront/admin
+     * order projections) gets already-decoded `addons` arrays.
      *
      * @return list<array<string,mixed>>
      */
     public function linesForOrder(ApplicationContext $context, string $tenant, string $orderUuid): array
     {
-        return db($context)->table('commerce_order_lines')
+        $rows = db($context)->table('commerce_order_lines')
             ->join('commerce_orders', 'commerce_order_lines.order_uuid', '=', 'commerce_orders.uuid')
             ->select(['commerce_order_lines.*'])
             ->where('commerce_orders.tenant_uuid', '=', $tenant)
             ->where('commerce_order_lines.order_uuid', '=', $orderUuid)
             ->orderBy('commerce_order_lines.id', 'ASC')
             ->get();
+
+        return array_map(fn (array $row): array => $this->decodeLineJson($row), $rows);
     }
 
     /**
+     * Add-ons: the priced line's snapshot (already-persisted, cart-line-verbatim —
+     * `CartService::pricedLines()` reads it from the cart line, never re-resolving
+     * definitions) is copied AS-IS into `commerce_order_lines.addons`. This is the
+     * explicit add-on persistence boundary: nothing downstream rebuilds it.
+     *
      * @param array<string,mixed> $order
      * @param array<string,mixed> $line
      * @return array<string,mixed>
@@ -204,6 +213,7 @@ SQL,
     {
         $quantity = (int) $line['quantity'];
         $unitPrice = (int) $line['unit_price'];
+        $addons = is_array($line['addons'] ?? null) ? $line['addons'] : [];
 
         return [
             'uuid' => Utils::generateNanoID(),
@@ -215,6 +225,7 @@ SQL,
             'unit_price' => $unitPrice,
             'quantity' => $quantity,
             'line_total' => $unitPrice * $quantity,
+            'addons' => $addons === [] ? null : json_encode($addons, JSON_THROW_ON_ERROR),
         ];
     }
 
@@ -258,6 +269,22 @@ SQL,
         if (isset($row['payload']) && is_string($row['payload']) && $row['payload'] !== '') {
             $decoded = json_decode($row['payload'], true);
             $row['payload'] = is_array($decoded) ? $decoded : null;
+        }
+
+        return $row;
+    }
+
+    /**
+     * @param array<string,mixed> $row
+     * @return array<string,mixed>
+     */
+    private function decodeLineJson(array $row): array
+    {
+        if (isset($row['addons']) && is_string($row['addons']) && $row['addons'] !== '') {
+            $decoded = json_decode($row['addons'], true);
+            $row['addons'] = is_array($decoded) ? $decoded : [];
+        } else {
+            $row['addons'] = [];
         }
 
         return $row;

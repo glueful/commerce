@@ -6,6 +6,7 @@ namespace Glueful\Extensions\Commerce\Http\Admin;
 
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Events\EventService;
+use Glueful\Extensions\Commerce\Cart\AddonSnapshot;
 use Glueful\Extensions\Commerce\Events\OrderFulfilled;
 use Glueful\Extensions\Commerce\Events\OrderNoteAdded;
 use Glueful\Extensions\Commerce\Http\DTOs\CreateOrderNoteData;
@@ -78,12 +79,10 @@ final class AdminOrderController
     #[ApiResponse(404, description: 'Order not found')]
     public function show(Request $request, string $uuid): Response
     {
+        $tenant = $this->tenants->tenantUuid($this->context);
         $order = $this->order($uuid);
-        $order['events'] = $this->orders->eventsForOrder(
-            $this->context,
-            $this->tenants->tenantUuid($this->context),
-            $uuid
-        );
+        $order['events'] = $this->orders->eventsForOrder($this->context, $tenant, $uuid);
+        $order['lines'] = $this->linesProjection($tenant, $uuid);
 
         return Response::success($order, 'Order retrieved');
     }
@@ -201,6 +200,25 @@ final class AdminOrderController
             InvoiceData::build($this->context, $order, $lines, $refunds, $seller),
             'Invoice data retrieved'
         );
+    }
+
+    /**
+     * Order lines with a SANITIZED `addons` echo per line (design spec §4) --
+     * `{name, field_type?, choice_label?, value?, price_delta}` only, never
+     * `addon_uuid`, `choice_key`, choices arrays, status, or any other
+     * addon-definition internal. Admin order detail is otherwise the trusted
+     * full-visibility surface (see events, above), but addon internals carry no
+     * operational value here and stay whitelisted just like every other surface.
+     *
+     * @return list<array<string,mixed>>
+     */
+    private function linesProjection(string $tenant, string $orderUuid): array
+    {
+        return array_map(static function (array $line): array {
+            $line['addons'] = AddonSnapshot::sanitize(is_array($line['addons'] ?? null) ? $line['addons'] : []);
+
+            return $line;
+        }, $this->orders->linesForOrder($this->context, $tenant, $orderUuid));
     }
 
     private function releaseStock(string $tenant, string $orderUuid): void

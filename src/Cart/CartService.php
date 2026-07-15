@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Commerce\Cart;
 
 use Glueful\Bootstrap\ApplicationContext;
+use Glueful\Extensions\Commerce\Catalog\AddonRepository;
 use Glueful\Extensions\Commerce\Catalog\ProductRepository;
 use Glueful\Extensions\Commerce\Catalog\VariantRepository;
 use Glueful\Extensions\Commerce\Discounts\DiscountRepository;
@@ -16,6 +17,18 @@ use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Glueful\Helpers\Utils;
 use Glueful\Validation\ValidationException;
 
+/**
+ * Add-ons (design spec §4): every cart line carries a canonical, immutable
+ * {@see AddonSnapshot} plus its `addons_hash`. `addLine()` builds a fresh snapshot
+ * from the product's ACTIVE addon definitions and the variant's current price;
+ * `pricedLines()` NEVER re-resolves definitions -- it reads only the already-
+ * PERSISTED snapshot on each line, so a later definition edit can never change an
+ * existing line's price. Line identity (find-existing / guest→user merge) is
+ * cart + variant + hash: two lines for the same variant with different add-on
+ * selections are genuinely different lines, and stock checks aggregate quantity
+ * for a variant across every one of its hashes. The legacy no-addons path hashes
+ * to `''` and behaves exactly as it did before add-ons existed.
+ */
 final class CartService
 {
     public function __construct(
@@ -26,7 +39,9 @@ final class CartService
         private DiscountRepository $discounts,
         private PricingEngine $pricing,
         private CurrentTenantResolver $tenants,
+        private ?AddonRepository $addons = null,
     ) {
+        $this->addons ??= new AddonRepository();
     }
 
     /** @return array{cart: array<string,mixed>, token: string} */
@@ -65,9 +80,18 @@ final class CartService
         );
     }
 
-    /** @param array<string,mixed> $cart @return array<string,mixed> */
-    public function addLine(ApplicationContext $context, array $cart, string $variantUuid, int $quantity): array
-    {
+    /**
+     * @param array<string,mixed> $cart
+     * @param list<array{addon_uuid:string,choice_key?:string,value?:mixed}> $addons
+     * @return array<string,mixed>
+     */
+    public function addLine(
+        ApplicationContext $context,
+        array $cart,
+        string $variantUuid,
+        int $quantity,
+        array $addons = []
+    ): array {
         if ($quantity <= 0) {
             throw ValidationException::forField('quantity', 'Quantity must be greater than zero.');
         }
@@ -77,12 +101,25 @@ final class CartService
             $context,
             $tenant,
             $variantUuid,
-            $this->lineQuantity($context, $cart, $variantUuid) + $quantity
+            $this->carts->totalQuantityForVariant($context, (string) $cart['uuid'], $variantUuid) + $quantity
         );
 
-        $line = $this->carts->findLineByVariant($context, (string) $cart['uuid'], $variantUuid);
+        $variant = $this->variants->findByUuid($context, $tenant, $variantUuid);
+        if ($variant === null) {
+            throw ValidationException::forField('variant_uuid', 'Variant not found.');
+        }
+
+        ['snapshot' => $snapshot, 'hash' => $hash] = $this->buildAddonSnapshot(
+            $context,
+            $tenant,
+            (string) $variant['product_uuid'],
+            (int) $variant['price'],
+            $addons
+        );
+
+        $line = $this->carts->findLineByVariantAndHash($context, (string) $cart['uuid'], $variantUuid, $hash);
         if ($line === null) {
-            $this->carts->insertLine($context, (string) $cart['uuid'], $variantUuid, $quantity);
+            $this->carts->insertLine($context, (string) $cart['uuid'], $variantUuid, $quantity, $snapshot, $hash);
         } else {
             $this->carts->setLineQuantity($context, (string) $line['uuid'], (int) $line['quantity'] + $quantity);
         }
@@ -180,7 +217,19 @@ final class CartService
         ];
     }
 
-    /** @param array<string,mixed> $cart @return list<array<string,mixed>> */
+    /**
+     * unit_price = variant price + Σ(price_delta from the PERSISTED snapshot).
+     * NEVER re-resolves addon definitions -- a definition edited after a line was
+     * added does not change that line's price; only a NEW line (new hash) picks up
+     * the edit. Fails closed (throws) if a persisted snapshot computes a negative
+     * unit price -- this should be unreachable in practice (build() already
+     * enforces the invariant before a snapshot is ever persisted), so surfacing it
+     * loudly here is a deliberate defensive backstop against a corrupted row
+     * rather than something callers are expected to catch routinely.
+     *
+     * @param array<string,mixed> $cart
+     * @return list<array<string,mixed>>
+     */
     public function pricedLines(ApplicationContext $context, array $cart): array
     {
         $tenant = $this->tenants->tenantUuid($context);
@@ -195,28 +244,55 @@ final class CartService
                 continue;
             }
 
+            $snapshot = is_array($line['addons'] ?? null) ? $line['addons'] : [];
+            $unitPrice = (int) $variant['price'] + AddonSnapshot::delta($snapshot);
+            if ($unitPrice < 0) {
+                throw new AddonValidationException(
+                    "Persisted add-on snapshot for cart line '" . (string) $line['uuid']
+                    . "' computes a negative unit price."
+                );
+            }
+
             $priced[] = [
                 'product_uuid' => (string) $product['uuid'],
                 'variant_uuid' => (string) $variant['uuid'],
-                'unit_price' => (int) $variant['price'],
+                'unit_price' => $unitPrice,
                 'currency' => (string) $variant['currency'],
                 'quantity' => (int) $line['quantity'],
                 'sku' => (string) $variant['sku'],
                 'product_name' => (string) $product['name'],
                 'option_values' => $variant['option_values'] ?? [],
                 'type' => (string) ($product['type'] ?? 'physical'),
+                'addons' => $snapshot,
             ];
         }
 
         return $priced;
     }
 
-    /** @param array<string,mixed> $cart */
-    private function lineQuantity(ApplicationContext $context, array $cart, string $variantUuid): int
-    {
-        $line = $this->carts->findLineByVariant($context, (string) $cart['uuid'], $variantUuid);
+    /**
+     * Builds the canonical snapshot for a fresh selection against the product's
+     * ACTIVE addon definitions. Translates the pure {@see AddonValidationException}
+     * into the framework-facing {@see ValidationException} so every addLine()
+     * failure -- addon-related or not -- surfaces through the same 422 contract.
+     *
+     * @param list<array{addon_uuid:string,choice_key?:string,value?:mixed}> $addons
+     * @return array{snapshot: list<array<string,mixed>>, hash: string}
+     */
+    private function buildAddonSnapshot(
+        ApplicationContext $context,
+        string $tenant,
+        string $productUuid,
+        int $variantPrice,
+        array $addons
+    ): array {
+        $definitions = $this->addons->activeForProduct($context, $tenant, $productUuid);
 
-        return $line === null ? 0 : (int) $line['quantity'];
+        try {
+            return AddonSnapshot::build($definitions, $addons, $variantPrice);
+        } catch (AddonValidationException $e) {
+            throw ValidationException::forField('addons', $e->getMessage());
+        }
     }
 
     /**
@@ -255,13 +331,21 @@ final class CartService
     }
 
     /**
+     * Guest→user merge combines ONLY equal variant+hash lines (design spec §4):
+     * two lines for the same variant with different add-on selections stay
+     * separate after the merge, exactly as they were separate lines in the guest
+     * cart. The guest line's already-persisted snapshot is copied verbatim into
+     * the newly-inserted user-cart line -- never rebuilt -- so a merge can never
+     * pick up a definition edit that happened after the guest added the line.
+     *
      * @param array<string,mixed> $userCart
      * @param array<string,mixed> $guestLine
      */
     private function mergeLine(ApplicationContext $context, string $tenant, array $userCart, array $guestLine): void
     {
         $variantUuid = (string) $guestLine['variant_uuid'];
-        $existing = $this->carts->findLineByVariant($context, (string) $userCart['uuid'], $variantUuid);
+        $hash = (string) ($guestLine['addons_hash'] ?? '');
+        $existing = $this->carts->findLineByVariantAndHash($context, (string) $userCart['uuid'], $variantUuid, $hash);
         $target = (int) $guestLine['quantity'] + ($existing === null ? 0 : (int) $existing['quantity']);
         if ($this->stock->isTracked($context, $tenant, $variantUuid)) {
             $target = min($target, $this->stock->quantity($context, $tenant, $variantUuid));
@@ -269,7 +353,8 @@ final class CartService
 
         if ($existing === null) {
             if ($target > 0) {
-                $this->carts->insertLine($context, (string) $userCart['uuid'], $variantUuid, $target);
+                $snapshot = is_array($guestLine['addons'] ?? null) ? $guestLine['addons'] : [];
+                $this->carts->insertLine($context, (string) $userCart['uuid'], $variantUuid, $target, $snapshot, $hash);
             }
             return;
         }

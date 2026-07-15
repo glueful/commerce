@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Commerce\Http\Storefront;
 
 use Glueful\Bootstrap\ApplicationContext;
+use Glueful\Extensions\Commerce\Cart\AddonSnapshot;
 use Glueful\Extensions\Commerce\Cart\CartService;
 use Glueful\Extensions\Commerce\Http\DTOs\AddCartLineData;
 use Glueful\Extensions\Commerce\Http\DTOs\ApplyDiscountData;
@@ -44,7 +45,10 @@ final class CartController
     #[ApiResponse(404, description: 'Cart not found')]
     public function show(Request $request): Response
     {
-        return Response::success($this->carts->view($this->context, $this->cart($request)), 'Cart retrieved');
+        return Response::success(
+            $this->sanitizedView($this->carts->view($this->context, $this->cart($request))),
+            'Cart retrieved'
+        );
     }
 
     #[ApiOperation(summary: 'Add a line to the current cart', tags: ['Commerce Storefront'])]
@@ -57,10 +61,11 @@ final class CartController
                 $this->context,
                 $this->cart($request),
                 $input->variant_uuid,
-                $input->quantity
+                $input->quantity,
+                $input->addons ?? []
             );
 
-            return Response::success($this->carts->view($this->context, $cart), 'Cart updated');
+            return Response::success($this->sanitizedView($this->carts->view($this->context, $cart)), 'Cart updated');
         } catch (ValidationException $e) {
             return Response::validation($e->firstErrors());
         }
@@ -79,7 +84,7 @@ final class CartController
                 $input->quantity
             );
 
-            return Response::success($this->carts->view($this->context, $cart), 'Cart updated');
+            return Response::success($this->sanitizedView($this->carts->view($this->context, $cart)), 'Cart updated');
         } catch (ValidationException $e) {
             return Response::validation($e->firstErrors());
         }
@@ -93,7 +98,7 @@ final class CartController
         try {
             $cart = $this->carts->setLineQuantity($this->context, $this->cart($request), $uuid, 0);
 
-            return Response::success($this->carts->view($this->context, $cart), 'Cart updated');
+            return Response::success($this->sanitizedView($this->carts->view($this->context, $cart)), 'Cart updated');
         } catch (ValidationException $e) {
             return Response::validation($e->firstErrors());
         }
@@ -111,7 +116,10 @@ final class CartController
                 $input->code
             );
 
-            return Response::success($this->carts->view($this->context, $cart), 'Discount applied');
+            return Response::success(
+                $this->sanitizedView($this->carts->view($this->context, $cart)),
+                'Discount applied'
+            );
         } catch (ValidationException $e) {
             return Response::validation($e->firstErrors());
         }
@@ -123,7 +131,7 @@ final class CartController
     {
         $cart = $this->carts->removeDiscount($this->context, $this->cart($request));
 
-        return Response::success($this->carts->view($this->context, $cart), 'Discount removed');
+        return Response::success($this->sanitizedView($this->carts->view($this->context, $cart)), 'Discount removed');
     }
 
     /** @return array<string,mixed> */
@@ -143,5 +151,26 @@ final class CartController
         unset($cart['token_hash']);
 
         return $cart;
+    }
+
+    /**
+     * Sanitizes every line's `addons` echo to the whitelisted projection (design
+     * spec §4) -- `CartService::pricedLines()` returns the FULL internal snapshot
+     * (including `addon_uuid`/`choice_key`) because checkout needs it verbatim for
+     * persistence; the storefront cart view is not that surface.
+     *
+     * @param array<string,mixed> $view
+     * @return array<string,mixed>
+     */
+    private function sanitizedView(array $view): array
+    {
+        $lines = is_array($view['lines'] ?? null) ? $view['lines'] : [];
+        $view['lines'] = array_map(static function (array $line): array {
+            $line['addons'] = AddonSnapshot::sanitize(is_array($line['addons'] ?? null) ? $line['addons'] : []);
+
+            return $line;
+        }, $lines);
+
+        return $view;
     }
 }

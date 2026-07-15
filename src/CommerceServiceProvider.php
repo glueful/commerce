@@ -7,6 +7,8 @@ namespace Glueful\Extensions\Commerce;
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Database\Migrations\MigrationPriority;
 use Glueful\Events\EventService;
+use Glueful\Extensions\Commerce\Catalog\AddonRepository;
+use Glueful\Extensions\Commerce\Catalog\AddonService;
 use Glueful\Extensions\Commerce\Catalog\AttributeRepository;
 use Glueful\Extensions\Commerce\Catalog\AttributeService;
 use Glueful\Extensions\Commerce\Catalog\CatalogService;
@@ -31,6 +33,7 @@ use Glueful\Extensions\Commerce\Events\OrderNoteAdded;
 use Glueful\Extensions\Commerce\Events\OrderPaid;
 use Glueful\Extensions\Commerce\Events\OrderPlaced;
 use Glueful\Extensions\Commerce\Events\RefundCompleted;
+use Glueful\Extensions\Commerce\Http\Admin\AdminAddonController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminAttributeController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminCategoryController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminDiscountController;
@@ -145,6 +148,14 @@ final class CommerceServiceProvider extends ServiceProvider
             ],
             AttributeService::class => [
                 'factory' => [self::class, 'makeAttributeService'],
+                'shared' => true,
+            ],
+            AddonRepository::class => [
+                'class' => AddonRepository::class,
+                'shared' => true,
+            ],
+            AddonService::class => [
+                'factory' => [self::class, 'makeAddonService'],
                 'shared' => true,
             ],
             StockRepository::class => [
@@ -289,6 +300,10 @@ final class CommerceServiceProvider extends ServiceProvider
                 'factory' => [self::class, 'makeAdminAttributeController'],
                 'shared' => true,
             ],
+            AdminAddonController::class => [
+                'factory' => [self::class, 'makeAdminAddonController'],
+                'shared' => true,
+            ],
         ];
     }
 
@@ -383,6 +398,16 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(StockRepository::class),
             $container->get(DiscountRepository::class),
             $container->get(PricingEngine::class),
+            self::tenantResolver($container),
+            $container->get(AddonRepository::class)
+        );
+    }
+
+    public static function makeAddonService(ContainerInterface $container): AddonService
+    {
+        return new AddonService(
+            $container->get(AddonRepository::class),
+            $container->get(ProductRepository::class),
             self::tenantResolver($container)
         );
     }
@@ -607,6 +632,14 @@ final class CommerceServiceProvider extends ServiceProvider
         return new AdminAttributeController(
             $container->get(ApplicationContext::class),
             $container->get(AttributeService::class)
+        );
+    }
+
+    public static function makeAdminAddonController(ContainerInterface $container): AdminAddonController
+    {
+        return new AdminAddonController(
+            $container->get(ApplicationContext::class),
+            $container->get(AddonService::class)
         );
     }
 

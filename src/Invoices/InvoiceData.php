@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Commerce\Invoices;
 
 use Glueful\Bootstrap\ApplicationContext;
+use Glueful\Extensions\Commerce\Cart\AddonSnapshot;
 
 /**
  * Pure assembly of the versioned invoice-data payload (spec §7). No I/O: the
@@ -63,6 +64,7 @@ final class InvoiceData
                     'quantity' => (int) ($line['quantity'] ?? 0),
                     'unit_minor' => (int) ($line['unit_price'] ?? 0),
                     'subtotal_minor' => (int) ($line['line_total'] ?? 0),
+                    'addons' => AddonSnapshot::sanitize(is_array($line['addons'] ?? null) ? $line['addons'] : []),
                 ],
                 $lines
             )),

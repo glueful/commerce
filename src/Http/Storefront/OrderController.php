@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Commerce\Http\Storefront;
 
 use Glueful\Bootstrap\ApplicationContext;
+use Glueful\Extensions\Commerce\Cart\AddonSnapshot;
 use Glueful\Extensions\Commerce\Http\DTOs\OrderListQuery;
 use Glueful\Extensions\Commerce\Orders\CheckoutService;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
@@ -100,6 +101,7 @@ final class OrderController
             $orderUuid = (string) $order['uuid'];
             $order['refunds'] = $this->refundsProjection($tenant, $orderUuid);
             $order['notes'] = $this->notesProjection($tenant, $orderUuid);
+            $order['lines'] = $this->linesProjection($tenant, $orderUuid);
 
             return $order;
         }
@@ -157,6 +159,24 @@ final class OrderController
             },
             $notes
         ));
+    }
+
+    /**
+     * Order lines with a SANITIZED `addons` echo per line (design spec §4) --
+     * `{name, field_type?, choice_label?, value?, price_delta}` only, never
+     * `addon_uuid`, `choice_key`, choices arrays, status, or any other
+     * addon-definition internal. {@see OrderRepository::linesForOrder()} already
+     * tenant-scopes and JSON-decodes; this only rewrites the `addons` sub-array.
+     *
+     * @return list<array<string,mixed>>
+     */
+    private function linesProjection(string $tenant, string $orderUuid): array
+    {
+        return array_map(static function (array $line): array {
+            $line['addons'] = AddonSnapshot::sanitize(is_array($line['addons'] ?? null) ? $line['addons'] : []);
+
+            return $line;
+        }, $this->orders->linesForOrder($this->context, $tenant, $orderUuid));
     }
 
     /** @param array<string,mixed> $order */

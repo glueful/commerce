@@ -58,36 +58,85 @@ final class CartRepository
     /** @return list<array<string,mixed>> */
     public function lines(ApplicationContext $context, string $cartUuid): array
     {
-        return db($context)->table('commerce_cart_lines')
+        $rows = db($context)->table('commerce_cart_lines')
             ->where('cart_uuid', '=', $cartUuid)
             ->orderBy('id', 'ASC')
             ->get();
+
+        return array_map(fn (array $row): array => $this->decodeJson($row), $rows);
     }
 
     /** @return array<string,mixed>|null */
     public function findLine(ApplicationContext $context, string $lineUuid): ?array
     {
-        return db($context)->table('commerce_cart_lines')
+        $row = db($context)->table('commerce_cart_lines')
             ->where('uuid', '=', $lineUuid)
             ->first();
+
+        return $row === null ? null : $this->decodeJson($row);
     }
 
-    /** @return array<string,mixed>|null */
-    public function findLineByVariant(ApplicationContext $context, string $cartUuid, string $variantUuid): ?array
-    {
-        return db($context)->table('commerce_cart_lines')
+    /**
+     * Line identity: cart + variant + add-ons hash. `$addonsHash` is `''` for the
+     * legacy no-addons path (the composite unique's default), so this replaces the
+     * old variant-only lookup exactly for that case while also finding the correct
+     * one of several hashed lines for the same variant.
+     *
+     * @return array<string,mixed>|null
+     */
+    public function findLineByVariantAndHash(
+        ApplicationContext $context,
+        string $cartUuid,
+        string $variantUuid,
+        string $addonsHash
+    ): ?array {
+        $row = db($context)->table('commerce_cart_lines')
             ->where('cart_uuid', '=', $cartUuid)
             ->where('variant_uuid', '=', $variantUuid)
+            ->where('addons_hash', '=', $addonsHash)
             ->first();
+
+        return $row === null ? null : $this->decodeJson($row);
     }
 
-    public function insertLine(ApplicationContext $context, string $cartUuid, string $variantUuid, int $quantity): void
+    /**
+     * Aggregate quantity for a variant across EVERY add-on hash in this cart --
+     * splitting a variant into several configured (hashed) lines must not let a
+     * stock check see only one line's quantity.
+     */
+    public function totalQuantityForVariant(ApplicationContext $context, string $cartUuid, string $variantUuid): int
     {
+        $rows = db($context)->table('commerce_cart_lines')
+            ->where('cart_uuid', '=', $cartUuid)
+            ->where('variant_uuid', '=', $variantUuid)
+            ->get();
+
+        $total = 0;
+        foreach ($rows as $row) {
+            $total += (int) $row['quantity'];
+        }
+
+        return $total;
+    }
+
+    /**
+     * @param list<array<string,mixed>> $snapshot canonical AddonSnapshot entries; [] for none
+     */
+    public function insertLine(
+        ApplicationContext $context,
+        string $cartUuid,
+        string $variantUuid,
+        int $quantity,
+        array $snapshot = [],
+        string $addonsHash = ''
+    ): void {
         db($context)->table('commerce_cart_lines')->insert([
             'uuid' => \Glueful\Helpers\Utils::generateNanoID(),
             'cart_uuid' => $cartUuid,
             'variant_uuid' => $variantUuid,
             'quantity' => $quantity,
+            'addons' => $snapshot === [] ? null : json_encode($snapshot, JSON_THROW_ON_ERROR),
+            'addons_hash' => $addonsHash,
         ]);
     }
 
@@ -106,5 +155,21 @@ final class CartRepository
         db($context)->table('commerce_cart_lines')
             ->where('uuid', '=', $lineUuid)
             ->delete();
+    }
+
+    /**
+     * @param array<string,mixed> $row
+     * @return array<string,mixed>
+     */
+    private function decodeJson(array $row): array
+    {
+        if (isset($row['addons']) && is_string($row['addons']) && $row['addons'] !== '') {
+            $decoded = json_decode($row['addons'], true);
+            $row['addons'] = is_array($decoded) ? $decoded : [];
+        } else {
+            $row['addons'] = [];
+        }
+
+        return $row;
     }
 }

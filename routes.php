@@ -6,6 +6,7 @@ use Glueful\Extensions\Commerce\Http\Storefront\CartController;
 use Glueful\Extensions\Commerce\Http\Storefront\CheckoutController;
 use Glueful\Extensions\Commerce\Http\Storefront\OrderController;
 use Glueful\Extensions\Commerce\Http\Storefront\ProductController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminAddonController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminAttributeController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminCategoryController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminDiscountController;
@@ -98,6 +99,11 @@ $router->group(['prefix' => '/commerce/admin', 'middleware' => ['auth']], functi
         ->middleware($write);
     $router->put('/products/{uuid}/attributes', [AdminAttributeController::class, 'setForProduct'])
         ->middleware($write);
+
+    $router->get('/products/{uuid}/addons', [AdminAddonController::class, 'index'])->middleware($read);
+    $router->post('/products/{uuid}/addons', [AdminAddonController::class, 'store'])->middleware($write);
+    $router->patch('/addons/{uuid}', [AdminAddonController::class, 'update'])->middleware($write);
+    $router->delete('/addons/{uuid}', [AdminAddonController::class, 'destroy'])->middleware($write);
 
     $router->post('/stock/{variantUuid}/adjust', [AdminStockController::class, 'adjust'])->middleware($write);
 

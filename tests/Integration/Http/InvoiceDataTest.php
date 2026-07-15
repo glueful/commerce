@@ -95,7 +95,7 @@ final class InvoiceDataTest extends CommerceTestCase
         // lines
         self::assertCount(1, $data['lines']);
         $line = $data['lines'][0];
-        self::assertSame(['name', 'sku', 'quantity', 'unit_minor', 'subtotal_minor'], array_keys($line));
+        self::assertSame(['name', 'sku', 'quantity', 'unit_minor', 'subtotal_minor', 'addons'], array_keys($line));
         self::assertSame('SKU-INV-HAPPY', $line['sku']);
         self::assertIsInt($line['quantity']);
         self::assertIsInt($line['unit_minor']);
@@ -103,6 +103,7 @@ final class InvoiceDataTest extends CommerceTestCase
         self::assertSame(2, $line['quantity']);
         self::assertSame(1000, $line['unit_minor']);
         self::assertSame(2000, $line['subtotal_minor']);
+        self::assertSame([], $line['addons']);
 
         // totals: every *_minor key is a genuine PHP integer, not a numeric string.
         $totals = $data['totals'];
