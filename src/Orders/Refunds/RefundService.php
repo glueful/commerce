@@ -109,7 +109,7 @@ final class RefundService
                 $fingerprint,
                 $initiatedBy
             ): array {
-                if (!$this->orders->claimRefundMutation($c, $tenant, $orderUuid)) {
+                if (!$this->orders->claimOrderFinancialMutation($c, $tenant, $orderUuid)) {
                     throw new NotFoundException('Resource not found.');
                 }
 
@@ -187,7 +187,7 @@ final class RefundService
                 $fingerprint,
                 $initiatedBy
             ): array {
-                if (!$this->orders->claimRefundMutation($c, $tenant, $orderUuid)) {
+                if (!$this->orders->claimOrderFinancialMutation($c, $tenant, $orderUuid)) {
                     throw new NotFoundException('Resource not found.');
                 }
 
@@ -332,7 +332,7 @@ final class RefundService
 
         return db($c)->transaction(function () use ($c, $tenant, $refundUuid, $result, $snapshot): array {
             // Global refund lock order: order claim first, refund status claim second.
-            if (!$this->orders->claimRefundMutation($c, $tenant, (string) $snapshot['order_uuid'])) {
+            if (!$this->orders->claimOrderFinancialMutation($c, $tenant, (string) $snapshot['order_uuid'])) {
                 throw new NotFoundException('Resource not found.');
             }
 

@@ -15,6 +15,7 @@ use Glueful\Extensions\Contracts\Payments\PaymentCollector;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Glueful\Extensions\Contracts\Tenancy\TenantTableRegistry;
 use Glueful\Notifications\Services\NotificationDispatcher;
+use Glueful\Uploader\Contracts\BlobAccessPolicyRegistry;
 
 final class DiagnosticsReport
 {
@@ -56,7 +57,29 @@ final class DiagnosticsReport
                 'has_tenant_table_registry' => $container->has(TenantTableRegistry::class),
             ],
             'email' => self::emailStatus($context),
+            'blob_policy' => self::blobPolicyStatus($context),
         ];
+    }
+
+    /**
+     * 'active' when the framework's BlobAccessPolicyRegistry (design spec §5,
+     * Task 1) is bound AND commerce's own contributor is registered under it;
+     * 'unavailable' when the registry itself isn't bound at all (a framework
+     * build without that seam) -- see {@see \Glueful\Extensions\Commerce\CommerceServiceProvider::boot()}.
+     */
+    private static function blobPolicyStatus(ApplicationContext $context): string
+    {
+        $container = container($context);
+        if (!$container->has(BlobAccessPolicyRegistry::class)) {
+            return 'unavailable';
+        }
+
+        $registry = $container->get(BlobAccessPolicyRegistry::class);
+        if (!$registry instanceof BlobAccessPolicyRegistry) {
+            return 'unavailable';
+        }
+
+        return $registry->has('commerce.downloads') ? 'active' : 'unavailable';
     }
 
     /**
@@ -157,6 +180,10 @@ final class DiagnosticsReport
             'commerce_product_children',
             'commerce_product_addons',
             'commerce_reviews',
+            'commerce_customer_address_books',
+            'commerce_customer_addresses',
+            'commerce_downloads',
+            'commerce_download_grants',
         ];
     }
 

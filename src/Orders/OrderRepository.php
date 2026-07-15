@@ -94,12 +94,17 @@ final class OrderRepository
     }
 
     /**
-     * Affected-row-checked serialization primitive for refund mutations. Every
-     * issue/reserve/finalize transaction claims the order this way before reading any
-     * state or capacity; validation and capacity reads only ever happen after the claim
-     * succeeds. Returns false for an unknown or cross-tenant order.
+     * Affected-row-checked serialization primitive for every order-financial mutation
+     * (refunds AND digital-download mints, design spec §4.1) -- the neutral name
+     * reflects that shared ownership; the underlying `refund_revision` column is
+     * unchanged (renaming it would churn every refund migration for no behavioral
+     * gain). Every issue/reserve/finalize refund transaction, and every atomic
+     * download-URL mint, claims the order this way before reading any state or
+     * capacity; validation and capacity reads only ever happen after the claim
+     * succeeds. A full-refund completion and a mint therefore serialize on the same
+     * row. Returns false for an unknown or cross-tenant order.
      */
-    public function claimRefundMutation(ApplicationContext $context, string $tenant, string $uuid): bool
+    public function claimOrderFinancialMutation(ApplicationContext $context, string $tenant, string $uuid): bool
     {
         $affected = db($context)->table('commerce_orders')->executeModification(
             <<<'SQL'
@@ -206,6 +211,12 @@ SQL,
      * definitions) is copied AS-IS into `commerce_order_lines.addons`. This is the
      * explicit add-on persistence boundary: nothing downstream rebuilds it.
      *
+     * Downloads: `CheckoutService::withDownloadSnapshots()` already computed the
+     * purchase-time entitlement snapshot per line — `null` for non-digital lines,
+     * a (possibly empty) list for digital ones — so this only encodes whatever it
+     * finds; NULL means "not applicable", `[]` means "digital, no active
+     * downloads at checkout time" (design spec §2). Never re-derived here.
+     *
      * @param array<string,mixed> $order
      * @param array<string,mixed> $line
      * @return array<string,mixed>
@@ -215,6 +226,7 @@ SQL,
         $quantity = (int) $line['quantity'];
         $unitPrice = (int) $line['unit_price'];
         $addons = is_array($line['addons'] ?? null) ? $line['addons'] : [];
+        $downloads = $line['downloads'] ?? null;
 
         return [
             'uuid' => Utils::generateNanoID(),
@@ -227,6 +239,7 @@ SQL,
             'quantity' => $quantity,
             'line_total' => $unitPrice * $quantity,
             'addons' => $addons === [] ? null : json_encode($addons, JSON_THROW_ON_ERROR),
+            'downloads' => is_array($downloads) ? json_encode($downloads, JSON_THROW_ON_ERROR) : null,
         ];
     }
 
@@ -293,6 +306,17 @@ SQL,
             $row['option_values'] = is_array($decoded) ? $decoded : [];
         } else {
             $row['option_values'] = [];
+        }
+
+        // Unlike addons/option_values, an absent/NULL raw column means "not
+        // applicable" (non-digital line) and decodes to null, not []; an
+        // explicitly-stored `[]` (digital line, no active downloads at checkout)
+        // decodes to an empty array. The two are deliberately distinct.
+        if (isset($row['downloads']) && is_string($row['downloads']) && $row['downloads'] !== '') {
+            $decoded = json_decode($row['downloads'], true);
+            $row['downloads'] = is_array($decoded) ? $decoded : null;
+        } else {
+            $row['downloads'] = null;
         }
 
         return $row;

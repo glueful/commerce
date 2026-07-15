@@ -8,6 +8,9 @@ use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Cart\AddonSnapshot;
 use Glueful\Extensions\Commerce\Http\DTOs\OrderListQuery;
 use Glueful\Extensions\Commerce\Orders\CheckoutService;
+use Glueful\Extensions\Commerce\Orders\Downloads\DownloadAccessService;
+use Glueful\Extensions\Commerce\Orders\Downloads\DownloadGrantRepository;
+use Glueful\Extensions\Commerce\Orders\Downloads\DownloadGrantService;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
 use Glueful\Extensions\Commerce\Orders\Refunds\RefundRepository;
 use Glueful\Extensions\Commerce\Support\TokenHasher;
@@ -28,6 +31,15 @@ final class OrderController
         private ?CheckoutService $checkout = null,
         private ?CurrentTenantResolver $tenants = null,
         private ?RefundRepository $refunds = null,
+        // Deliberately NOT resolved eagerly below (unlike the collaborators above):
+        // every existing test constructs this controller with exactly five
+        // positional args, and an eager `??= app(...)` here would throw against
+        // those tests' lightweight DI containers (which never bind these) even
+        // though they never call downloads()/downloadUrl(). See the three lazy
+        // accessors instead.
+        private ?DownloadGrantService $downloadGrantService = null,
+        private ?DownloadGrantRepository $downloadGrantRepository = null,
+        private ?DownloadAccessService $downloadAccess = null,
     ) {
         $this->orders ??= app($context, OrderRepository::class);
         $this->checkout ??= app($context, CheckoutService::class);
@@ -35,6 +47,21 @@ final class OrderController
             ? container($context)->get(CurrentTenantResolver::class)
             : new SentinelTenantResolver();
         $this->refunds ??= app($context, RefundRepository::class);
+    }
+
+    private function downloadGrantService(): DownloadGrantService
+    {
+        return $this->downloadGrantService ??= app($this->context, DownloadGrantService::class);
+    }
+
+    private function downloadGrantRepository(): DownloadGrantRepository
+    {
+        return $this->downloadGrantRepository ??= app($this->context, DownloadGrantRepository::class);
+    }
+
+    private function downloadAccess(): DownloadAccessService
+    {
+        return $this->downloadAccess ??= app($this->context, DownloadAccessService::class);
     }
 
     #[ApiOperation(summary: 'Get an order by number', tags: ['Commerce Storefront'])]
@@ -87,26 +114,130 @@ final class OrderController
         return Response::paginated($result['items'], $result['total'], $page, $perPage, null, 'Orders retrieved');
     }
 
+    #[ApiOperation(summary: 'List digital-download grants for an order', tags: ['Commerce Storefront'])]
+    #[ApiResponse(200, description: 'Downloads retrieved')]
+    #[ApiResponse(404, description: 'Order not found')]
+    public function downloads(Request $request, string $number): Response
+    {
+        $order = $this->accessCheckedOrder($request, $number);
+        $tenant = (string) $order['tenant_uuid'];
+        $orderUuid = (string) $order['uuid'];
+
+        // Always repair before listing (design spec §4.1): idempotent, heals both an
+        // entirely-missing set and a partial tail (some grants exist, some don't).
+        $this->downloadGrantService()->ensureGrantsForOrder($this->context, $order);
+        $grants = $this->downloadGrantRepository()->findForOrder($this->context, $tenant, $orderUuid);
+        $fullyRefunded = $this->isFullyRefunded($order);
+
+        $payload = array_map(
+            fn (array $grant): array => $this->grantListingProjection($grant, $fullyRefunded),
+            $grants
+        );
+
+        return Response::success($payload, 'Downloads retrieved');
+    }
+
+    #[ApiOperation(summary: 'Mint a signed download URL for an order grant', tags: ['Commerce Storefront'])]
+    #[ApiResponse(200, description: 'Download URL generated')]
+    #[ApiResponse(404, description: 'Order or grant not found')]
+    #[ApiResponse(410, description: 'Download link exhausted, expired, revoked, or refund-blocked')]
+    public function downloadUrl(Request $request, string $number, string $grantUuid): Response
+    {
+        $order = $this->accessCheckedOrder($request, $number);
+        $tenant = (string) $order['tenant_uuid'];
+        $orderUuid = (string) $order['uuid'];
+
+        // Always repair before the target lookup (design spec §4.1), same as downloads().
+        $this->downloadGrantService()->ensureGrantsForOrder($this->context, $order);
+
+        $result = $this->downloadAccess()->mint(
+            $this->context,
+            $tenant,
+            $orderUuid,
+            $grantUuid,
+            $request->getSchemeAndHttpHost()
+        );
+
+        if (!$result['ok']) {
+            return Response::error('Download link unavailable', 410, ['code' => $result['code']]);
+        }
+
+        return Response::success(
+            ['url' => $result['url'], 'expires_in' => $result['expires_in']],
+            'Download URL generated'
+        );
+    }
+
+    /**
+     * Listing shape whitelist (design spec §4.1) -- exactly these seven keys, NEVER
+     * token_hash/blob_uuid.
+     *
+     * @param array<string,mixed> $grant
+     * @return array{grant_uuid: string, name: string, remaining: int|null,
+     *     expires_at: mixed, expired: bool, revoked: bool, blocked_by_full_refund: bool}
+     */
+    private function grantListingProjection(array $grant, bool $orderFullyRefunded): array
+    {
+        return [
+            'grant_uuid' => (string) $grant['uuid'],
+            'name' => (string) $grant['name'],
+            'remaining' => $grant['remaining'] !== null ? (int) $grant['remaining'] : null,
+            'expires_at' => $grant['expires_at'],
+            'expired' => $grant['expires_at'] !== null && (string) $grant['expires_at'] <= gmdate('Y-m-d H:i:s'),
+            'revoked' => $grant['revoked_at'] !== null,
+            'blocked_by_full_refund' => $orderFullyRefunded && $grant['refund_access_override_at'] === null,
+        ];
+    }
+
+    /**
+     * `grand_total > 0` guards against a FREE ($0 grand_total) order being
+     * mistaken for a fully-refunded one -- `0 >= 0` would otherwise be
+     * trivially true and permanently report `blocked_by_full_refund` for a
+     * free digital-product order's grants.
+     *
+     * @param array<string,mixed> $order
+     */
+    private function isFullyRefunded(array $order): bool
+    {
+        $grandTotal = (int) ($order['grand_total'] ?? 0);
+
+        return $grandTotal > 0 && (int) ($order['refunded_total'] ?? 0) >= $grandTotal;
+    }
+
     /** @return array<string,mixed> */
     private function authorizedOrder(Request $request, string $number): array
     {
+        $order = $this->accessCheckedOrder($request, $number);
+        $tenant = (string) $order['tenant_uuid'];
+        $orderUuid = (string) $order['uuid'];
+
+        $order['refunds'] = $this->refundsProjection($tenant, $orderUuid);
+        $order['notes'] = $this->notesProjection($tenant, $orderUuid);
+        $order['lines'] = $this->linesProjection($tenant, $orderUuid);
+
+        return $order;
+    }
+
+    /**
+     * The shared access check (guest token header OR authenticated owner) reused
+     * verbatim by every order-scoped endpoint: `show()`/`retryPayment()` via
+     * {@see self::authorizedOrder()}, and the two digital-download endpoints above.
+     * Returns the raw order row (guest_token_hash stripped); throws non-revealing 404
+     * for an unknown order OR a failed access check alike.
+     *
+     * @return array<string,mixed>
+     */
+    private function accessCheckedOrder(Request $request, string $number): array
+    {
         $tenant = $this->tenants->tenantUuid($this->context);
         $order = $this->orders->findByNumber($this->context, $tenant, $number);
-        if ($order === null) {
+        if ($order === null || !($this->userOwns($request, $order) || $this->tokenMatches($request, $order))) {
             throw $this->notFound();
         }
 
-        if ($this->userOwns($request, $order) || $this->tokenMatches($request, $order)) {
-            unset($order['guest_token_hash']);
-            $orderUuid = (string) $order['uuid'];
-            $order['refunds'] = $this->refundsProjection($tenant, $orderUuid);
-            $order['notes'] = $this->notesProjection($tenant, $orderUuid);
-            $order['lines'] = $this->linesProjection($tenant, $orderUuid);
+        unset($order['guest_token_hash']);
 
-            return $order;
-        }
-
-        throw $this->notFound();
+        return $order;
     }
 
     /**

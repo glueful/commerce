@@ -4,12 +4,14 @@ declare(strict_types=1);
 
 use Glueful\Extensions\Commerce\Http\Storefront\CartController;
 use Glueful\Extensions\Commerce\Http\Storefront\CheckoutController;
+use Glueful\Extensions\Commerce\Http\Storefront\DownloadLinkController;
 use Glueful\Extensions\Commerce\Http\Storefront\OrderController;
 use Glueful\Extensions\Commerce\Http\Storefront\ProductController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminAddonController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminAttributeController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminCategoryController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminDiscountController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminDownloadController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminMediaController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminOrderController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminProductController;
@@ -59,6 +61,11 @@ $router->group(['prefix' => '/commerce'], function (Router $router) use ($rate):
     $router->get('/orders/{number}', [OrderController::class, 'show'])->middleware($orderRate);
     $router->post('/orders/{number}/payment', [OrderController::class, 'retryPayment'])->middleware($orderRate);
     $router->get('/orders', [OrderController::class, 'mine'])->middleware(['auth', $orderRate]);
+    $router->get('/orders/{number}/downloads', [OrderController::class, 'downloads'])->middleware($orderRate);
+    $router->post('/orders/{number}/downloads/{grantUuid}/url', [OrderController::class, 'downloadUrl'])
+        ->middleware($orderRate);
+
+    $router->get('/downloads/{token}', [DownloadLinkController::class, 'show'])->middleware($rate('downloads', 60));
 });
 
 $router->group(['prefix' => '/commerce/admin', 'middleware' => ['auth']], function (Router $router): void {
@@ -72,6 +79,11 @@ $router->group(['prefix' => '/commerce/admin', 'middleware' => ['auth']], functi
     $router->post('/products/{uuid}/variants', [AdminProductController::class, 'storeVariant'])->middleware($write);
     $router->patch('/variants/{uuid}', [AdminProductController::class, 'updateVariant'])->middleware($write);
     $router->put('/products/{uuid}/children', [AdminProductController::class, 'setChildren'])->middleware($write);
+
+    $router->get('/variants/{uuid}/downloads', [AdminDownloadController::class, 'index'])->middleware($read);
+    $router->post('/variants/{uuid}/downloads', [AdminDownloadController::class, 'attach'])->middleware($write);
+    $router->patch('/downloads/{uuid}', [AdminDownloadController::class, 'update'])->middleware($write);
+    $router->delete('/downloads/{uuid}', [AdminDownloadController::class, 'detach'])->middleware($write);
 
     $router->post('/products/{uuid}/media', [AdminMediaController::class, 'attach'])->middleware($write);
     $router->put('/products/{uuid}/media/order', [AdminMediaController::class, 'reorder'])->middleware($write);

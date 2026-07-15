@@ -323,6 +323,10 @@ final class CatalogBreadthTenancyTest extends CommerceTestCase
             'commerce_attributes',
             'commerce_product_addons',
             'commerce_reviews',
+            'commerce_customer_address_books',
+            'commerce_customer_addresses',
+            'commerce_downloads',
+            'commerce_download_grants',
         ], DiagnosticsReport::tenantTables());
 
         // The join/child tables added alongside the six must never be treated as

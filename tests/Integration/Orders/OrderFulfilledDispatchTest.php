@@ -10,6 +10,7 @@ use Glueful\Events\ListenerProvider;
 use Glueful\Extensions\Commerce\Cart\CartRepository;
 use Glueful\Extensions\Commerce\Cart\CartService;
 use Glueful\Extensions\Commerce\Catalog\CatalogService;
+use Glueful\Extensions\Commerce\Catalog\DownloadRepository;
 use Glueful\Extensions\Commerce\Catalog\ProductRepository;
 use Glueful\Extensions\Commerce\Catalog\VariantRepository;
 use Glueful\Extensions\Commerce\Discounts\DiscountRepository;
@@ -174,6 +175,7 @@ final class OrderFulfilledDispatchTest extends CommerceTestCase
             $this->tax(),
             new OrderNumberGenerator(),
             new OrderRepository(),
+            new DownloadRepository(),
             new ManualPaymentCollector(),
             new SentinelTenantResolver()
         );

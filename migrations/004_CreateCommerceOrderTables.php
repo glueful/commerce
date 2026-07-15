@@ -59,6 +59,7 @@ final class CreateCommerceOrderTables implements MigrationInterface
                 $table->integer('quantity');
                 $table->bigInteger('line_total');
                 $table->json('addons')->nullable();
+                $table->json('downloads')->nullable();
 
                 $table->unique('uuid');
                 $table->index('order_uuid');

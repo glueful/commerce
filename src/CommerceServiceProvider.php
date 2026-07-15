@@ -14,6 +14,8 @@ use Glueful\Extensions\Commerce\Catalog\AttributeService;
 use Glueful\Extensions\Commerce\Catalog\CatalogService;
 use Glueful\Extensions\Commerce\Catalog\CategoryRepository;
 use Glueful\Extensions\Commerce\Catalog\CategoryService;
+use Glueful\Extensions\Commerce\Catalog\DownloadRepository;
+use Glueful\Extensions\Commerce\Catalog\DownloadService;
 use Glueful\Extensions\Commerce\Catalog\ProductChildrenRepository;
 use Glueful\Extensions\Commerce\Catalog\ProductMediaRepository;
 use Glueful\Extensions\Commerce\Catalog\ProductMediaService;
@@ -39,6 +41,7 @@ use Glueful\Extensions\Commerce\Http\Admin\AdminAddonController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminAttributeController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminCategoryController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminDiscountController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminDownloadController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminMediaController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminOrderController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminProductController;
@@ -48,6 +51,7 @@ use Glueful\Extensions\Commerce\Http\Admin\AdminStockController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminTagController;
 use Glueful\Extensions\Commerce\Http\Storefront\CartController;
 use Glueful\Extensions\Commerce\Http\Storefront\CheckoutController;
+use Glueful\Extensions\Commerce\Http\Storefront\DownloadLinkController;
 use Glueful\Extensions\Commerce\Http\Storefront\OrderController;
 use Glueful\Extensions\Commerce\Http\Storefront\ProductController;
 use Glueful\Extensions\Commerce\Invoices\ConfigSellerIdentityProvider;
@@ -59,6 +63,11 @@ use Glueful\Extensions\Commerce\Mail\NotificationCommerceMailer;
 use Glueful\Extensions\Commerce\Mail\OrderMailListener;
 use Glueful\Extensions\Commerce\Orders\OrderNumberGenerator;
 use Glueful\Extensions\Commerce\Orders\CheckoutService;
+use Glueful\Extensions\Commerce\Orders\Downloads\CommerceDownloadBlobPolicy;
+use Glueful\Extensions\Commerce\Orders\Downloads\DownloadAccessService;
+use Glueful\Extensions\Commerce\Orders\Downloads\DownloadGrantRepository;
+use Glueful\Extensions\Commerce\Orders\Downloads\DownloadGrantService;
+use Glueful\Extensions\Commerce\Orders\Downloads\DownloadUrlSigner;
 use Glueful\Extensions\Commerce\Orders\ExpiryService;
 use Glueful\Extensions\Commerce\Orders\OrderPaymentService;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
@@ -79,6 +88,8 @@ use Glueful\Extensions\Contracts\Payments\PaymentConfirmationHandler;
 use Glueful\Extensions\Contracts\Payments\RefundCollector;
 use Glueful\Extensions\ServiceProvider;
 use Glueful\Repository\BlobRepository;
+use Glueful\Uploader\Contracts\BlobAccessPolicyRegistry;
+use Glueful\Uploader\Contracts\BlobPublicUrlProvider;
 use Psr\Container\ContainerInterface;
 
 final class CommerceServiceProvider extends ServiceProvider
@@ -127,6 +138,14 @@ final class CommerceServiceProvider extends ServiceProvider
             ],
             ProductMediaService::class => [
                 'factory' => [self::class, 'makeProductMediaService'],
+                'shared' => true,
+            ],
+            DownloadRepository::class => [
+                'class' => DownloadRepository::class,
+                'shared' => true,
+            ],
+            DownloadService::class => [
+                'factory' => [self::class, 'makeDownloadService'],
                 'shared' => true,
             ],
             CategoryRepository::class => [
@@ -234,6 +253,26 @@ final class CommerceServiceProvider extends ServiceProvider
                 'factory' => [self::class, 'makeRefundService'],
                 'shared' => true,
             ],
+            DownloadGrantRepository::class => [
+                'class' => DownloadGrantRepository::class,
+                'shared' => true,
+            ],
+            DownloadGrantService::class => [
+                'factory' => [self::class, 'makeDownloadGrantService'],
+                'shared' => true,
+            ],
+            DownloadUrlSigner::class => [
+                'factory' => [self::class, 'makeDownloadUrlSigner'],
+                'shared' => true,
+            ],
+            DownloadAccessService::class => [
+                'factory' => [self::class, 'makeDownloadAccessService'],
+                'shared' => true,
+            ],
+            CommerceDownloadBlobPolicy::class => [
+                'factory' => [self::class, 'makeCommerceDownloadBlobPolicy'],
+                'shared' => true,
+            ],
             SellerIdentityProvider::class => [
                 'class' => ConfigSellerIdentityProvider::class,
                 'shared' => true,
@@ -275,6 +314,10 @@ final class CommerceServiceProvider extends ServiceProvider
                 'factory' => [self::class, 'makeOrderController'],
                 'shared' => true,
             ],
+            DownloadLinkController::class => [
+                'factory' => [self::class, 'makeDownloadLinkController'],
+                'shared' => true,
+            ],
             AdminProductController::class => [
                 'factory' => [self::class, 'makeAdminProductController'],
                 'shared' => true,
@@ -297,6 +340,10 @@ final class CommerceServiceProvider extends ServiceProvider
             ],
             AdminMediaController::class => [
                 'factory' => [self::class, 'makeAdminMediaController'],
+                'shared' => true,
+            ],
+            AdminDownloadController::class => [
+                'factory' => [self::class, 'makeAdminDownloadController'],
                 'shared' => true,
             ],
             AdminCategoryController::class => [
@@ -358,6 +405,17 @@ final class CommerceServiceProvider extends ServiceProvider
         $blobs = $container->get(BlobRepository::class);
 
         return $blobs instanceof BlobRepository ? $blobs : null;
+    }
+
+    public static function makeDownloadService(ContainerInterface $container): DownloadService
+    {
+        return new DownloadService(
+            $container->get(ProductRepository::class),
+            $container->get(VariantRepository::class),
+            $container->get(DownloadRepository::class),
+            self::tenantResolver($container),
+            self::makeBlobRepository($container)
+        );
     }
 
     public static function makeCategoryService(ContainerInterface $container): CategoryService
@@ -448,6 +506,7 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(TaxCalculator::class),
             $container->get(OrderNumberGenerator::class),
             $container->get(OrderRepository::class),
+            $container->get(DownloadRepository::class),
             self::makePaymentCollector($container),
             self::tenantResolver($container)
         );
@@ -497,6 +556,44 @@ final class CommerceServiceProvider extends ServiceProvider
             self::tenantResolver($container),
             self::makeRefundCollector($container)
         );
+    }
+
+    public static function makeDownloadGrantService(ContainerInterface $container): DownloadGrantService
+    {
+        return new DownloadGrantService(
+            $container->get(OrderRepository::class),
+            $container->get(DownloadGrantRepository::class)
+        );
+    }
+
+    /**
+     * Soft-resolved, same pattern as {@see self::makeBlobRepository()}: an optional
+     * host-provided {@see BlobPublicUrlProvider} is used when bound, otherwise the
+     * signer falls back to the request's own scheme/host (design spec §4.1).
+     */
+    public static function makeDownloadUrlSigner(ContainerInterface $container): DownloadUrlSigner
+    {
+        $publicUrlProvider = null;
+        if ($container->has(BlobPublicUrlProvider::class)) {
+            $resolved = $container->get(BlobPublicUrlProvider::class);
+            $publicUrlProvider = $resolved instanceof BlobPublicUrlProvider ? $resolved : null;
+        }
+
+        return new DownloadUrlSigner(self::makeBlobRepository($container), $publicUrlProvider);
+    }
+
+    public static function makeDownloadAccessService(ContainerInterface $container): DownloadAccessService
+    {
+        return new DownloadAccessService(
+            $container->get(OrderRepository::class),
+            $container->get(DownloadGrantRepository::class),
+            $container->get(DownloadUrlSigner::class)
+        );
+    }
+
+    public static function makeCommerceDownloadBlobPolicy(ContainerInterface $container): CommerceDownloadBlobPolicy
+    {
+        return new CommerceDownloadBlobPolicy($container->get(ApplicationContext::class));
     }
 
     private static function makeRefundCollector(ContainerInterface $container): ?RefundCollector
@@ -576,6 +673,15 @@ final class CommerceServiceProvider extends ServiceProvider
         );
     }
 
+    public static function makeDownloadLinkController(ContainerInterface $container): DownloadLinkController
+    {
+        return new DownloadLinkController(
+            $container->get(ApplicationContext::class),
+            $container->get(DownloadGrantRepository::class),
+            $container->get(DownloadAccessService::class)
+        );
+    }
+
     public static function makeAdminProductController(ContainerInterface $container): AdminProductController
     {
         return new AdminProductController(
@@ -636,6 +742,14 @@ final class CommerceServiceProvider extends ServiceProvider
         );
     }
 
+    public static function makeAdminDownloadController(ContainerInterface $container): AdminDownloadController
+    {
+        return new AdminDownloadController(
+            $container->get(ApplicationContext::class),
+            $container->get(DownloadService::class)
+        );
+    }
+
     public static function makeAdminCategoryController(ContainerInterface $container): AdminCategoryController
     {
         return new AdminCategoryController(
@@ -680,7 +794,8 @@ final class CommerceServiceProvider extends ServiceProvider
     {
         return new OrderMailListener(
             $container->get(ApplicationContext::class),
-            $container->get(CommerceMailer::class)
+            $container->get(CommerceMailer::class),
+            $container->get(DownloadGrantService::class)
         );
     }
 
@@ -754,6 +869,37 @@ final class CommerceServiceProvider extends ServiceProvider
             }
         } catch (\Throwable $e) {
             error_log('[Commerce] Failed to register mail listeners: ' . $e->getMessage());
+            if ($this->bootEnv() !== 'production') {
+                throw $e;
+            }
+        }
+
+        try {
+            $container = container($context);
+            // Framework composition seam (design spec §5, Task 1): register
+            // commerce's blob backstop as a NAMED contributor to the shared
+            // BlobAccessPolicyRegistry -- never bind the shared BlobAccessPolicy
+            // contract itself, so a host application's own primary policy (e.g.
+            // Thallo's TenantBlobPolicy) always stays AND-composed alongside this
+            // one. Guarded by has(): a framework build without Task 1's seam
+            // simply has no BlobAccessPolicyRegistry bound, so this becomes a
+            // no-op and DiagnosticsReport reports 'unavailable'.
+            //
+            // Also guarded by the registry's OWN has('commerce.downloads') (T6
+            // review finding): BlobAccessPolicyRegistry::register() throws
+            // \LogicException on a duplicate id, and a second boot() against a
+            // registry instance that survives across boots (e.g. a re-boot in
+            // the same process) would otherwise crash outside a 'production'
+            // APP_ENV. Registration is idempotent: the first boot wins, later
+            // boots are no-ops against an already-registered id.
+            if ($container->has(BlobAccessPolicyRegistry::class)) {
+                $registry = $container->get(BlobAccessPolicyRegistry::class);
+                if ($registry instanceof BlobAccessPolicyRegistry && !$registry->has('commerce.downloads')) {
+                    $registry->register('commerce.downloads', $container->get(CommerceDownloadBlobPolicy::class));
+                }
+            }
+        } catch (\Throwable $e) {
+            error_log('[Commerce] Failed to register blob access policy: ' . $e->getMessage());
             if ($this->bootEnv() !== 'production') {
                 throw $e;
             }

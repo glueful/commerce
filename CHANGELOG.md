@@ -33,3 +33,8 @@
 - Added customer reviews with a moderation workflow and transactional rating rollups.
 - Added storefront `GET /commerce/products` and `GET /commerce/products/{slug}` enrichments: media, categories, tags, attributes, add-ons, children, rating, and external metadata.
 - Added multi-tenant coverage and claim-based concurrency protection for all Layer 2 catalog tables.
+- Added digital-download definitions (admin CRUD on variants, private-blob and digital-variant validation) and a checkout-time purchase-line entitlement snapshot that survives later definition edits or deletes.
+- Added snapshot-derived, idempotent, self-healing digital-download grant issuance (quantity aggregation across add-on-distinct lines, overflow guard, bounded token-collision retry) plus a `commerce:downloads:backfill` operator CLI.
+- Added order-authenticated digital-download listing and atomic signed-URL minting, plus a public email deep-link redemption route, sharing one guarded mint primitive with full-refund and expiry/revocation handling.
+- Added `CommerceDownloadBlobPolicy`, a blob-access policy contributor enforcing grant/definition-aware VIEW/INFO/DELETE/SIGN rules through the framework's composite blob-policy registry.
+- Added digital-download deep links to the `order_paid` transactional email on first grant issuance, with issuance failures isolated from mail delivery so the plain email always still sends.

@@ -28,6 +28,39 @@ final class MailTemplatesTest extends TestCase
         self::assertStringContainsString('USD', $rendered['body']);
     }
 
+    /**
+     * Digital-delivery deep links (design spec §6): rendered ONLY when the payload
+     * carries a non-empty `downloads` list, and every entry's name and url appear.
+     */
+    public function testOrderPaidRendersDownloadsSectionWhenLinksArePresent(): void
+    {
+        $payload = ['downloads' => [
+            ['name' => 'Ebook.pdf', 'url' => 'http://localhost/commerce/downloads/abc123'],
+            ['name' => 'Bonus.zip', 'url' => 'http://localhost/commerce/downloads/def456'],
+        ]];
+
+        $rendered = MailTemplates::render('order_paid', $this->order(), $payload);
+
+        self::assertStringContainsString('Ebook.pdf', $rendered['body']);
+        self::assertStringContainsString('http://localhost/commerce/downloads/abc123', $rendered['body']);
+        self::assertStringContainsString('Bonus.zip', $rendered['body']);
+        self::assertStringContainsString('http://localhost/commerce/downloads/def456', $rendered['body']);
+    }
+
+    /**
+     * No `downloads` key (physical order, or a second/idempotent re-dispatch) => the
+     * body is byte-identical to the pre-Layer-3 rendering; an empty list is treated
+     * the same as absent.
+     */
+    public function testOrderPaidOmitsDownloadsSectionWhenPayloadHasNoDownloads(): void
+    {
+        $withoutKey = MailTemplates::render('order_paid', $this->order(), []);
+        $withEmptyList = MailTemplates::render('order_paid', $this->order(), ['downloads' => []]);
+
+        self::assertSame($withoutKey, $withEmptyList);
+        self::assertStringNotContainsString('download', strtolower($withoutKey['body']));
+    }
+
     public function testOrderFulfilledIncludesTrackingRef(): void
     {
         $order = array_merge($this->order(), ['tracking_ref' => 'TRACK-999']);

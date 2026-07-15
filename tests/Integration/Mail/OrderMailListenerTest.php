@@ -10,6 +10,7 @@ use Glueful\Events\ListenerProvider;
 use Glueful\Extensions\Commerce\Cart\CartRepository;
 use Glueful\Extensions\Commerce\Cart\CartService;
 use Glueful\Extensions\Commerce\Catalog\CatalogService;
+use Glueful\Extensions\Commerce\Catalog\DownloadRepository;
 use Glueful\Extensions\Commerce\Catalog\ProductRepository;
 use Glueful\Extensions\Commerce\Catalog\VariantRepository;
 use Glueful\Extensions\Commerce\Contracts\ShippingRateProvider;
@@ -27,6 +28,8 @@ use Glueful\Extensions\Commerce\Mail\CommerceMailer;
 use Glueful\Extensions\Commerce\Mail\NotificationCommerceMailer;
 use Glueful\Extensions\Commerce\Mail\OrderMailListener;
 use Glueful\Extensions\Commerce\Orders\CheckoutService;
+use Glueful\Extensions\Commerce\Orders\Downloads\DownloadGrantRepository;
+use Glueful\Extensions\Commerce\Orders\Downloads\DownloadGrantService;
 use Glueful\Extensions\Commerce\Orders\OrderNumberGenerator;
 use Glueful\Extensions\Commerce\Orders\OrderPaymentService;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
@@ -44,6 +47,7 @@ use Glueful\Extensions\Commerce\Tests\Support\RecordingNotificationChannel;
 use Glueful\Extensions\Commerce\Tests\Support\ThrowingCommerceMailer;
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Support\DiagnosticsReport;
+use Glueful\Extensions\Commerce\Support\TokenHasher;
 use Glueful\Notifications\Services\ChannelManager;
 use Glueful\Notifications\Services\NotificationDispatcher;
 use Glueful\Notifications\Services\NotificationService;
@@ -66,6 +70,128 @@ final class OrderMailListenerTest extends CommerceTestCase
         ));
         self::assertCount(1, $paidCalls);
         self::assertSame($order['uuid'], $paidCalls[0]['order']['uuid']);
+    }
+
+    /**
+     * Physical-order regression (design spec §6): the paid-email payload must stay
+     * byte-identical to the pre-Layer-3 shape — no `downloads` key at all.
+     */
+    public function testPhysicalOrderPaidPayloadHasNoDownloadsKey(): void
+    {
+        $mailer = new RecordingCommerceMailer();
+        $this->bindListener($mailer);
+
+        $this->placeAndPayOrder('SKU-MAIL-PHYS', 5, 1, 1000);
+
+        $paidCalls = array_values(array_filter(
+            $mailer->calls,
+            static fn (array $call): bool => $call['template'] === 'order_paid'
+        ));
+        self::assertCount(1, $paidCalls);
+        self::assertSame(
+            [],
+            $paidCalls[0]['payload'],
+            'physical order payload must be byte-identical to pre-Layer-3 output (no downloads key)'
+        );
+    }
+
+    /**
+     * Primary digital-delivery path (design spec §6): `onOrderPaid()` issues grants
+     * FIRST, then passes only that call's raw tokens as deep links.
+     */
+    public function testOrderPaidForDigitalOrderCarriesDownloadLinksAndGrantsExist(): void
+    {
+        $mailer = new RecordingCommerceMailer();
+        $this->bindListener($mailer);
+
+        ['variant_uuid' => $variantUuid] = $this->seedDigitalProduct('SKU-MAIL-DL1');
+        $this->seedDownload($variantUuid, 'dlmail000001', 'blobmail00001', 'Ebook.pdf');
+
+        $placed = $this->placeDigitalOrder($variantUuid, 1);
+        $orderUuid = (string) $placed['order']['uuid'];
+        (new OrderPaymentService(new OrderRepository()))->markPaid($this->context, '', $orderUuid);
+
+        $paidCalls = array_values(array_filter(
+            $mailer->calls,
+            static fn (array $call): bool => $call['template'] === 'order_paid'
+        ));
+        self::assertCount(1, $paidCalls);
+
+        $downloads = $paidCalls[0]['payload']['downloads'] ?? null;
+        self::assertIsArray($downloads);
+        self::assertCount(1, $downloads);
+        self::assertSame('Ebook.pdf', $downloads[0]['name']);
+        self::assertIsString($downloads[0]['url']);
+        self::assertStringContainsString('/commerce/downloads/', $downloads[0]['url']);
+
+        // The url must carry the RAW token for a real, persisted grant on this order.
+        $token = substr($downloads[0]['url'], (int) strrpos($downloads[0]['url'], '/') + 1);
+        $grant = (new DownloadGrantRepository())->findByTokenHashGlobal($this->context, TokenHasher::hash($token));
+        self::assertNotNull($grant);
+        self::assertSame($orderUuid, $grant['order_uuid']);
+        self::assertSame(1, $this->connection->table('commerce_download_grants')->count());
+    }
+
+    /**
+     * Idempotent re-fire (design spec §6): existing grants are never assigned a
+     * re-derived raw token, so a SECOND `OrderPaid` dispatch for the same
+     * already-granted order yields a plain payload -- no `downloads` key at all.
+     */
+    public function testSecondOrderPaidDispatchForSameDigitalOrderCarriesNoDownloadLinks(): void
+    {
+        $mailer = new RecordingCommerceMailer();
+        $this->bindListener($mailer);
+
+        ['variant_uuid' => $variantUuid] = $this->seedDigitalProduct('SKU-MAIL-DL2');
+        $this->seedDownload($variantUuid, 'dlmail000002', 'blobmail00002', 'Ebook2.pdf');
+
+        $placed = $this->placeDigitalOrder($variantUuid, 1);
+        $orderUuid = (string) $placed['order']['uuid'];
+        (new OrderPaymentService(new OrderRepository()))->markPaid($this->context, '', $orderUuid);
+        $order = (new OrderRepository())->findByUuid($this->context, '', $orderUuid);
+        self::assertNotNull($order);
+
+        // A second, independent OrderPaid dispatch for the SAME order -- simulating a
+        // duplicate/idempotent re-fire on top of the one markPaid() already triggered.
+        $this->eventService()->dispatch(new OrderPaid($order));
+
+        $paidCalls = array_values(array_filter(
+            $mailer->calls,
+            static fn (array $call): bool => $call['template'] === 'order_paid'
+        ));
+        self::assertCount(2, $paidCalls);
+        self::assertArrayHasKey('downloads', $paidCalls[0]['payload']);
+        self::assertSame([], $paidCalls[1]['payload'], 'second dispatch must carry no downloads key/links');
+        self::assertSame(1, $this->connection->table('commerce_download_grants')->count());
+    }
+
+    /**
+     * Issuance-failure isolation (design spec §6): forcing
+     * {@see DownloadGrantService::issueAndCollectForOrder()} to throw (here, via the
+     * service's own overflow guard -- {@see DownloadGrantService} is `final`, so this
+     * is the only way to force a genuine throw without a hand-rolled double) must
+     * still let the plain paid email go out, with no grants persisted (design spec §3:
+     * the overflow guard throws while deriving specs, strictly before any insert).
+     */
+    public function testDigitalOrderPaidWhenIssuanceThrowsStillSendsPlainEmailAndCreatesNoGrants(): void
+    {
+        $mailer = new RecordingCommerceMailer();
+        $this->bindListener($mailer);
+
+        ['variant_uuid' => $variantUuid] = $this->seedDigitalProduct('SKU-MAIL-DL3');
+        $this->seedDownload($variantUuid, 'dlmail000003', 'blobmail00003', 'Ebook3.pdf', limit: PHP_INT_MAX);
+
+        $placed = $this->placeDigitalOrder($variantUuid, 2);
+        $orderUuid = (string) $placed['order']['uuid'];
+        (new OrderPaymentService(new OrderRepository()))->markPaid($this->context, '', $orderUuid);
+
+        $paidCalls = array_values(array_filter(
+            $mailer->calls,
+            static fn (array $call): bool => $call['template'] === 'order_paid'
+        ));
+        self::assertCount(1, $paidCalls, 'the paid email must still be sent even when issuance throws');
+        self::assertSame([], $paidCalls[0]['payload']);
+        self::assertSame(0, $this->connection->table('commerce_download_grants')->count());
     }
 
     public function testOrderPlacedDispatchesOrderPlacedTemplate(): void
@@ -264,7 +390,15 @@ final class OrderMailListenerTest extends CommerceTestCase
     private function bindListener(CommerceMailer $mailer): void
     {
         $this->bind(CommerceMailer::class, $mailer);
-        $listener = new OrderMailListener($this->context, $mailer);
+        // Real DownloadGrantService (not the lazy container fallback): every test in
+        // this file goes through onOrderPaid(), and a real service correctly issues
+        // nothing for a physical-only order (spec §3), so this is safe for every
+        // existing physical-order test too.
+        $listener = new OrderMailListener(
+            $this->context,
+            $mailer,
+            new DownloadGrantService(new OrderRepository(), new DownloadGrantRepository())
+        );
         $listeners = new ListenerProvider();
         $eventService = new EventService(new EventDispatcher($listeners), $listeners);
         $eventService->addListener(OrderPlaced::class, [$listener, 'onOrderPlaced']);
@@ -345,6 +479,7 @@ final class OrderMailListenerTest extends CommerceTestCase
             $this->tax(),
             new OrderNumberGenerator(),
             new OrderRepository(),
+            new DownloadRepository(),
             new ManualPaymentCollector(),
             new SentinelTenantResolver()
         );
@@ -390,6 +525,65 @@ final class OrderMailListenerTest extends CommerceTestCase
         $this->cart()->addLine($this->context, $cart, $variantUuid, $quantity);
 
         return [$token, $variantUuid];
+    }
+
+    /** @return array{product_uuid: string, variant_uuid: string} */
+    private function seedDigitalProduct(string $sku): array
+    {
+        $catalog = new CatalogService(
+            new ProductRepository(),
+            new VariantRepository(),
+            new SentinelTenantResolver(),
+            new StockRepository()
+        );
+        $product = $catalog->createProduct($this->context, [
+            'slug' => strtolower($sku),
+            'name' => $sku,
+            'type' => 'digital',
+            'status' => 'active',
+            'variants' => [[
+                'sku' => $sku,
+                'option_values' => [],
+                'price' => 500,
+                'currency' => 'USD',
+            ]],
+        ]);
+
+        return [
+            'product_uuid' => (string) $product['uuid'],
+            'variant_uuid' => (string) $product['variants'][0]['uuid'],
+        ];
+    }
+
+    private function seedDownload(
+        string $variantUuid,
+        string $uuid,
+        string $blobUuid,
+        string $name,
+        ?int $limit = null,
+        ?int $expiry = null,
+    ): void {
+        $this->connection->table('commerce_downloads')->insert([
+            'uuid' => $uuid,
+            'tenant_uuid' => '',
+            'variant_uuid' => $variantUuid,
+            'blob_uuid' => $blobUuid,
+            'name' => $name,
+            'download_limit' => $limit,
+            'expiry_days' => $expiry,
+            'position' => 0,
+            'status' => 'active',
+        ]);
+    }
+
+    /** @return array{order: array<string,mixed>} */
+    private function placeDigitalOrder(string $variantUuid, int $quantity): array
+    {
+        ['cart' => $cart, 'token' => $token] = $this->cart()->create($this->context);
+        $this->cart()->addLine($this->context, $cart, $variantUuid, $quantity);
+        $placed = $this->checkout()->placeOrder($this->context, $token, $this->buyer(), $this->addresses(), 'std');
+
+        return ['order' => $placed['order']];
     }
 
     /** @return array{email: string, user_uuid: null} */

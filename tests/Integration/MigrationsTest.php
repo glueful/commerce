@@ -36,6 +36,10 @@ final class MigrationsTest extends CommerceTestCase
             'commerce_product_children',
             'commerce_product_addons',
             'commerce_reviews',
+            'commerce_customer_address_books',
+            'commerce_customer_addresses',
+            'commerce_downloads',
+            'commerce_download_grants',
         ];
 
         $schema = $this->connection->getSchemaBuilder();
@@ -63,6 +67,10 @@ final class MigrationsTest extends CommerceTestCase
             'commerce_cart_lines missing addons_hash'
         );
         self::assertTrue($schema->hasColumn('commerce_order_lines', 'addons'), 'commerce_order_lines missing addons');
+        self::assertTrue(
+            $schema->hasColumn('commerce_order_lines', 'downloads'),
+            'commerce_order_lines missing downloads'
+        );
     }
 
     public function testFoldedRefundColumnsExistOnOrdersAndOrderEvents(): void

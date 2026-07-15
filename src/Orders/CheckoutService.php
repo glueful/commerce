@@ -6,6 +6,7 @@ namespace Glueful\Extensions\Commerce\Orders;
 
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Cart\CartService;
+use Glueful\Extensions\Commerce\Catalog\DownloadRepository;
 use Glueful\Extensions\Commerce\Contracts\ShippingRateProvider;
 use Glueful\Extensions\Commerce\Contracts\TaxCalculator;
 use Glueful\Extensions\Commerce\Discounts\DiscountRepository;
@@ -34,6 +35,7 @@ final class CheckoutService
         private TaxCalculator $tax,
         private OrderNumberGenerator $numbers,
         private OrderRepository $orders,
+        private DownloadRepository $downloads,
         private PaymentCollector $collector,
         private CurrentTenantResolver $tenants,
     ) {
@@ -91,6 +93,7 @@ final class CheckoutService
         if ($lines === []) {
             throw ValidationException::forField('cart', 'Cart is empty.');
         }
+        $lines = $this->withDownloadSnapshots($context, $tenant, $lines);
 
         $storeCurrency = (string) config($context, 'commerce.currency', 'USD');
         foreach ($lines as $index => $line) {
@@ -241,6 +244,44 @@ final class CheckoutService
 
             return ['status' => 'init_failed', 'retryable' => true];
         }
+    }
+
+    /**
+     * Purchase-time entitlement snapshot (design spec §2): for each line whose
+     * product type is `digital`, snapshots the variant's ACTIVE download
+     * definitions (ordered by position) into a `downloads` key --
+     * `[{download_uuid, blob_uuid, name, download_limit, expiry_days}]`, an
+     * empty array when the digital variant currently has none. Every
+     * non-digital line gets `downloads => null`. Read fresh at order-line
+     * building time so later definition edits/deletes never alter an
+     * already-placed order's snapshot -- {@see OrderRepository} persists this
+     * verbatim, exactly like the add-on snapshot.
+     *
+     * @param list<array<string,mixed>> $lines
+     * @return list<array<string,mixed>>
+     */
+    private function withDownloadSnapshots(ApplicationContext $context, string $tenant, array $lines): array
+    {
+        foreach ($lines as $index => $line) {
+            if ((string) ($line['type'] ?? 'physical') !== 'digital') {
+                $lines[$index]['downloads'] = null;
+                continue;
+            }
+
+            $definitions = $this->downloads->activeForVariant($context, $tenant, (string) $line['variant_uuid']);
+            $lines[$index]['downloads'] = array_values(array_map(
+                static fn (array $d): array => [
+                    'download_uuid' => (string) $d['uuid'],
+                    'blob_uuid' => (string) $d['blob_uuid'],
+                    'name' => (string) $d['name'],
+                    'download_limit' => $d['download_limit'] !== null ? (int) $d['download_limit'] : null,
+                    'expiry_days' => $d['expiry_days'] !== null ? (int) $d['expiry_days'] : null,
+                ],
+                $definitions
+            ));
+        }
+
+        return $lines;
     }
 
     /** @param array<string,mixed> $cart @return array<string,mixed>|null */

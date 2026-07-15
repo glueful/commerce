@@ -14,13 +14,13 @@ final class RefundOrderClaimTest extends CommerceTestCase
         $this->seedOrder('order00claim', '');
         $repository = new OrderRepository();
 
-        self::assertTrue($repository->claimRefundMutation($this->context, '', 'order00claim'));
+        self::assertTrue($repository->claimOrderFinancialMutation($this->context, '', 'order00claim'));
         self::assertSame(1, (int) $this->currentRevision('order00claim'));
 
         // Unlike claimPending's single-shot status transition, the revision claim is a
         // pure serialization primitive: every subsequent refund mutation attempt claims
         // again, bumping the counter further.
-        self::assertTrue($repository->claimRefundMutation($this->context, '', 'order00claim'));
+        self::assertTrue($repository->claimOrderFinancialMutation($this->context, '', 'order00claim'));
         self::assertSame(2, (int) $this->currentRevision('order00claim'));
     }
 
@@ -28,7 +28,7 @@ final class RefundOrderClaimTest extends CommerceTestCase
     {
         $repository = new OrderRepository();
 
-        self::assertFalse($repository->claimRefundMutation($this->context, '', 'no-such-order'));
+        self::assertFalse($repository->claimOrderFinancialMutation($this->context, '', 'no-such-order'));
     }
 
     public function testClaimReturnsFalseForCrossTenantOrder(): void
@@ -36,7 +36,7 @@ final class RefundOrderClaimTest extends CommerceTestCase
         $this->seedOrder('order00tenb', 'tenant-b');
         $repository = new OrderRepository();
 
-        self::assertFalse($repository->claimRefundMutation($this->context, '', 'order00tenb'));
+        self::assertFalse($repository->claimOrderFinancialMutation($this->context, '', 'order00tenb'));
         self::assertSame(0, (int) $this->currentRevision('order00tenb', 'tenant-b'));
     }
 

@@ -27,7 +27,7 @@ final class MailTemplates
     {
         return match ($template) {
             'order_placed' => self::orderPlaced($order),
-            'order_paid' => self::orderPaid($order),
+            'order_paid' => self::orderPaid($order, $payload),
             'order_fulfilled' => self::orderFulfilled($order),
             'order_refunded' => self::orderRefunded($order, $payload),
             'order_note' => self::orderNote($order, $payload),
@@ -46,16 +46,45 @@ final class MailTemplates
         ];
     }
 
-    /** @param array<string,mixed> $order @return array{subject:string,body:string} */
-    private static function orderPaid(array $order): array
+    /**
+     * @param array<string,mixed> $order
+     * @param array<string,mixed> $payload `downloads` (design spec §6): a
+     *        `list<array{name:string,url:string}>` of freshly-issued digital-delivery
+     *        deep links, present ONLY on the first `OrderPaid` dispatch for an order
+     *        that has digital lines. Absent (or an empty list) for every physical
+     *        order and for every subsequent/idempotent re-dispatch of an
+     *        already-granted digital order — the rendered body is then
+     *        byte-identical to the pre-Layer-3 output.
+     * @return array{subject:string,body:string}
+     */
+    private static function orderPaid(array $order, array $payload = []): array
     {
         $number = self::orderNumber($order);
         $total = self::displayAmount((int) ($order['grand_total'] ?? 0), self::currency($order));
+        $body = "Payment of {$total} received for order {$number}. Thank you!";
+
+        $downloads = $payload['downloads'] ?? null;
+        if (is_array($downloads) && $downloads !== []) {
+            $body .= "\n\n" . self::downloadsSection($downloads);
+        }
 
         return [
             'subject' => "Order {$number} payment confirmed",
-            'body' => "Payment of {$total} received for order {$number}. Thank you!",
+            'body' => $body,
         ];
+    }
+
+    /** @param list<array<string,mixed>> $downloads each `{name, url}` */
+    private static function downloadsSection(array $downloads): string
+    {
+        $lines = ['Your digital downloads:'];
+        foreach ($downloads as $download) {
+            $name = (string) ($download['name'] ?? '');
+            $url = (string) ($download['url'] ?? '');
+            $lines[] = "- {$name}: {$url}";
+        }
+
+        return implode("\n", $lines);
     }
 
     /** @param array<string,mixed> $order @return array{subject:string,body:string} */

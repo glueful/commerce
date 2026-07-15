@@ -27,6 +27,12 @@ return [
         'cart' => [(int) env('COMMERCE_CART_RATE_LIMIT', 60), 60],
         'checkout' => [(int) env('COMMERCE_CHECKOUT_RATE_LIMIT', 30), 60],
         'orders' => [(int) env('COMMERCE_ORDER_RATE_LIMIT', 60), 60],
+        'downloads' => [(int) env('COMMERCE_DOWNLOADS_RATE_LIMIT', 60), 60],
+    ],
+
+    // Digital-delivery signed URLs (design spec §4.1).
+    'downloads' => [
+        'url_ttl' => (int) env('COMMERCE_DOWNLOADS_URL_TTL', 300),
     ],
 
     'orders' => [

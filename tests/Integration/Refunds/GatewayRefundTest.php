@@ -374,7 +374,7 @@ final class GatewayRefundTest extends CommerceTestCase
         // test can pause mid-reservation while B attempts to claim the same row.
         $connectionA->getTransactionManager()->begin();
         $orders = new OrderRepository();
-        self::assertTrue($orders->claimRefundMutation($contextA, '', $orderUuid));
+        self::assertTrue($orders->claimOrderFinancialMutation($contextA, '', $orderUuid));
 
         // Launch B: its own claim attempt on the same order blocks on A's row lock.
         $process = proc_open(
