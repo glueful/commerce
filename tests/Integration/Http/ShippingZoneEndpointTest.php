@@ -157,6 +157,44 @@ final class ShippingZoneEndpointTest extends CommerceTestCase
         );
     }
 
+    /**
+     * Deterministic stand-in for the zone-delete-vs-method-create race (mirrors
+     * ShippingClassEndpointTest::testClassDeleteThenVariantAssignReturnsUnprocessable()):
+     * the zone is fully deleted (claim+re-read+cascade, one committed
+     * transaction) BEFORE a method-create attempt names it -- exactly as it
+     * would appear to a racing create that loses the interleave. The create's
+     * own claim on the now-gone zone row affects zero rows, so it must resolve
+     * as a non-revealing 404, never silently insert a method row referencing a
+     * deleted zone. The real two-connection interleave is exercised by
+     * ZoneMethodConcurrencyTest's pgsql-gated test.
+     */
+    public function testDeleteZoneThenMethodCreateThrowsNotFoundLeavingNoOrphanedMethod(): void
+    {
+        $zone = $this->createZone('Race Zone');
+
+        $response = $this->controller()->destroy(Request::create('/x', 'DELETE'), $zone['uuid']);
+        self::assertSame(HttpResponse::HTTP_NO_CONTENT, $response->getStatusCode());
+
+        try {
+            $this->controller()->storeMethod(
+                new CreateMethodData(kind: 'flat', label: 'Standard', config: ['amount' => 500]),
+                Request::create('/x', 'POST'),
+                $zone['uuid']
+            );
+            self::fail('expected NotFoundException');
+        } catch (NotFoundException) {
+            $this->addToAssertionCount(1);
+        }
+
+        self::assertSame(
+            0,
+            $this->connection->table('commerce_shipping_methods')
+                ->where('zone_uuid', '=', $zone['uuid'])
+                ->count(),
+            'No method row may exist against a deleted zone.'
+        );
+    }
+
     // --- Locations set-list -----------------------------------------------------
 
     public function testSetLocationsCountryHappyPathAndNormalizesCase(): void

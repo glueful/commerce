@@ -8,8 +8,20 @@ Short answer: **migration is possible only for a simple store today, not a serio
 - Basic inventory tracking and stock ledger.
 - Cart + checkout.
 - Fixed/percentage discounts with usage limits.
-- Basic shipping quotes through the provider contract.
-- Basic tax through the tax contract.
+- Data-driven shipping zones, geographic matching (country/state/postcode, including
+  wildcard patterns and a conjunctive country-scopes-postcode rule), position-ordered
+  zone precedence with an "everywhere" catch-all zone and a shadowing warning, and
+  three per-zone method kinds (flat, free-over-threshold, per-shipping-class table)
+  with a full shipping-class taxonomy — via a thin provider chain (app-bound >
+  DB-when-zones-exist > config fallback), so an app that never configures zones keeps
+  the original config-driven behavior byte-for-byte.
+- Data-driven tax rates — country/state/postcode-matched, per tax-class rate rows with
+  priority ordering, a `shipping_taxable` toggle, and discount-aware per-line
+  allocation (largest-remainder, scope-eligible) — via the same delegation pattern
+  (app-bound > DB-when-rates-exist > flat-rate config fallback).
+  Caveat: admin/API only, no settings UI (see "No bundled merchant admin UI" below);
+  one rate per class applies (no compound/stacked tax rates); no live carrier rates or
+  per-customer tax exemptions yet.
 - Orders, order events, payment retry, fulfillment status/tracking ref.
 - Payvia-style payment collection through contracts.
 - Tenant-ready data model.
@@ -63,7 +75,7 @@ Short answer: **migration is possible only for a simple store today, not a serio
   backstop depends on); consumption is minted-signed-URL-based (a time-boxed URL per
   mint), not a raw fetch-count meter.
 
-That works for: a custom headless storefront selling physical, grouped, or external/affiliate products, organized into categories/tags with attributes, media galleries, add-ons, and moderated reviews, with simple variants and basic checkout, customer accounts backed by Users, saved addresses, and full digital-product delivery.
+That works for: a custom headless storefront selling physical, grouped, or external/affiliate products, organized into categories/tags with attributes, media galleries, add-ons, and moderated reviews, with simple variants and basic checkout, customer accounts backed by Users, saved addresses, full digital-product delivery, and data-driven shipping zones/classes and tax rates.
 
 ## What Is Missing Versus WooCommerce
 
@@ -74,8 +86,6 @@ Major gaps:
 - No migration/import tool from WooCommerce yet.
 - No composite/bundle products (grouped and external/affiliate now work — see above).
 - No generated invoice documents (PDF/printable).
-- No tax-rate table/VAT rules UI.
-- No mature shipping zones/classes/rules UI.
 - No reports/analytics.
 - No abandoned cart, subscriptions, memberships, marketplaces, POS, etc.
 - No bundled merchant admin UI comparable to WooCommerce. This is intentional: Commerce should provide API/domain parity, while app creators build the merchant experience that fits their product.
@@ -111,14 +121,14 @@ deliberately last (an importer written before its target models exist gets rewri
 every model added; build the destination schema first, write the importer once against the
 final shape):
 
-1. Shipping/tax APIs and configuration surfaces.
-2. Reports/analytics APIs.
-3. API parity for WooCommerce resources needed by importers and app-level UIs.
-4. WooCommerce importer, written against the finished models above.
+1. Reports/analytics APIs.
+2. API parity for WooCommerce resources needed by importers and app-level UIs.
+3. WooCommerce importer, written against the finished models above.
 
 (Refunds, order notes, transactional emails, the whole product-media/categories/
 tags/attributes/reviews/add-ons/grouped-external-product-type batch, customers via
-Users integration, the storefront address book, and full digital-product delivery —
-formerly items 1 and 1a here — have shipped; see "What Can Migrate Today" above.)
+Users integration, the storefront address book, full digital-product delivery, and
+data-driven shipping zones/classes and tax rates — formerly items 1 and 1a here —
+have shipped; see "What Can Migrate Today" above.)
 
 

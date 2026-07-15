@@ -106,6 +106,58 @@ final class CatalogService
         ]);
 
         $created = [];
+        db($context)->transaction(
+            function () use ($context, $tenant, $productUuid, $variants, $storeCurrency, $type, &$created): void {
+                $this->claimAndInsertCreatedVariants(
+                    $context,
+                    $tenant,
+                    $productUuid,
+                    $variants,
+                    $storeCurrency,
+                    $type,
+                    $created
+                );
+            }
+        );
+
+        $product = $this->products->findByUuid($context, $tenant, $productUuid);
+        if ($product === null) {
+            throw new \RuntimeException('Created product could not be reloaded.');
+        }
+
+        $product['variants'] = $this->shippingClasses->attachResolvedSlugs(
+            $context,
+            $tenant,
+            array_values(array_filter($created))
+        );
+
+        return $product;
+    }
+
+    /**
+     * Claims every distinct shipping class the batch of $variants references
+     * (see {@see self::claimShippingClassesForCreate()}) and inserts each
+     * variant row, all inside the SAME transaction createProduct() opened --
+     * extracted purely to keep that transaction's closure body under the
+     * house line-length limit.
+     *
+     * @param list<array<string,mixed>> $variants
+     * @param list<array<string,mixed>|null> $created
+     */
+    private function claimAndInsertCreatedVariants(
+        ApplicationContext $context,
+        string $tenant,
+        string $productUuid,
+        array $variants,
+        string $storeCurrency,
+        string $type,
+        array &$created
+    ): void {
+        $this->claimShippingClassesForCreate($context, $tenant, array_map(
+            static fn (array $variant): ?string => $variant['shipping_class_uuid'] ?? null,
+            $variants
+        ));
+
         foreach ($variants as $position => $variant) {
             $variantUuid = Utils::generateNanoID();
             $this->variants->insert($context, [
@@ -126,19 +178,6 @@ final class CatalogService
 
             $created[] = $this->variants->findByUuid($context, $tenant, $variantUuid);
         }
-
-        $product = $this->products->findByUuid($context, $tenant, $productUuid);
-        if ($product === null) {
-            throw new \RuntimeException('Created product could not be reloaded.');
-        }
-
-        $product['variants'] = $this->shippingClasses->attachResolvedSlugs(
-            $context,
-            $tenant,
-            array_values(array_filter($created))
-        );
-
-        return $product;
     }
 
     /**
@@ -165,19 +204,26 @@ final class CatalogService
         $variants = $this->validateVariants($context, $tenant, [$input], $storeCurrency);
         $variant = $variants[0];
         $variantUuid = Utils::generateNanoID();
-        $this->variants->insert($context, [
-            'uuid' => $variantUuid,
-            'tenant_uuid' => $tenant,
-            'product_uuid' => $productUuid,
-            'sku' => (string) $variant['sku'],
-            'option_values' => $variant['option_values'] ?? [],
-            'price' => (int) $variant['price'],
-            'compare_at_price' => $variant['compare_at_price'] ?? null,
-            'currency' => $storeCurrency,
-            'position' => count($this->variants->forProduct($context, $tenant, $productUuid)),
-            'status' => (string) ($variant['status'] ?? 'active'),
-            'shipping_class_uuid' => $variant['shipping_class_uuid'] ?? null,
-        ]);
+
+        db($context)->transaction(
+            function () use ($context, $tenant, $productUuid, $variant, $variantUuid, $storeCurrency): void {
+                $this->claimShippingClassesForCreate($context, $tenant, [$variant['shipping_class_uuid'] ?? null]);
+
+                $this->variants->insert($context, [
+                    'uuid' => $variantUuid,
+                    'tenant_uuid' => $tenant,
+                    'product_uuid' => $productUuid,
+                    'sku' => (string) $variant['sku'],
+                    'option_values' => $variant['option_values'] ?? [],
+                    'price' => (int) $variant['price'],
+                    'compare_at_price' => $variant['compare_at_price'] ?? null,
+                    'currency' => $storeCurrency,
+                    'position' => count($this->variants->forProduct($context, $tenant, $productUuid)),
+                    'status' => (string) ($variant['status'] ?? 'active'),
+                    'shipping_class_uuid' => $variant['shipping_class_uuid'] ?? null,
+                ]);
+            }
+        );
 
         $this->stock->ensureRow($context, $tenant, $variantUuid, ($product['type'] ?? 'physical') === 'physical');
 
@@ -448,6 +494,43 @@ final class CatalogService
 
             $this->variants->update($context, $tenant, $variantUuid, $changes);
         });
+    }
+
+    /**
+     * Symmetric CREATE-path counterpart to {@see self::updateVariantShippingClass()}'s
+     * shared-claim protocol (reviewer-mandated hardening, T3 follow-up): claims
+     * every distinct shipping-class uuid a variant CREATE proposes to reference
+     * (sorted, affected-row-checked via
+     * {@see \Glueful\Extensions\Commerce\Shipping\ShippingClassRepository::claimRevision()})
+     * and re-validates existence post-claim. `validateVariants()`'s plain
+     * `findByUuid` existence check alone leaves a TOCTOU gap against a
+     * concurrent class DELETE landing between validation and insert -- claiming
+     * here closes it, so create/update/delete all serialize against the SAME
+     * class row (see {@see \Glueful\Extensions\Commerce\Shipping\ShippingClassService}'s
+     * class docblock for the full race analysis). MUST run inside the SAME
+     * transaction as the variant insert(s) that reference the claimed class(es);
+     * claiming without an atomic insert alongside it would not serialize
+     * against anything.
+     *
+     * @param list<string|null> $classUuids
+     */
+    private function claimShippingClassesForCreate(ApplicationContext $context, string $tenant, array $classUuids): void
+    {
+        $claimSet = array_values(array_unique(array_filter(
+            $classUuids,
+            static fn (mixed $uuid): bool => $uuid !== null
+        )));
+        sort($claimSet);
+
+        foreach ($claimSet as $classUuid) {
+            $claimed = $this->shippingClasses->claimRevision($context, $tenant, (string) $classUuid);
+            if (!$claimed || $this->shippingClasses->findByUuid($context, $tenant, (string) $classUuid) === null) {
+                throw ValidationException::forField(
+                    'shipping_class_uuid',
+                    'shipping_class_uuid must reference an existing shipping class in this tenant.'
+                );
+            }
+        }
     }
 
     private function storeCurrency(ApplicationContext $context): string

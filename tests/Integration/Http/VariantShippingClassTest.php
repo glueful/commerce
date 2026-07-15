@@ -206,6 +206,63 @@ final class VariantShippingClassTest extends CommerceTestCase
         self::assertNull($variant['shipping_class']);
     }
 
+    /**
+     * Reviewer-mandated hardening (T3 follow-up): createProduct()'s variant
+     * insert must CLAIM every distinct shipping class it references (same
+     * affected-row-checked {@see \Glueful\Extensions\Commerce\Shipping\ShippingClassRepository::claimRevision()}
+     * primitive the update path already uses via
+     * {@see \Glueful\Extensions\Commerce\Catalog\CatalogService::updateVariantShippingClass()}),
+     * not merely re-run the plain `findByUuid` existence check
+     * `validateVariants()` already performs. A plain existence check alone
+     * leaves a TOCTOU gap against a concurrent class DELETE landing between
+     * validation and insert; claiming the row serializes create against
+     * delete/update so all three share one invariant. The revision bump is
+     * the observable, deterministic proof that a claim (not just a read)
+     * occurred.
+     */
+    public function testCreateProductVariantWithShippingClassUuidClaimsTheClassRevision(): void
+    {
+        $class = $this->createClass('fragile', 'Fragile');
+
+        $this->catalog()->createProduct($this->context, [
+            'slug' => 'ship-class-create-claim',
+            'name' => 'Ship Class Create Claim',
+            'type' => 'physical',
+            'variants' => [[
+                'sku' => 'SHIPCLASSCREATECLAIM',
+                'price' => 1000,
+                'currency' => 'USD',
+                'shipping_class_uuid' => $class['uuid'],
+            ]],
+        ]);
+
+        $classRow = $this->connection->table('commerce_shipping_classes')
+            ->where('uuid', '=', $class['uuid'])->first();
+        self::assertSame(1, (int) $classRow['revision']);
+    }
+
+    /** Same hardening as above, exercised through createVariant() (storeVariant). */
+    public function testCreateVariantWithShippingClassUuidClaimsTheClassRevision(): void
+    {
+        $class = $this->createClass('fragile', 'Fragile');
+        $product = $this->seedPhysicalProduct('ship-class-createvar-claim');
+
+        $this->adminController()->storeVariant(
+            new CreateVariantData(
+                sku: 'SHIPCLASSCREATEVARCLAIM2',
+                price: 1000,
+                currency: 'USD',
+                shipping_class_uuid: $class['uuid']
+            ),
+            Request::create('/x', 'POST'),
+            $product['uuid']
+        );
+
+        $classRow = $this->connection->table('commerce_shipping_classes')
+            ->where('uuid', '=', $class['uuid'])->first();
+        self::assertSame(1, (int) $classRow['revision']);
+    }
+
     // --- Variant shipping_class_uuid: update (set/clear/omit) -----------------------------------------------------
 
     public function testUpdateVariantSetsShippingClassUuid(): void
