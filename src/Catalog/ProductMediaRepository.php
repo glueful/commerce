@@ -43,6 +43,36 @@ final class ProductMediaRepository
             ->first();
     }
 
+    /**
+     * Batched `coverFor()`: one cover row per product uuid (at most one, per the
+     * at-most-one-cover invariant `demoteCover()` enforces), in a single IN
+     * query -- avoids one query per product when resolving cover urls for a
+     * LIST of products (e.g. the storefront index or a grouped product's
+     * children payload).
+     *
+     * @param list<string> $productUuids
+     * @return array<string,array<string,mixed>> keyed by product_uuid
+     */
+    public function coversForProducts(ApplicationContext $context, string $tenant, array $productUuids): array
+    {
+        if ($productUuids === []) {
+            return [];
+        }
+
+        $rows = db($context)->table('commerce_product_media')
+            ->where('tenant_uuid', '=', $tenant)
+            ->whereIn('product_uuid', $productUuids)
+            ->where('role', '=', 'cover')
+            ->get();
+
+        $covers = [];
+        foreach ($rows as $row) {
+            $covers[(string) $row['product_uuid']] = $row;
+        }
+
+        return $covers;
+    }
+
     /** @param array<string,mixed> $changes */
     public function update(ApplicationContext $context, string $tenant, string $uuid, array $changes): void
     {

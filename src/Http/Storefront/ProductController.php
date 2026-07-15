@@ -206,19 +206,30 @@ final class ProductController
 
     /**
      * Grouped-only: children ordered by position, each with the same cover-url
-     * resolution as the parent.
+     * resolution as the parent -- batched into a single IN query via
+     * `coversForProducts()` rather than one `coverFor()` call per child (avoids
+     * an N+1 query per grouped-product show()).
      *
      * @return list<array{slug:string,name:string,cover_url:?string}>
      */
     private function childrenPayload(string $tenant, string $productUuid): array
     {
-        $rows = $this->children->childProductsForProduct($this->context, $tenant, $productUuid);
+        $rows = $this->children->visibleChildProductsForProduct($this->context, $tenant, $productUuid);
+        $covers = $this->media->coversForProducts(
+            $this->context,
+            $tenant,
+            array_map(static fn (array $row): string => (string) $row['uuid'], $rows)
+        );
 
-        return array_map(fn (array $row): array => [
-            'slug' => (string) $row['slug'],
-            'name' => (string) $row['name'],
-            'cover_url' => $this->coverUrl($tenant, (string) $row['uuid']),
-        ], $rows);
+        return array_map(static function (array $row) use ($covers): array {
+            $cover = $covers[(string) $row['uuid']] ?? null;
+
+            return [
+                'slug' => (string) $row['slug'],
+                'name' => (string) $row['name'],
+                'cover_url' => $cover === null ? null : '/blobs/' . $cover['blob_uuid'],
+            ];
+        }, $rows);
     }
 
     /**

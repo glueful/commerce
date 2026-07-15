@@ -604,6 +604,73 @@ final class ProductTypesTest extends CommerceTestCase
         self::assertSame('grouped', $this->json($response)['data']['type']);
     }
 
+    // --- Review finding 1: metadata-only PATCH on an external product ----------
+
+    /**
+     * Review finding: `updateProduct()` previously only re-validated
+     * `metadata.external_url` inside the `type`-key branch, so a metadata-only
+     * PATCH (no `type` in the payload) on an already-external product could strip
+     * or corrupt `external_url` without any validation at all -- a stored
+     * external product with a null/missing url on the storefront. The fix
+     * re-validates whenever the update touches `metadata` AND the product's
+     * EFFECTIVE type (incoming `type` key, else the current stored type) is
+     * `external`.
+     */
+    public function testMetadataOnlyPatchRemovingExternalUrlOnExternalProductReturns422(): void
+    {
+        $product = $this->seedExternalProduct('meta-only-strip', '', 'https://vendor.example.com/keep');
+
+        $response = $this->adminController()->update(
+            $this->patchRequest(['metadata' => ['button_label' => 'Buy now']]),
+            $product['uuid']
+        );
+
+        self::assertSame(422, $response->getStatusCode(), (string) $response->getContent());
+        self::assertArrayHasKey('metadata.external_url', $this->json($response)['error']['details']);
+        self::assertSame(
+            'https://vendor.example.com/keep',
+            json_decode(
+                (string) $this->connection->table('commerce_products')
+                    ->where('uuid', '=', $product['uuid'])->first()['metadata'],
+                true
+            )['external_url'],
+            'A rejected metadata-only update must not have touched the stored external_url.'
+        );
+    }
+
+    public function testMetadataOnlyPatchWithValidNewUrlOnExternalProductPersists(): void
+    {
+        $product = $this->seedExternalProduct('meta-only-swap', '', 'https://vendor.example.com/old');
+
+        $response = $this->adminController()->update(
+            $this->patchRequest(['metadata' => ['external_url' => 'https://vendor.example.com/new']]),
+            $product['uuid']
+        );
+
+        self::assertSame(200, $response->getStatusCode(), (string) $response->getContent());
+        self::assertSame(
+            'https://vendor.example.com/new',
+            json_decode(
+                (string) $this->connection->table('commerce_products')
+                    ->where('uuid', '=', $product['uuid'])->first()['metadata'],
+                true
+            )['external_url']
+        );
+    }
+
+    /** A metadata-only PATCH on a non-external product needs no external_url at all. */
+    public function testMetadataOnlyPatchOnPhysicalProductDoesNotRequireExternalUrl(): void
+    {
+        $product = $this->seedPhysicalProduct('meta-only-physical');
+
+        $response = $this->adminController()->update(
+            $this->patchRequest(['metadata' => ['note' => 'internal only']]),
+            $product['uuid']
+        );
+
+        self::assertSame(200, $response->getStatusCode(), (string) $response->getContent());
+    }
+
     // --- Cart gate: defense in depth for external/grouped variants -------------
 
     public function testAddLineRejectsVariantOnExternalProduct(): void
@@ -687,6 +754,59 @@ final class ProductTypesTest extends CommerceTestCase
         self::assertArrayNotHasKey('external', $this->json($response)['data']);
     }
 
+    /**
+     * Review finding 4: `childrenPayload()` resolves each child's cover via a
+     * single batched `ProductMediaRepository::coversForProducts()` IN-query
+     * rather than one `coverFor()` call per child. Two children with distinct
+     * covers (plus one with none) proves the batching maps covers back to the
+     * correct child rather than smearing/misaligning results.
+     */
+    public function testStorefrontShowResolvesEachChildsOwnCoverViaBatchedLookup(): void
+    {
+        require_once __DIR__ . '/../../../vendor/glueful/framework/migrations/uploads/001_CreateBlobsTable.php';
+        (new \Glueful\Migrations\Uploads\CreateBlobsTable())->up($this->connection->getSchemaBuilder());
+        $this->seedBlobDirect('blobchildcov1');
+        $this->seedBlobDirect('blobchildcov2');
+
+        $parent = $this->seedGroupedProduct('sf-grouped-covers');
+        $childWithCoverA = $this->seedPhysicalProduct('sf-cover-child-a');
+        $childWithCoverB = $this->seedPhysicalProduct('sf-cover-child-b');
+        $childNoCover = $this->seedPhysicalProduct('sf-cover-child-c');
+        $this->connection->table('commerce_product_media')->insert([
+            'uuid' => 'medchildcov01',
+            'tenant_uuid' => '',
+            'product_uuid' => $childWithCoverA['uuid'],
+            'blob_uuid' => 'blobchildcov1',
+            'role' => 'cover',
+            'position' => 0,
+        ]);
+        $this->connection->table('commerce_product_media')->insert([
+            'uuid' => 'medchildcov02',
+            'tenant_uuid' => '',
+            'product_uuid' => $childWithCoverB['uuid'],
+            'blob_uuid' => 'blobchildcov2',
+            'role' => 'cover',
+            'position' => 0,
+        ]);
+
+        $this->adminController()->setChildren(
+            new SetProductChildrenData(
+                child_uuids: [$childWithCoverA['uuid'], $childWithCoverB['uuid'], $childNoCover['uuid']]
+            ),
+            Request::create('/x', 'PUT'),
+            $parent['uuid']
+        );
+
+        $response = $this->productController()->show(Request::create('/x'), (string) $parent['slug']);
+
+        self::assertSame(200, $response->getStatusCode(), (string) $response->getContent());
+        $children = $this->json($response)['data']['children'];
+        $bySlug = array_combine(array_column($children, 'slug'), $children);
+        self::assertSame('/blobs/blobchildcov1', $bySlug['sf-cover-child-a']['cover_url']);
+        self::assertSame('/blobs/blobchildcov2', $bySlug['sf-cover-child-b']['cover_url']);
+        self::assertNull($bySlug['sf-cover-child-c']['cover_url']);
+    }
+
     public function testStorefrontShowEchoesExternalUrlAndButtonLabel(): void
     {
         $product = $this->seedExternalProduct('sf-external-1', '', 'https://vendor.example.com/z');
@@ -704,6 +824,83 @@ final class ProductTypesTest extends CommerceTestCase
         self::assertSame('https://vendor.example.com/z', $data['external']['url']);
         self::assertSame('Shop Now', $data['external']['button_label']);
         self::assertArrayNotHasKey('children', $data);
+    }
+
+    /**
+     * Review finding: `ProductChildrenRepository::childProductsForProduct()`
+     * joined `commerce_product_children` -> `commerce_products` with no
+     * `status`/`deleted_at` filter, so a grouped parent's storefront `children`
+     * echo could leak a draft or soft-deleted child. The fix mirrors
+     * `ProductController::show()`'s own visibility rule for the primary
+     * resource (`status === 'active'` AND `deleted_at IS NULL`) onto the
+     * children join.
+     */
+    public function testStorefrontShowChildrenEchoOmitsDraftAndSoftDeletedChildren(): void
+    {
+        $parent = $this->seedGroupedProduct('sf-children-visibility');
+        $active = $this->seedPhysicalProduct('sf-child-active');
+        $draft = $this->seedPhysicalProduct('sf-child-draft');
+        $softDeleted = $this->seedPhysicalProduct('sf-child-soft-deleted');
+
+        // Attach all three while every child is still active -- setChildren()'s
+        // own re-read only requires physical/digital, so this reflects the real
+        // scenario the leak comes from: a child's status/deleted_at changes
+        // LATER, independently, without the (stale) children join row ever
+        // being touched again.
+        $this->adminController()->setChildren(
+            new SetProductChildrenData(child_uuids: [
+                $active['uuid'],
+                $draft['uuid'],
+                $softDeleted['uuid'],
+            ]),
+            Request::create('/x', 'PUT'),
+            $parent['uuid']
+        );
+
+        $this->connection->table('commerce_products')
+            ->where('uuid', '=', $draft['uuid'])
+            ->update(['status' => 'draft']);
+        $this->connection->table('commerce_products')
+            ->where('uuid', '=', $softDeleted['uuid'])
+            ->delete();
+
+        $response = $this->productController()->show(Request::create('/x'), (string) $parent['slug']);
+
+        self::assertSame(200, $response->getStatusCode());
+        $children = $this->json($response)['data']['children'];
+        self::assertSame(['sf-child-active'], array_column($children, 'slug'));
+    }
+
+    /**
+     * The finding's other half: the admin set-list response (the closest thing
+     * to an admin "GET children") must stay UNFILTERED -- an operator managing a
+     * grouped product's children needs to see a draft child that's already
+     * attached, not have it silently vanish from the response body.
+     */
+    public function testAdminSetChildrenResponseIncludesDraftChildUnfiltered(): void
+    {
+        $parent = $this->seedGroupedProduct('admin-children-visibility');
+        $draft = $this->catalog()->createProduct($this->context, [
+            'slug' => 'admin-child-draft',
+            'name' => 'admin-child-draft',
+            'type' => 'physical',
+            'status' => 'draft',
+            'variants' => [[
+                'sku' => 'ADMINCHILDDRAFT',
+                'option_values' => [],
+                'price' => 500,
+                'currency' => 'USD',
+            ]],
+        ]);
+
+        $response = $this->adminController()->setChildren(
+            new SetProductChildrenData(child_uuids: [$draft['uuid']]),
+            Request::create('/x', 'PUT'),
+            $parent['uuid']
+        );
+
+        self::assertSame(200, $response->getStatusCode(), (string) $response->getContent());
+        self::assertSame(['admin-child-draft'], array_column($this->json($response)['data'], 'slug'));
     }
 
     public function testStorefrontShowOmitsChildrenAndExternalKeysForPhysicalProduct(): void
@@ -800,6 +997,22 @@ final class ProductTypesTest extends CommerceTestCase
         ]);
 
         return $variantUuid;
+    }
+
+    /** Only used by the batched-cover-lookup test; requires the blobs table to already exist. */
+    private function seedBlobDirect(string $uuid): void
+    {
+        $this->connection->table('blobs')->insert([
+            'uuid' => $uuid,
+            'name' => $uuid,
+            'mime_type' => 'image/png',
+            'size' => 100,
+            'url' => '/storage/' . $uuid,
+            'storage_type' => 'local',
+            'visibility' => 'public',
+            'status' => 'active',
+            'created_by' => 'uploader00001',
+        ]);
     }
 
     private function addLineRequest(string $token, string $variantUuid, int $quantity): Request

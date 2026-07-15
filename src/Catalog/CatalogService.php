@@ -22,7 +22,11 @@ use Glueful\Validation\ValidationException;
  * made first or the pre-existing unconditional "at least one variant" rule would
  * wrongly reject them. external additionally requires a validated http/https
  * `metadata.external_url` at the point its type is set (create, or an update that
- * sets type to external).
+ * sets type to external) AND on every subsequent update that touches `metadata`
+ * while the product's EFFECTIVE type (the incoming `type` key if present, else
+ * the current stored type) is external — including a metadata-only PATCH that
+ * carries no `type` key at all, so an already-external product can never be left
+ * with a stripped/invalid `external_url` by a partial update.
  *
  * Type is immutable once it would strand data: a type-changing update is rejected
  * whenever the product has variants, a children relationship in EITHER direction
@@ -187,14 +191,25 @@ final class CatalogService
             }
         }
 
-        if (array_key_exists('type', $changes)) {
-            $newType = (string) $changes['type'];
-            $this->assertValidType($newType);
+        $touchesType = array_key_exists('type', $changes);
+        $touchesMetadata = array_key_exists('metadata', $changes);
 
+        // Loaded whenever either key is present: a `type` change needs the
+        // CURRENT type/metadata to decide the immutability guard and the
+        // fallback metadata to re-validate against; a metadata-only change needs
+        // the current type to know whether the product is (still) external at
+        // all -- see the metadata re-validation block below.
+        $current = null;
+        if ($touchesType || $touchesMetadata) {
             $current = $this->products->findByUuid($context, $tenant, $productUuid);
             if ($current === null) {
                 throw new NotFoundException('Resource not found.');
             }
+        }
+
+        if ($touchesType) {
+            $newType = (string) $changes['type'];
+            $this->assertValidType($newType);
 
             $currentType = (string) ($current['type'] ?? 'physical');
             if ($newType !== $currentType && $this->productHasStrandableReferences($context, $tenant, $productUuid)) {
@@ -203,11 +218,20 @@ final class CatalogService
                     'type cannot change while the product has variants, children, or cart/order references.'
                 );
             }
+        }
 
-            if ($newType === 'external') {
-                $metadata = array_key_exists('metadata', $changes)
-                    ? $changes['metadata']
-                    : ($current['metadata'] ?? null);
+        // Re-validate `metadata.external_url` whenever the update touches
+        // `metadata` AND the product's EFFECTIVE type (the incoming `type` key,
+        // else the current stored type) is `external` -- covers both a
+        // type-change landing on external AND a metadata-only PATCH against an
+        // already-external product (the bug this guard closes: such a PATCH
+        // could otherwise strip/corrupt `external_url` with no validation at
+        // all, since the old code only ever checked this inside the `type`-key
+        // branch).
+        if ($touchesType || $touchesMetadata) {
+            $effectiveType = $touchesType ? (string) $changes['type'] : (string) ($current['type'] ?? 'physical');
+            if ($effectiveType === 'external') {
+                $metadata = $touchesMetadata ? $changes['metadata'] : ($current['metadata'] ?? null);
                 $this->assertExternalMetadata($metadata);
             }
         }

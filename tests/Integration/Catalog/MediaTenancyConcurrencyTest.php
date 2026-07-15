@@ -138,6 +138,9 @@ final class MediaTenancyConcurrencyTest extends CommerceTestCase
 
         $contextA = $this->pgsqlContext($connectionA);
         $productUuid = 'prodpgrace01';
+        // Self-healing: remove any debris a previous (crashed or green) run of this
+        // gated test left behind, so the lane is idempotently re-runnable.
+        $this->deleteRaceDebris($connectionA, $productUuid, ['blobracea002', 'blobraceb002']);
         $connectionA->table('commerce_products')->insert([
             'uuid' => $productUuid,
             'tenant_uuid' => '',
@@ -216,6 +219,28 @@ final class MediaTenancyConcurrencyTest extends CommerceTestCase
             $demoted[0]['role'],
             "A's cover must be demoted once B's claim commits after it."
         );
+
+        $this->deleteRaceDebris($connectionA, $productUuid, ['blobracea002', 'blobraceb002']);
+    }
+
+    /**
+     * Idempotent pgsql-lane cleanup: media rows, blobs, and the race product
+     * (forceDelete — commerce_products carries deleted_at, so a plain delete()
+     * would soft-delete and strand the unique uuid for the next run).
+     *
+     * @param list<string> $blobUuids
+     */
+    private function deleteRaceDebris(Connection $connection, string $productUuid, array $blobUuids): void
+    {
+        $connection->table('commerce_product_media')
+            ->where('product_uuid', '=', $productUuid)
+            ->delete();
+        foreach ($blobUuids as $blobUuid) {
+            $connection->table('blobs')->where('uuid', '=', $blobUuid)->delete();
+        }
+        $connection->table('commerce_products')
+            ->where('uuid', '=', $productUuid)
+            ->forceDelete();
     }
 
     public function testTenantBCannotAttachMediaToTenantAsProduct(): void
