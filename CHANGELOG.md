@@ -19,3 +19,17 @@
 - Added pagination for admin and customer order listing APIs.
 - Added maintenance CLI commands and `commerce:diagnose`.
 - Added tenant-mode resolver wiring, fail-closed tenant context handling, tenant table registration, and `commerce:tenancy:adopt`.
+- Added partial/full order refunds with automatic stock restock, a gateway-backed settlement saga, and idempotent refund requests.
+- Added order notes attached to admin/system order actions, with actor resolution.
+- Added opt-in transactional email for order lifecycle events (placed, fulfilled, refund settled, etc.), with mailer, listeners, and templates.
+- Added invoice data v1 (seller identity, line/tax/totals snapshot) and a dedicated invoice endpoint.
+- Fixed `fulfill()` to dispatch the `OrderFulfilled` event, which was previously silently skipped.
+- Removed the standalone admin `mark-refunded` endpoint; refunds are now the single source of truth for an order's refunded state.
+- Added product media (cover + gallery) attach/reorder/detach endpoints with blob validation.
+- Added categories and tags taxonomy with per-product assignment endpoints.
+- Added product attributes (global and per-product custom) with visible/hidden storefront echo control.
+- Added external and grouped product types, including grouped-child ordering and external URL/button metadata.
+- Added product add-ons (select/checkbox/text) with snapshot pricing, cart-line hash identity, and admin CRUD.
+- Added customer reviews with a moderation workflow and transactional rating rollups.
+- Added storefront `GET /commerce/products` and `GET /commerce/products/{slug}` enrichments: media, categories, tags, attributes, add-ons, children, rating, and external metadata.
+- Added multi-tenant coverage and claim-based concurrency protection for all Layer 2 catalog tables.

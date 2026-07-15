@@ -543,7 +543,8 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(CategoryRepository::class),
             $container->get(TagRepository::class),
             $container->get(AttributeRepository::class),
-            $container->get(ProductChildrenRepository::class)
+            $container->get(ProductChildrenRepository::class),
+            $container->get(AddonRepository::class)
         );
     }
 

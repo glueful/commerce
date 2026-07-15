@@ -7,9 +7,16 @@ namespace Glueful\Extensions\Commerce\Tests\Integration\Http;
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Catalog\AddonRepository;
 use Glueful\Extensions\Commerce\Catalog\AddonService;
+use Glueful\Extensions\Commerce\Catalog\AttributeRepository;
+use Glueful\Extensions\Commerce\Catalog\CategoryRepository;
+use Glueful\Extensions\Commerce\Catalog\ProductChildrenRepository;
+use Glueful\Extensions\Commerce\Catalog\ProductMediaRepository;
 use Glueful\Extensions\Commerce\Catalog\ProductRepository;
+use Glueful\Extensions\Commerce\Catalog\TagRepository;
+use Glueful\Extensions\Commerce\Catalog\VariantRepository;
 use Glueful\Extensions\Commerce\Http\Admin\AdminAddonController;
 use Glueful\Extensions\Commerce\Http\DTOs\CreateAddonData;
+use Glueful\Extensions\Commerce\Http\Storefront\ProductController;
 use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
 use Glueful\Extensions\Commerce\Tests\Support\CommerceTestCase;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
@@ -302,6 +309,74 @@ final class AddonEndpointTest extends CommerceTestCase
         self::assertNull((new AddonRepository())->findByUuid($this->context, '', $addon['uuid']));
     }
 
+    // --- Storefront -----------------------------------------------------
+
+    public function testStorefrontShowIncludesActiveAddonsWithFullDefinitionAndChoiceDeltas(): void
+    {
+        $product = $this->seedProduct('prodaddonsf1');
+        $this->createAddon($product['uuid'], name: 'Color', fieldType: 'select', choices: [
+            ['key' => 'red', 'label' => 'Red', 'price_delta' => 100],
+            ['key' => 'blue', 'label' => 'Blue', 'price_delta' => 200],
+        ], position: 0);
+        $this->createAddon(
+            $product['uuid'],
+            name: 'Gift wrap',
+            fieldType: 'checkbox',
+            priceDelta: 300,
+            position: 1
+        );
+
+        $response = $this->productController()->show(Request::create('/x'), $product['uuid']);
+
+        self::assertSame(200, $response->getStatusCode());
+        $addons = $this->json($response)['data']['addons'];
+        self::assertCount(2, $addons);
+
+        $color = $addons[0];
+        self::assertArrayHasKey('uuid', $color);
+        self::assertSame('Color', $color['name']);
+        self::assertSame('select', $color['field_type']);
+        self::assertFalse($color['required']);
+        self::assertSame(0, (int) $color['position']);
+        self::assertSame(0, (int) $color['price_delta']);
+        self::assertSame(
+            [
+                ['key' => 'red', 'label' => 'Red', 'price_delta' => 100],
+                ['key' => 'blue', 'label' => 'Blue', 'price_delta' => 200],
+            ],
+            $color['choices']
+        );
+        self::assertArrayNotHasKey('status', $color);
+        self::assertArrayNotHasKey('tenant_uuid', $color);
+
+        $giftWrap = $addons[1];
+        self::assertSame('Gift wrap', $giftWrap['name']);
+        self::assertSame('checkbox', $giftWrap['field_type']);
+        self::assertSame(300, (int) $giftWrap['price_delta']);
+        self::assertNull($giftWrap['choices']);
+    }
+
+    public function testStorefrontShowExcludesInactiveAddons(): void
+    {
+        $product = $this->seedProduct('prodaddonsf2');
+        $this->createAddon($product['uuid'], name: 'Gift wrap', fieldType: 'checkbox', status: 'inactive');
+
+        $response = $this->productController()->show(Request::create('/x'), $product['uuid']);
+
+        self::assertSame(200, $response->getStatusCode());
+        self::assertSame([], $this->json($response)['data']['addons']);
+    }
+
+    public function testStorefrontShowReturnsEmptyAddonsArrayForProductWithoutAddons(): void
+    {
+        $product = $this->seedProduct('prodaddonsf3');
+
+        $response = $this->productController()->show(Request::create('/x'), $product['uuid']);
+
+        self::assertSame(200, $response->getStatusCode());
+        self::assertSame([], $this->json($response)['data']['addons']);
+    }
+
     // --- Helpers -----------------------------------------------------
 
     /** @return array<string,mixed> */
@@ -365,6 +440,22 @@ final class AddonEndpointTest extends CommerceTestCase
     private function controller(string $tenant = ''): AdminAddonController
     {
         return new AdminAddonController($this->context, $this->addonService($tenant));
+    }
+
+    private function productController(): ProductController
+    {
+        return new ProductController(
+            $this->context,
+            new ProductRepository(),
+            new VariantRepository(),
+            new SentinelTenantResolver(),
+            new ProductMediaRepository(),
+            new CategoryRepository(),
+            new TagRepository(),
+            new AttributeRepository(),
+            new ProductChildrenRepository(),
+            new AddonRepository()
+        );
     }
 
     private function addonService(string $tenant = ''): AddonService

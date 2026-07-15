@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Commerce\Tests\Integration\Http;
 
 use Glueful\Bootstrap\ApplicationContext;
+use Glueful\Extensions\Commerce\Catalog\AddonRepository;
 use Glueful\Extensions\Commerce\Catalog\AttributeRepository;
 use Glueful\Extensions\Commerce\Catalog\CategoryRepository;
 use Glueful\Extensions\Commerce\Catalog\CategoryService;
@@ -594,7 +595,8 @@ final class CategoryEndpointTest extends CommerceTestCase
             new CategoryRepository(),
             new TagRepository(),
             new AttributeRepository(),
-            new ProductChildrenRepository()
+            new ProductChildrenRepository(),
+            new AddonRepository()
         );
     }
 

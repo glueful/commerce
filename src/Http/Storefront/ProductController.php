@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Commerce\Http\Storefront;
 
 use Glueful\Bootstrap\ApplicationContext;
+use Glueful\Extensions\Commerce\Catalog\AddonRepository;
 use Glueful\Extensions\Commerce\Catalog\AttributeRepository;
 use Glueful\Extensions\Commerce\Catalog\CategoryRepository;
 use Glueful\Extensions\Commerce\Catalog\ProductChildrenRepository;
@@ -33,6 +34,7 @@ final class ProductController
         private ?TagRepository $tags = null,
         private ?AttributeRepository $attributes = null,
         private ?ProductChildrenRepository $children = null,
+        private ?AddonRepository $addons = null,
     ) {
         $this->products ??= app($context, ProductRepository::class);
         $this->variants ??= app($context, VariantRepository::class);
@@ -44,6 +46,7 @@ final class ProductController
         $this->tags ??= app($context, TagRepository::class);
         $this->attributes ??= app($context, AttributeRepository::class);
         $this->children ??= app($context, ProductChildrenRepository::class);
+        $this->addons ??= app($context, AddonRepository::class);
     }
 
     #[ApiOperation(summary: 'List active products', tags: ['Commerce Storefront'])]
@@ -86,6 +89,7 @@ final class ProductController
         $product['categories'] = $this->categoriesPayload($tenant, (string) $product['uuid']);
         $product['tags'] = $this->tagsPayload($tenant, (string) $product['uuid']);
         $product['attributes'] = $this->attributesPayload($tenant, (string) $product['uuid']);
+        $product['addons'] = $this->addonsPayload($tenant, (string) $product['uuid']);
 
         if (($product['type'] ?? null) === 'grouped') {
             $product['children'] = $this->childrenPayload($tenant, (string) $product['uuid']);
@@ -242,6 +246,32 @@ final class ProductController
         }
 
         return $result;
+    }
+
+    /**
+     * ACTIVE-only, full public definition (design spec §6) -- the cart picker needs
+     * the complete pricing surface, INCLUDING `uuid`, since the cart's `addons`
+     * selection references a definition by `addon_uuid`. This is the opposite
+     * convention from {@see \Glueful\Extensions\Commerce\Cart\AddonSnapshot::sanitize()}'s
+     * order-line echo, which is deliberately uuid-free. `status` and every other
+     * admin-only/internal field (tenant_uuid, product_uuid, id) are excluded.
+     *
+     * @return list<array{
+     *     uuid:string,name:string,field_type:string,required:bool,
+     *     choices:?list<array<string,mixed>>,price_delta:int,position:int
+     * }>
+     */
+    private function addonsPayload(string $tenant, string $productUuid): array
+    {
+        return array_map(static fn (array $row): array => [
+            'uuid' => (string) $row['uuid'],
+            'name' => (string) $row['name'],
+            'field_type' => (string) $row['field_type'],
+            'required' => (bool) $row['required'],
+            'choices' => $row['choices'] ?? null,
+            'price_delta' => (int) $row['price_delta'],
+            'position' => (int) $row['position'],
+        ], $this->addons->activeForProduct($this->context, $tenant, $productUuid));
     }
 
     /**

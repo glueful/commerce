@@ -7,6 +7,7 @@ namespace Glueful\Extensions\Commerce\Tests\Integration\Http;
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Cart\CartRepository;
 use Glueful\Extensions\Commerce\Cart\CartService;
+use Glueful\Extensions\Commerce\Catalog\AddonRepository;
 use Glueful\Extensions\Commerce\Catalog\AttributeRepository;
 use Glueful\Extensions\Commerce\Catalog\CatalogService;
 use Glueful\Extensions\Commerce\Catalog\CategoryRepository;
@@ -1069,7 +1070,8 @@ final class ProductTypesTest extends CommerceTestCase
             new CategoryRepository(),
             new TagRepository(),
             new AttributeRepository(),
-            new ProductChildrenRepository()
+            new ProductChildrenRepository(),
+            new AddonRepository()
         );
     }
 
