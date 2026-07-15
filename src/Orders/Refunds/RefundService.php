@@ -343,8 +343,16 @@ final class RefundService
             }
 
             $to = $result->status; // completed | failed
+            // The completed branch clears failure_reason: a prior collector-throw
+            // (callAndFinalize's catch) or a prior settle() may have recorded one while the
+            // refund was still pending, and a subsequent replay/settle that completes must
+            // not leave that stale reason sitting on an otherwise-successful refund.
             $set = $to === RefundResult::COMPLETED
-                ? ['provider_ref' => $result->providerRef, 'completed_at' => db($c)->getDriver()->formatDateTime()]
+                ? [
+                    'provider_ref' => $result->providerRef,
+                    'completed_at' => db($c)->getDriver()->formatDateTime(),
+                    'failure_reason' => null,
+                ]
                 : ['failure_reason' => $result->failureReason];
 
             if (!$this->refunds->claimPending($c, $tenant, $refundUuid, $to, $set)) {

@@ -26,7 +26,9 @@ final class RefundRepository
             ->first();
     }
 
-    /** @return list<array<string,mixed>> refunds each with 'lines' attached */
+    /**
+     * @return list<array<string,mixed>> refunds each with 'lines' attached
+     */
     public function listForOrder(ApplicationContext $context, string $tenant, string $orderUuid): array
     {
         $refunds = db($context)->table('commerce_refunds')
@@ -35,8 +37,30 @@ final class RefundRepository
             ->orderBy('created_at', 'DESC')
             ->get();
 
+        if ($refunds === []) {
+            return $refunds;
+        }
+
+        $refundUuids = array_map(static fn (array $refund): string => (string) $refund['uuid'], $refunds);
+
+        // One batched query for every refund's lines (joined through commerce_refunds for
+        // the same tenant scoping linesFor() applies per-refund), grouped in PHP below --
+        // avoids one commerce_refund_lines query per refund (N+1) when listing an order's
+        // refunds.
+        $lines = db($context)->table('commerce_refund_lines')
+            ->join('commerce_refunds', 'commerce_refund_lines.refund_uuid', '=', 'commerce_refunds.uuid')
+            ->select(['commerce_refund_lines.*'])
+            ->where('commerce_refunds.tenant_uuid', '=', $tenant)
+            ->whereIn('commerce_refund_lines.refund_uuid', $refundUuids)
+            ->get();
+
+        $linesByRefund = [];
+        foreach ($lines as $line) {
+            $linesByRefund[(string) $line['refund_uuid']][] = $line;
+        }
+
         foreach ($refunds as &$refund) {
-            $refund['lines'] = $this->linesFor($context, $tenant, (string) $refund['uuid']);
+            $refund['lines'] = $linesByRefund[(string) $refund['uuid']] ?? [];
         }
         unset($refund);
 

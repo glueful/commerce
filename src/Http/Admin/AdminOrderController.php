@@ -203,21 +203,37 @@ final class AdminOrderController
     }
 
     /**
-     * Order lines with a SANITIZED `addons` echo per line (design spec §4) --
-     * `{name, field_type?, choice_label?, value?, price_delta}` only, never
+     * Order lines whitelisted to exactly {product_name, sku, quantity, unit_price,
+     * line_total, option_values, addons} -- never the internal `id`, `uuid`,
+     * `order_uuid`, or `variant_uuid` columns {@see OrderRepository::linesForOrder()}
+     * also returns. `addons` gets the same SANITIZED echo per line (design spec §4)
+     * -- `{name, field_type?, choice_label?, value?, price_delta}` only, never
      * `addon_uuid`, `choice_key`, choices arrays, status, or any other
      * addon-definition internal. Admin order detail is otherwise the trusted
-     * full-visibility surface (see events, above), but addon internals carry no
-     * operational value here and stay whitelisted just like every other surface.
+     * full-visibility surface (see events, above), but line/addon internals carry
+     * no operational value here and stay whitelisted just like every other surface.
+     * `option_values` is already JSON-decoded to an array by `linesForOrder()`.
      *
-     * @return list<array<string,mixed>>
+     * @return list<array{
+     *     uuid: string, product_name: string, sku: string, quantity: int, unit_price: int,
+     *     line_total: int, option_values: array<string,mixed>, addons: list<array<string,mixed>>
+     * }>
      */
     private function linesProjection(string $tenant, string $orderUuid): array
     {
         return array_map(static function (array $line): array {
-            $line['addons'] = AddonSnapshot::sanitize(is_array($line['addons'] ?? null) ? $line['addons'] : []);
-
-            return $line;
+            return [
+                // Operator surface keeps the line uuid: refund line attribution
+                // (CreateRefundData.lines[].order_line_uuid) is built from it.
+                'uuid' => (string) ($line['uuid'] ?? ''),
+                'product_name' => (string) ($line['product_name'] ?? ''),
+                'sku' => (string) ($line['sku'] ?? ''),
+                'quantity' => (int) ($line['quantity'] ?? 0),
+                'unit_price' => (int) ($line['unit_price'] ?? 0),
+                'line_total' => (int) ($line['line_total'] ?? 0),
+                'option_values' => is_array($line['option_values'] ?? null) ? $line['option_values'] : [],
+                'addons' => AddonSnapshot::sanitize(is_array($line['addons'] ?? null) ? $line['addons'] : []),
+            ];
         }, $this->orders->linesForOrder($this->context, $tenant, $orderUuid));
     }
 

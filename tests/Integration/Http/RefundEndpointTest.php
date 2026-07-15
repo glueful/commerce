@@ -148,6 +148,27 @@ final class RefundEndpointTest extends CommerceTestCase
         self::assertArrayHasKey('refund', $body['error']['details']);
     }
 
+    public function testBadShapeLineElementMissingOrderLineUuidReturns422KeyedLines(): void
+    {
+        ['order' => $order] = $this->placeAndPayOrder('SKU-REF-BADSHAPE', 5, 1, 1000);
+
+        $request = Request::create('/commerce/admin/orders/' . $order['uuid'] . '/refunds', 'POST');
+        $request->headers->set('Idempotency-Key', 'idem-badshape-1');
+
+        $response = $this->refundController()->store(
+            new CreateRefundData(lines: [
+                ['quantity' => 1, 'amount' => 100],
+            ]),
+            $request,
+            (string) $order['uuid']
+        );
+
+        self::assertSame(422, $response->getStatusCode());
+        $body = $this->json($response);
+        self::assertArrayHasKey('lines', $body['error']['details']);
+        self::assertArrayNotHasKey('refund', $body['error']['details']);
+    }
+
     public function testIndexListsRefundsForOrder(): void
     {
         ['order' => $order] = $this->placeAndPayOrder('SKU-REF-INDEX', 5, 1, 1000);

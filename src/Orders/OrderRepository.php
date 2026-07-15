@@ -180,9 +180,10 @@ SQL,
     /**
      * Tenant-constrained order line read: joins through `commerce_orders` since
      * `commerce_order_lines` carries no `tenant_uuid` column of its own — no bare
-     * child-table lookup. This is the ONE place order-line `addons` json is
-     * decoded (design spec §4) — every caller (invoice-data, storefront/admin
-     * order projections) gets already-decoded `addons` arrays.
+     * child-table lookup. This is the ONE place order-line `addons` AND
+     * `option_values` json is decoded (design spec §4) — every caller
+     * (invoice-data, storefront/admin order projections) gets already-decoded
+     * `addons` and `option_values` arrays, never the raw JSON string.
      *
      * @return list<array<string,mixed>>
      */
@@ -285,6 +286,13 @@ SQL,
             $row['addons'] = is_array($decoded) ? $decoded : [];
         } else {
             $row['addons'] = [];
+        }
+
+        if (isset($row['option_values']) && is_string($row['option_values']) && $row['option_values'] !== '') {
+            $decoded = json_decode($row['option_values'], true);
+            $row['option_values'] = is_array($decoded) ? $decoded : [];
+        } else {
+            $row['option_values'] = [];
         }
 
         return $row;

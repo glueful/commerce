@@ -199,6 +199,14 @@ final class GatewayRefundTest extends CommerceTestCase
         );
         self::assertSame('completed', $replayed['status']);
         self::assertSame($pendingRow['uuid'], $replayed['uuid']);
+        self::assertNull(
+            $replayed['failure_reason'],
+            'A completed refund must not carry a stale failure_reason from an earlier pending attempt.'
+        );
+
+        $persisted = (new RefundRepository())->findByUuid($this->context, '', $pendingRow['uuid']);
+        self::assertNotNull($persisted);
+        self::assertNull($persisted['failure_reason'], 'The cleared failure_reason must be persisted, not just in-memory.');
 
         self::assertCount(2, $collector->calls);
         self::assertSame(
@@ -344,6 +352,11 @@ final class GatewayRefundTest extends CommerceTestCase
 
         $contextA = $this->pgsqlContext($connectionA);
         $orderUuid = 'orderpgrace1';
+
+        // Self-healing: wipe any debris a previously-interrupted run of this same
+        // pgsql-gated test left behind before inserting the fixture rows.
+        $this->deleteRaceDebris($connectionA, $orderUuid);
+
         $connectionA->table('commerce_orders')->insert([
             'uuid' => $orderUuid,
             'tenant_uuid' => '',
@@ -429,6 +442,35 @@ final class GatewayRefundTest extends CommerceTestCase
             ->get();
         self::assertCount(1, $pending, 'Exactly one pending refund must have committed.');
         self::assertSame('refundpgrace', $pending[0]['uuid']);
+
+        // Leave the pgsql fixture database as we found it.
+        $this->deleteRaceDebris($connectionA, $orderUuid);
+    }
+
+    /**
+     * Self-healing cleanup mirroring
+     * {@see \Glueful\Extensions\Commerce\Tests\Integration\Catalog\ProductChildrenConcurrencyTest::deleteRaceDebris()}'s
+     * idempotency pattern: deletes refund lines (via the order's refund uuids),
+     * refunds, then the order itself, so repeated runs of this pgsql-gated test
+     * against a shared fixture database never collide on a leftover row from an
+     * interrupted prior run. Neither `commerce_refunds` nor `commerce_orders`
+     * carries a `deleted_at` column, so a plain `delete()` (not `forceDelete()`)
+     * is enough.
+     */
+    private function deleteRaceDebris(Connection $connection, string $orderUuid): void
+    {
+        $refundUuids = array_map(
+            static fn (array $row): string => (string) $row['uuid'],
+            $connection->table('commerce_refunds')->where('order_uuid', '=', $orderUuid)->get()
+        );
+        // One delete() per uuid, not whereIn()->delete(): the query builder's UPDATE/DELETE
+        // path only supports simple AND/= conditions (whereIn compiles to a raw IN(...)
+        // condition, which it rejects).
+        foreach ($refundUuids as $refundUuid) {
+            $connection->table('commerce_refund_lines')->where('refund_uuid', '=', $refundUuid)->delete();
+        }
+        $connection->table('commerce_refunds')->where('order_uuid', '=', $orderUuid)->delete();
+        $connection->table('commerce_orders')->where('uuid', '=', $orderUuid)->delete();
     }
 
     /**

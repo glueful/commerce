@@ -60,6 +60,11 @@ final class AdminRefundController
 
         try {
             $lines = $this->validateLines($input->lines);
+        } catch (RefundValidationException $e) {
+            return Response::validation(['lines' => $e->getMessage()]);
+        }
+
+        try {
             $refund = $this->refunds->issue(
                 $this->context,
                 $uuid,

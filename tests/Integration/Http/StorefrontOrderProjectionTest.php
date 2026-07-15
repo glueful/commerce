@@ -176,6 +176,77 @@ final class StorefrontOrderProjectionTest extends CommerceTestCase
         self::assertSame(self::CUSTOMER_NOTE_BODY, $customer['payload']['body']);
     }
 
+    /**
+     * Storefront order lines must never leak internal `id`/`uuid`/`order_uuid`/
+     * `variant_uuid` columns, and `option_values` must be JSON-decoded to an
+     * array (never a raw JSON string) — the same whitelist/decode guarantee the
+     * addons echo already gets.
+     */
+    public function testStorefrontShowExposesWhitelistedLineShapeWithDecodedOptionValues(): void
+    {
+        $placed = $this->placeAndPayOrder('SKU-PROJ-3', 5, 1, 1000, ['color' => 'red']);
+        $number = (string) $placed['order']['order_number'];
+
+        $request = Request::create("/commerce/orders/{$number}", 'GET');
+        $request->headers->set('X-Order-Token', (string) $placed['guest_token']);
+
+        $response = $this->orderController()->show($request, $number);
+        $body = $this->json($response);
+
+        self::assertSame(200, $response->getStatusCode());
+        $lines = $body['data']['lines'];
+        self::assertCount(1, $lines);
+        $line = $lines[0];
+
+        self::assertSame(
+            ['product_name', 'sku', 'quantity', 'unit_price', 'line_total', 'option_values', 'addons'],
+            array_keys($line)
+        );
+        foreach (['id', 'uuid', 'order_uuid', 'variant_uuid'] as $internalKey) {
+            self::assertArrayNotHasKey($internalKey, $line);
+        }
+        self::assertIsArray($line['option_values']);
+        self::assertSame(['color' => 'red'], $line['option_values']);
+        self::assertSame('SKU-PROJ-3', $line['sku']);
+    }
+
+    /**
+     * Admin order lines get the same whitelist/decode guarantee as the storefront
+     * projection — admin detail is the trusted full-visibility surface for events,
+     * but line rows carry no operational value in their internal id/uuid columns
+     * and stay whitelisted just like every other surface (see the controller's
+     * class docblock).
+     */
+    public function testAdminShowExposesWhitelistedLineShapeWithDecodedOptionValues(): void
+    {
+        $placed = $this->placeAndPayOrder('SKU-PROJ-4', 5, 1, 1000, ['size' => 'M']);
+        $orderUuid = (string) $placed['order']['uuid'];
+
+        $response = $this->adminOrderController()->show(
+            Request::create('/commerce/admin/orders/' . $orderUuid, 'GET'),
+            $orderUuid
+        );
+        $body = $this->json($response);
+
+        self::assertSame(200, $response->getStatusCode());
+        $lines = $body['data']['lines'];
+        self::assertCount(1, $lines);
+        $line = $lines[0];
+
+        // The operator surface keeps `uuid` deliberately: refund line attribution
+        // (CreateRefundData.lines[].order_line_uuid) is built from it.
+        self::assertSame(
+            ['uuid', 'product_name', 'sku', 'quantity', 'unit_price', 'line_total', 'option_values', 'addons'],
+            array_keys($line)
+        );
+        self::assertNotSame('', $line['uuid']);
+        foreach (['id', 'order_uuid', 'variant_uuid'] as $internalKey) {
+            self::assertArrayNotHasKey($internalKey, $line);
+        }
+        self::assertIsArray($line['option_values']);
+        self::assertSame(['size' => 'M'], $line['option_values']);
+    }
+
     /** @param list<array<string,mixed>> $rows @return array<string,mixed>|null */
     private static function firstWhere(array $rows, string $key, string $value): ?array
     {
@@ -209,11 +280,17 @@ final class StorefrontOrderProjectionTest extends CommerceTestCase
     /**
      * Places, pays, and returns an order with a single tracked line, plus its guest token.
      *
+     * @param array<string,mixed> $optionValues
      * @return array{order: array<string,mixed>, guest_token: string, payment: array<string,mixed>}
      */
-    private function placeAndPayOrder(string $sku, int $stock, int $quantity, int $price): array
-    {
-        $variantUuid = $this->seedVariant($sku, $stock, $price);
+    private function placeAndPayOrder(
+        string $sku,
+        int $stock,
+        int $quantity,
+        int $price,
+        array $optionValues = []
+    ): array {
+        $variantUuid = $this->seedVariant($sku, $stock, $price, $optionValues);
         ['cart' => $cart, 'token' => $token] = $this->cart()->create($this->context);
         $this->cart()->addLine($this->context, $cart, $variantUuid, $quantity);
 
@@ -233,7 +310,8 @@ final class StorefrontOrderProjectionTest extends CommerceTestCase
         return ['order' => $order, 'guest_token' => (string) $placed['guest_token'], 'payment' => $placed['payment']];
     }
 
-    private function seedVariant(string $sku, int $stock, int $price): string
+    /** @param array<string,mixed> $optionValues */
+    private function seedVariant(string $sku, int $stock, int $price, array $optionValues = []): string
     {
         $catalog = new CatalogService(
             new ProductRepository(),
@@ -248,7 +326,7 @@ final class StorefrontOrderProjectionTest extends CommerceTestCase
             'status' => 'active',
             'variants' => [[
                 'sku' => $sku,
-                'option_values' => [],
+                'option_values' => $optionValues,
                 'price' => $price,
                 'currency' => 'USD',
             ]],

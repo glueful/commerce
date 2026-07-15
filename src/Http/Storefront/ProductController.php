@@ -58,11 +58,22 @@ final class ProductController
         $tenant = $this->tenants->tenantUuid($this->context);
         $result = $this->products->listActive($this->context, $tenant, $page, $perPage);
 
+        // Batched per-page: one variants-for-products query and one covers-for-products
+        // query instead of one of each per item (avoids an N+1 per page of results).
+        $productUuids = array_map(static fn (array $product): string => (string) $product['uuid'], $result['items']);
+        $variantsByProduct = $this->variants->forProducts($this->context, $tenant, $productUuids);
+        $covers = $this->media->coversForProducts($this->context, $tenant, $productUuids);
+
         return Response::paginated(
             array_map(
-                fn (array $product): array => $this->withRating(
-                    $this->withCoverUrl($tenant, $this->withVariants($tenant, $product))
-                ),
+                function (array $product) use ($variantsByProduct, $covers): array {
+                    $uuid = (string) $product['uuid'];
+                    $product['variants'] = $variantsByProduct[$uuid] ?? [];
+                    $cover = $covers[$uuid] ?? null;
+                    $product['cover_url'] = $cover === null ? null : '/blobs/' . $cover['blob_uuid'];
+
+                    return $this->withRating($product);
+                },
                 $result['items']
             ),
             $result['total'],
@@ -109,14 +120,6 @@ final class ProductController
         return $product;
     }
 
-    /** @param array<string,mixed> $product @return array<string,mixed> */
-    private function withCoverUrl(string $tenant, array $product): array
-    {
-        $product['cover_url'] = $this->coverUrl($tenant, (string) $product['uuid']);
-
-        return $product;
-    }
-
     /**
      * `rating {average, count}` (design spec §5/§6) -- only added when count > 0;
      * `average` is rounded to 1 decimal AT PROJECTION TIME from
@@ -153,13 +156,6 @@ final class ProductController
             'average' => round(((int) ($product['rating_sum'] ?? 0)) / $count, 1),
             'count' => $count,
         ];
-    }
-
-    private function coverUrl(string $tenant, string $productUuid): ?string
-    {
-        $cover = $this->media->coverFor($this->context, $tenant, $productUuid);
-
-        return $cover === null ? null : '/blobs/' . $cover['blob_uuid'];
     }
 
     /**
@@ -212,13 +208,23 @@ final class ProductController
      * value slugs; custom rows (`attribute_uuid` null) as `{name, values}`. An
      * attribute deleted concurrently after its assignment was read (a cascade
      * delete would have detached the join row too, but a race is still possible)
-     * is silently skipped rather than surfaced as a broken reference.
+     * is silently skipped rather than surfaced as a broken reference. Global
+     * attribute rows are resolved via ONE batched `findManyByUuid()` IN query
+     * (rather than one `findByUuid()` call per row) -- avoids an N+1 when a
+     * product carries several global attribute assignments.
      *
      * @return list<array{slug?:string,name:string,values:list<string>}>
      */
     private function attributesPayload(string $tenant, string $productUuid): array
     {
         $rows = $this->attributes->productAttributeRows($this->context, $productUuid);
+
+        $attributeUuids = array_values(array_unique(array_filter(array_map(
+            static fn (array $row): ?string => $row['attribute_uuid'] !== null ? (string) $row['attribute_uuid'] : null,
+            $rows
+        ))));
+        $attributes = $this->attributes->findManyByUuid($this->context, $tenant, $attributeUuids);
+
         $result = [];
 
         foreach ($rows as $row) {
@@ -227,7 +233,7 @@ final class ProductController
             }
 
             if ($row['attribute_uuid'] !== null) {
-                $attribute = $this->attributes->findByUuid($this->context, $tenant, (string) $row['attribute_uuid']);
+                $attribute = $attributes[(string) $row['attribute_uuid']] ?? null;
                 if ($attribute === null) {
                     continue;
                 }

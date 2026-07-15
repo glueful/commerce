@@ -48,6 +48,35 @@ final class VariantRepository
         return array_map(fn (array $row): array => $this->decodeJson($row), $rows);
     }
 
+    /**
+     * Batched `forProduct()`: one query for every variant across a LIST of
+     * products via IN, grouped by product_uuid (ordered by position within each
+     * group, same ordering as `forProduct()`) -- avoids one query per product
+     * when resolving variants for e.g. the storefront product index.
+     *
+     * @param list<string> $productUuids
+     * @return array<string,list<array<string,mixed>>> keyed by product_uuid
+     */
+    public function forProducts(ApplicationContext $context, string $tenant, array $productUuids): array
+    {
+        if ($productUuids === []) {
+            return [];
+        }
+
+        $rows = db($context)->table('commerce_variants')
+            ->where('tenant_uuid', '=', $tenant)
+            ->whereIn('product_uuid', $productUuids)
+            ->orderBy('position', 'ASC')
+            ->get();
+
+        $grouped = [];
+        foreach ($rows as $row) {
+            $grouped[(string) $row['product_uuid']][] = $this->decodeJson($row);
+        }
+
+        return $grouped;
+    }
+
     /** @param array<string,mixed> $changes */
     public function update(ApplicationContext $context, string $tenant, string $uuid, array $changes): void
     {

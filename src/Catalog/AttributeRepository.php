@@ -34,6 +34,33 @@ final class AttributeRepository
             ->first();
     }
 
+    /**
+     * Batched `findByUuid()`: one query for every uuid in the list via IN,
+     * tenant scoped -- avoids one query per attribute when projecting a
+     * product's visible attribute rows (e.g. the storefront product show()).
+     *
+     * @param list<string> $uuids
+     * @return array<string,array<string,mixed>> keyed by uuid
+     */
+    public function findManyByUuid(ApplicationContext $context, string $tenant, array $uuids): array
+    {
+        if ($uuids === []) {
+            return [];
+        }
+
+        $rows = db($context)->table('commerce_attributes')
+            ->where('tenant_uuid', '=', $tenant)
+            ->whereIn('uuid', $uuids)
+            ->get();
+
+        $result = [];
+        foreach ($rows as $row) {
+            $result[(string) $row['uuid']] = $row;
+        }
+
+        return $result;
+    }
+
     /** @return list<array<string,mixed>> every attribute for the tenant, position then name */
     public function all(ApplicationContext $context, string $tenant): array
     {
