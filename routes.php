@@ -14,6 +14,7 @@ use Glueful\Extensions\Commerce\Http\Admin\AdminMediaController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminOrderController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminProductController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminRefundController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminReviewController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminStockController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminTagController;
 use Glueful\Routing\Router;
@@ -120,4 +121,10 @@ $router->group(['prefix' => '/commerce/admin', 'middleware' => ['auth']], functi
     $router->get('/orders/{uuid}/refunds', [AdminRefundController::class, 'index'])->middleware($read);
     $router->post('/orders/{uuid}/notes', [AdminOrderController::class, 'addNote'])->middleware($write);
     $router->get('/orders/{uuid}/invoice-data', [AdminOrderController::class, 'invoiceData'])->middleware($read);
+
+    $router->get('/reviews', [AdminReviewController::class, 'index'])->middleware($read);
+    $router->post('/reviews', [AdminReviewController::class, 'store'])->middleware($write);
+    $router->post('/reviews/{uuid}/approve', [AdminReviewController::class, 'approve'])->middleware($write);
+    $router->post('/reviews/{uuid}/spam', [AdminReviewController::class, 'spam'])->middleware($write);
+    $router->delete('/reviews/{uuid}', [AdminReviewController::class, 'destroy'])->middleware($write);
 });

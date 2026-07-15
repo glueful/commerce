@@ -21,26 +21,40 @@ Short answer: **migration is possible only for a simple store today, not a serio
 - Transactional emails for order placed/paid/fulfilled, refunds, and notes. Caveat:
   opt-in — the master switch is off by default, and each template can be toggled
   independently once enabled.
+- Product categories and tags, with per-product assignment and tenant-scoped slugs.
+- Product attributes — a global taxonomy with per-attribute values, plus per-product
+  attribute rows (global or custom) with a variant-eligible/visible flag.
+- Product media/gallery — a cover image plus an ordered gallery, backed by the
+  framework's blob storage (attach/update/detach/reorder).
+- Grouped and external/affiliate product types, alongside the original simple/variant
+  model.
+- Product add-ons/custom options, with per-cart-line pricing snapshotted at selection
+  time so later add-on edits never retroactively change an existing line.
+- Reviews with moderation (`pending` → `approved`/`spam`) and a live rating rollup
+  (`{average, count}`) on the product payload.
 
-That works for: a custom headless storefront selling physical products with simple variants and basic checkout.
+  Caveat: this whole catalog-breadth batch is admin/importer-facing only. Storefront
+  category-browse and attribute-filter endpoints, and storefront review submission,
+  are Layer 6 and not shipped yet — the storefront product payload already echoes
+  categories/tags/attributes/media/rating read-only, but there is no browse/filter/
+  submit API surface yet.
+
+That works for: a custom headless storefront selling physical, grouped, or external/affiliate products, organized into categories/tags with attributes, media galleries, add-ons, and moderated reviews, with simple variants and basic checkout.
 
 ## What Is Missing Versus WooCommerce
 
-WooCommerce is much broader. It supports product types like simple, grouped, external/affiliate, variable, virtual, and downloadable products, plus product editor/bulk tooling. Commerce only has a simple product/variant model right now.
+WooCommerce is much broader. It supports product types like simple, grouped, external/affiliate, variable, virtual, downloadable, and composite/bundle products, plus product editor/bulk tooling. Commerce now covers simple/variant, grouped, and external/affiliate products; composite/bundle products and true downloadable delivery are still missing.
 
 Major gaps:
 
 - No migration/import tool from WooCommerce yet.
 - No customers/accounts model inside Commerce.
-- No product categories/tags/attributes/reviews.
-- No product media/gallery model.
 - No downloadable/digital product *delivery*. The seams already exist — products carry a
   `type` (shipping already skips `digital` lines; stock tracking already skips non-physical),
   so only the delivery layer is missing. The framework's private blobs + signed URLs +
   `BlobAccessPolicy` (1.67/1.68) are exactly that primitive: a downloads link table plus a
   policy binding gated on "order paid" covers most of the feature.
-- No grouped/bundled/composite products.
-- No product add-ons/custom options.
+- No composite/bundle products (grouped and external/affiliate now work — see above).
 - No generated invoice documents (PDF/printable).
 - No tax-rate table/VAT rules UI.
 - No mature shipping zones/classes/rules UI.
@@ -79,15 +93,15 @@ deliberately last (an importer written before its target models exist gets rewri
 every model added; build the destination schema first, write the importer once against the
 final shape):
 
-1. Product media/categories/attributes.
-2. Customers via Users integration (`user_uuid` + soft-resolved `UserProviderInterface`,
+1. Customers via Users integration (`user_uuid` + soft-resolved `UserProviderInterface`,
    the same pattern the tenancy pack uses — not a Commerce-owned accounts table).
-3. Shipping/tax APIs and configuration surfaces.
-4. Reports/analytics APIs.
-5. API parity for WooCommerce resources needed by importers and app-level UIs.
-6. WooCommerce importer, written against the finished models above.
+2. Shipping/tax APIs and configuration surfaces.
+3. Reports/analytics APIs.
+4. API parity for WooCommerce resources needed by importers and app-level UIs.
+5. WooCommerce importer, written against the finished models above.
 
-(Refunds, order notes, and transactional emails — formerly item 1 here — have shipped;
-see "What Can Migrate Today" above.)
+(Refunds, order notes, transactional emails, and the whole product-media/categories/
+tags/attributes/reviews/add-ons/grouped-external-product-type batch — formerly items 1
+and 1a here — have shipped; see "What Can Migrate Today" above.)
 
 

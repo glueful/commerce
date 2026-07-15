@@ -18,6 +18,8 @@ use Glueful\Extensions\Commerce\Catalog\ProductChildrenRepository;
 use Glueful\Extensions\Commerce\Catalog\ProductMediaRepository;
 use Glueful\Extensions\Commerce\Catalog\ProductMediaService;
 use Glueful\Extensions\Commerce\Catalog\ProductRepository;
+use Glueful\Extensions\Commerce\Catalog\ReviewRepository;
+use Glueful\Extensions\Commerce\Catalog\ReviewService;
 use Glueful\Extensions\Commerce\Catalog\TagRepository;
 use Glueful\Extensions\Commerce\Catalog\TagService;
 use Glueful\Extensions\Commerce\Catalog\VariantRepository;
@@ -41,6 +43,7 @@ use Glueful\Extensions\Commerce\Http\Admin\AdminMediaController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminOrderController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminProductController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminRefundController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminReviewController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminStockController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminTagController;
 use Glueful\Extensions\Commerce\Http\Storefront\CartController;
@@ -156,6 +159,14 @@ final class CommerceServiceProvider extends ServiceProvider
             ],
             AddonService::class => [
                 'factory' => [self::class, 'makeAddonService'],
+                'shared' => true,
+            ],
+            ReviewRepository::class => [
+                'class' => ReviewRepository::class,
+                'shared' => true,
+            ],
+            ReviewService::class => [
+                'factory' => [self::class, 'makeReviewService'],
                 'shared' => true,
             ],
             StockRepository::class => [
@@ -304,6 +315,10 @@ final class CommerceServiceProvider extends ServiceProvider
                 'factory' => [self::class, 'makeAdminAddonController'],
                 'shared' => true,
             ],
+            AdminReviewController::class => [
+                'factory' => [self::class, 'makeAdminReviewController'],
+                'shared' => true,
+            ],
         ];
     }
 
@@ -368,6 +383,15 @@ final class CommerceServiceProvider extends ServiceProvider
     {
         return new AttributeService(
             $container->get(AttributeRepository::class),
+            $container->get(ProductRepository::class),
+            self::tenantResolver($container)
+        );
+    }
+
+    public static function makeReviewService(ContainerInterface $container): ReviewService
+    {
+        return new ReviewService(
+            $container->get(ReviewRepository::class),
             $container->get(ProductRepository::class),
             self::tenantResolver($container)
         );
@@ -640,6 +664,14 @@ final class CommerceServiceProvider extends ServiceProvider
         return new AdminAddonController(
             $container->get(ApplicationContext::class),
             $container->get(AddonService::class)
+        );
+    }
+
+    public static function makeAdminReviewController(ContainerInterface $container): AdminReviewController
+    {
+        return new AdminReviewController(
+            $container->get(ApplicationContext::class),
+            $container->get(ReviewService::class)
         );
     }
 

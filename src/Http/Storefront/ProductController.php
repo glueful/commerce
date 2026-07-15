@@ -57,7 +57,9 @@ final class ProductController
 
         return Response::paginated(
             array_map(
-                fn (array $product): array => $this->withCoverUrl($tenant, $this->withVariants($tenant, $product)),
+                fn (array $product): array => $this->withRating(
+                    $this->withCoverUrl($tenant, $this->withVariants($tenant, $product))
+                ),
                 $result['items']
             ),
             $result['total'],
@@ -79,7 +81,7 @@ final class ProductController
             throw new NotFoundException('Resource not found.');
         }
 
-        $product = $this->withVariants($tenant, $product);
+        $product = $this->withRating($this->withVariants($tenant, $product));
         $product['media'] = $this->mediaPayload($tenant, (string) $product['uuid']);
         $product['categories'] = $this->categoriesPayload($tenant, (string) $product['uuid']);
         $product['tags'] = $this->tagsPayload($tenant, (string) $product['uuid']);
@@ -109,6 +111,44 @@ final class ProductController
         $product['cover_url'] = $this->coverUrl($tenant, (string) $product['uuid']);
 
         return $product;
+    }
+
+    /**
+     * `rating {average, count}` (design spec §5/§6) -- only added when count > 0;
+     * `average` is rounded to 1 decimal AT PROJECTION TIME from
+     * `rating_sum`/`rating_count`, never stored. Never sourced from
+     * `commerce_reviews` directly -- the storefront product payload carries no
+     * review-table field (author_email or otherwise), only this two-field
+     * derived summary of the moderated rollup.
+     *
+     * @param array<string,mixed> $product
+     * @return array<string,mixed>
+     */
+    private function withRating(array $product): array
+    {
+        $rating = $this->ratingPayload($product);
+        if ($rating !== null) {
+            $product['rating'] = $rating;
+        }
+
+        return $product;
+    }
+
+    /**
+     * @param array<string,mixed> $product
+     * @return array{average:float,count:int}|null
+     */
+    private function ratingPayload(array $product): ?array
+    {
+        $count = (int) ($product['rating_count'] ?? 0);
+        if ($count <= 0) {
+            return null;
+        }
+
+        return [
+            'average' => round(((int) ($product['rating_sum'] ?? 0)) / $count, 1),
+            'count' => $count,
+        ];
     }
 
     private function coverUrl(string $tenant, string $productUuid): ?string

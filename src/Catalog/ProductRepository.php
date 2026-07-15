@@ -86,6 +86,33 @@ SQL,
         return $affected === 1;
     }
 
+    /**
+     * Affected-row-checked rating rollup primitive (design spec §5): a review
+     * approval calls this with `(+rating, +1)`; an approved->spam reversal calls
+     * it with `(-rating, -1)`. Raw SQL, not the fluent `update()`, so a
+     * soft-deleted product's row is still reachable -- its own affected-row
+     * result IS the "product still exists in this tenant" guard ReviewService
+     * relies on to roll back a moderation claim when it returns false.
+     */
+    public function adjustRating(
+        ApplicationContext $context,
+        string $tenant,
+        string $uuid,
+        int $ratingDelta,
+        int $countDelta
+    ): bool {
+        $affected = db($context)->table('commerce_products')->executeModification(
+            <<<'SQL'
+UPDATE commerce_products
+SET rating_sum = rating_sum + ?, rating_count = rating_count + ?, updated_at = ?
+WHERE tenant_uuid = ? AND uuid = ?
+SQL,
+            [$ratingDelta, $countDelta, db($context)->getDriver()->formatDateTime(), $tenant, $uuid]
+        );
+
+        return $affected === 1;
+    }
+
     /** @param array<string,mixed> $changes */
     public function update(ApplicationContext $context, string $tenant, string $uuid, array $changes): void
     {
