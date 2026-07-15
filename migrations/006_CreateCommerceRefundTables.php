@@ -36,6 +36,10 @@ final class CreateCommerceRefundTables implements MigrationInterface
                 $table->unique(['tenant_uuid', 'idempotency_key']);
                 $table->index('tenant_uuid');
                 $table->index('order_uuid');
+                // Layer 5 reports: refunds bucket/window by completed_at, not
+                // created_at (decision 5 -- a June refund against a May order is
+                // June's refund).
+                $table->index(['tenant_uuid', 'completed_at']);
             });
         }
 

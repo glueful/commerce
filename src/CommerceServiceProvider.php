@@ -52,6 +52,7 @@ use Glueful\Extensions\Commerce\Http\Admin\AdminMediaController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminOrderController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminProductController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminRefundController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminReportController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminReviewController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminShippingClassController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminShippingZoneController;
@@ -86,6 +87,7 @@ use Glueful\Extensions\Commerce\Orders\Refunds\RefundService;
 use Glueful\Extensions\Commerce\Payments\ManualPaymentCollector;
 use Glueful\Extensions\Commerce\Payments\OrderPaymentConfirmationHandler;
 use Glueful\Extensions\Commerce\Pricing\PricingEngine;
+use Glueful\Extensions\Commerce\Reports\SalesReportRepository;
 use Glueful\Extensions\Commerce\Shipping\ConfigShippingRateProvider;
 use Glueful\Extensions\Commerce\Shipping\DbShippingRateProvider;
 use Glueful\Extensions\Commerce\Shipping\DelegatingShippingRateProvider;
@@ -396,6 +398,14 @@ final class CommerceServiceProvider extends ServiceProvider
             ],
             AdminCustomerController::class => [
                 'factory' => [self::class, 'makeAdminCustomerController'],
+                'shared' => true,
+            ],
+            SalesReportRepository::class => [
+                'class' => SalesReportRepository::class,
+                'shared' => true,
+            ],
+            AdminReportController::class => [
+                'factory' => [self::class, 'makeAdminReportController'],
                 'shared' => true,
             ],
             AddressBookRepository::class => [
@@ -932,6 +942,15 @@ final class CommerceServiceProvider extends ServiceProvider
             self::tenantResolver($container),
             self::makeUserProvider($container),
             $container->get(AddressBookRepository::class)
+        );
+    }
+
+    public static function makeAdminReportController(ContainerInterface $container): AdminReportController
+    {
+        return new AdminReportController(
+            $container->get(ApplicationContext::class),
+            $container->get(SalesReportRepository::class),
+            self::tenantResolver($container)
         );
     }
 

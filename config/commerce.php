@@ -65,4 +65,10 @@ return [
             'order_note' => true,
         ],
     ],
+
+    'reports' => [
+        // Woo-parity default (Layer 5 design spec decision 10); 0..100000, validated by
+        // Glueful\Extensions\Commerce\Reports\StockThreshold.
+        'low_stock_threshold' => (int) env('COMMERCE_REPORTS_LOW_STOCK_THRESHOLD', 2),
+    ],
 ];

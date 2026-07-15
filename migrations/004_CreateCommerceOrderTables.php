@@ -43,6 +43,13 @@ final class CreateCommerceOrderTables implements MigrationInterface
                 $table->unique(['tenant_uuid', 'order_number']);
                 $table->index(['tenant_uuid', 'status']);
                 $table->index(['tenant_uuid', 'user_uuid']);
+                // Layer 5 reports: report_at is the two-branch derived timestamp
+                // (placed_at when present, else created_at -- see ReportWindow /
+                // the sales & customers repositories). Each branch needs its own
+                // indexable range predicate; a single index on COALESCE(...)
+                // would not be usable by either branch's plain column comparison.
+                $table->index(['tenant_uuid', 'placed_at']);
+                $table->index(['tenant_uuid', 'created_at']);
             });
         }
 

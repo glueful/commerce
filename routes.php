@@ -19,6 +19,7 @@ use Glueful\Extensions\Commerce\Http\Admin\AdminMediaController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminOrderController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminProductController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminRefundController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminReportController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminReviewController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminShippingClassController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminShippingZoneController;
@@ -187,4 +188,6 @@ $router->group(['prefix' => '/commerce/admin', 'middleware' => ['auth']], functi
     $router->post('/tax/rates', [AdminTaxRateController::class, 'store'])->middleware($write);
     $router->patch('/tax/rates/{uuid}', [AdminTaxRateController::class, 'update'])->middleware($write);
     $router->delete('/tax/rates/{uuid}', [AdminTaxRateController::class, 'destroy'])->middleware($write);
+
+    $router->get('/reports/sales', [AdminReportController::class, 'sales'])->middleware($read);
 });
