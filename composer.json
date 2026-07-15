@@ -80,7 +80,7 @@
             "publisher": "glueful-team",
             "provider": "Glueful\\Extensions\\Commerce\\CommerceServiceProvider",
             "requires": {
-                "glueful": ">=1.65.3",
+                "glueful": ">=1.70.0",
                 "extensions": []
             }
         }
