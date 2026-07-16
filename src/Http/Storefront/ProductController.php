@@ -26,6 +26,55 @@ use Symfony\Component\HttpFoundation\Request;
 
 final class ProductController
 {
+    /**
+     * Public product allowlist: the base commerce_products row fields that may
+     * leave this surface, plus the derived enrichments added below. Everything
+     * else on the raw row is internal -- numeric id, tenant_uuid, status (this
+     * surface is active-only, so it carries zero information), raw `metadata`
+     * (the app-internal data channel; {@see self::externalPayload()} extracts
+     * the public parts), the rating_sum/rating_count rollup internals (replaced
+     * by the derived `rating`), catalog_revision, tax_class, and the
+     * updated_at/deleted_at timestamps.
+     */
+    private const PUBLIC_PRODUCT_FIELDS = [
+        'uuid',
+        'slug',
+        'name',
+        'description',
+        'type',
+        'options',
+        'created_at',
+        // Derived enrichments (never raw row columns):
+        'variants',
+        'cover_url',
+        'rating',
+        'media',
+        'categories',
+        'tags',
+        'attributes',
+        'addons',
+        'children',
+        'external',
+    ];
+
+    /**
+     * Public variant allowlist. Variant `status` stays -- unlike the parent
+     * product's constant-'active' status, variant status is functional for
+     * option pickers. `shipping_class` is the derived slug added at projection.
+     */
+    private const PUBLIC_VARIANT_FIELDS = [
+        'uuid',
+        'sku',
+        'option_values',
+        'price',
+        'compare_at_price',
+        'currency',
+        'position',
+        'status',
+        'shipping_class_uuid',
+        'shipping_class',
+    ];
+
     public function __construct(
         private ApplicationContext $context,
         private ?ProductRepository $products = null,
@@ -94,7 +143,7 @@ final class ProductController
                     $cover = $covers[$uuid] ?? null;
                     $product['cover_url'] = $cover === null ? null : '/blobs/' . $cover['blob_uuid'];
 
-                    return $this->withRating($product);
+                    return $this->publicProduct($this->withRating($product));
                 },
                 $result['items']
             ),
@@ -178,7 +227,32 @@ final class ProductController
             $product['external'] = $this->externalPayload($product);
         }
 
-        return Response::success($product, 'Product retrieved');
+        return Response::success($this->publicProduct($product), 'Product retrieved');
+    }
+
+    /**
+     * Applies {@see self::PUBLIC_PRODUCT_FIELDS} / {@see self::PUBLIC_VARIANT_FIELDS}
+     * as the LAST step before a product leaves this controller -- enrichment
+     * happens on the raw row first, then everything not allowlisted is dropped.
+     *
+     * @param array<string,mixed> $product
+     * @return array<string,mixed>
+     */
+    private function publicProduct(array $product): array
+    {
+        $public = array_intersect_key($product, array_flip(self::PUBLIC_PRODUCT_FIELDS));
+
+        if (isset($public['variants']) && is_array($public['variants'])) {
+            $public['variants'] = array_map(
+                static fn (array $variant): array => array_intersect_key(
+                    $variant,
+                    array_flip(self::PUBLIC_VARIANT_FIELDS)
+                ),
+                $public['variants']
+            );
+        }
+
+        return $public;
     }
 
     /** @param array<string,mixed> $product @return array<string,mixed> */
