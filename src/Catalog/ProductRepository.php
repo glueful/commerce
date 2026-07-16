@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Commerce\Catalog;
 
 use Glueful\Bootstrap\ApplicationContext;
+use Glueful\Database\QueryBuilder;
+use Glueful\Extensions\Commerce\Support\JsonStringArrayContainsSql;
 use Glueful\Extensions\Commerce\Support\LiteralLike;
 use Glueful\Extensions\Commerce\Support\UtcNowSql;
 
@@ -120,20 +122,29 @@ SQL,
         return $affected === 1;
     }
 
-    /** @return array{items: list<array<string,mixed>>, total: int} */
-    public function listActive(ApplicationContext $context, string $tenant, int $page, int $perPage): array
-    {
-        $base = db($context)->table('commerce_products')
-            ->where('tenant_uuid', '=', $tenant)
-            ->where('status', '=', 'active')
-            ->whereRaw('deleted_at IS NULL');
-
-        $total = $base->count();
-        $rows = db($context)->table('commerce_products')
-            ->where('tenant_uuid', '=', $tenant)
-            ->where('status', '=', 'active')
-            ->whereRaw('deleted_at IS NULL')
+    /**
+     * Storefront active-product listing (Layer 6 Global Constraints): live+active
+     * only, with optional `category`/`tag`/`attributes` filters already resolved
+     * to a {@see ResolvedProductFilters} value by
+     * `Http\Storefront\ProductController::index()`. Count and row queries are
+     * built by the SAME {@see self::activeFilteredQuery()} call (two fresh
+     * builder instances, identical predicates) so a filter can never drift
+     * between the two. Ordered `created_at DESC, uuid ASC` -- the uuid
+     * tie-break keeps pages stable when several products share a `created_at`.
+     *
+     * @return array{items: list<array<string,mixed>>, total: int}
+     */
+    public function listActive(
+        ApplicationContext $context,
+        string $tenant,
+        int $page,
+        int $perPage,
+        ?ResolvedProductFilters $filters = null
+    ): array {
+        $total = $this->activeFilteredQuery($context, $tenant, $filters)->count();
+        $rows = $this->activeFilteredQuery($context, $tenant, $filters)
             ->orderBy('created_at', 'DESC')
+            ->orderBy('uuid', 'ASC')
             ->limit($perPage)
             ->offset(max(0, $page - 1) * $perPage)
             ->get();
@@ -142,6 +153,90 @@ SQL,
             'items' => array_map(fn (array $row): array => $this->decodeJson($row), $rows),
             'total' => $total,
         ];
+    }
+
+    /**
+     * Builds the live+active predicate set {@see self::listActive()}'s count and
+     * row queries share, plus every EXISTS semijoin a resolved category/tag/
+     * attribute-pair filter contributes. A FRESH `QueryBuilder` every call (never
+     * shared/reused across count and rows) -- returned rather than executed, and
+     * deliberately public (not merely private), so the Layer 6 query-plan test
+     * can `->explain()` this EXACT predicate set without ever duplicating it
+     * (and therefore without ever silently drifting from what `listActive()`
+     * actually runs).
+     *
+     * Category/tag filters are correlated `EXISTS` subqueries against the
+     * `commerce_product_categories`/`commerce_product_tags` join tables (never a
+     * `JOIN` on the main query) -- a product attached to several categories/tags
+     * still contributes AT MOST ONE row, never one per matching join row.
+     * Attribute pairs are one correlated `EXISTS` per pair against
+     * `commerce_product_attributes` (unique on `(product_uuid, attribute_uuid)`,
+     * so at most one candidate row per pair per product), testing value-slug
+     * membership via {@see JsonStringArrayContainsSql} rather than a
+     * substring-unsafe `LIKE`. Every filter composes with AND semantics.
+     */
+    public function activeFilteredQuery(
+        ApplicationContext $context,
+        string $tenant,
+        ?ResolvedProductFilters $filters
+    ): QueryBuilder {
+        $query = db($context)->table('commerce_products')
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('status', '=', 'active')
+            ->whereRaw('deleted_at IS NULL');
+
+        if ($filters === null || $filters->isEmpty()) {
+            return $query;
+        }
+
+        if ($filters->categoryUuid !== null) {
+            $query->whereRaw(
+                <<<'SQL'
+EXISTS (
+    SELECT 1 FROM commerce_product_categories
+    WHERE commerce_product_categories.product_uuid = commerce_products.uuid
+    AND commerce_product_categories.category_uuid = ?
+)
+SQL,
+                [$filters->categoryUuid]
+            );
+        }
+
+        if ($filters->tagUuid !== null) {
+            $query->whereRaw(
+                <<<'SQL'
+EXISTS (
+    SELECT 1 FROM commerce_product_tags
+    WHERE commerce_product_tags.product_uuid = commerce_products.uuid
+    AND commerce_product_tags.tag_uuid = ?
+)
+SQL,
+                [$filters->tagUuid]
+            );
+        }
+
+        $driver = db($context)->getDriverName();
+        foreach ($filters->attributePairs as $pair) {
+            $membership = JsonStringArrayContainsSql::condition(
+                $driver,
+                'commerce_product_attributes.values',
+                $pair['value_slug']
+            );
+
+            $query->whereRaw(
+                <<<SQL
+EXISTS (
+    SELECT 1 FROM commerce_product_attributes
+    WHERE commerce_product_attributes.product_uuid = commerce_products.uuid
+    AND commerce_product_attributes.attribute_uuid = ?
+    AND ({$membership['sql']})
+)
+SQL,
+                array_merge([$pair['attribute_uuid']], $membership['bindings'])
+            );
+        }
+
+        return $query;
     }
 
     /**

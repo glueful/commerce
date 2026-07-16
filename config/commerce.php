@@ -28,6 +28,10 @@ return [
         'checkout' => [(int) env('COMMERCE_CHECKOUT_RATE_LIMIT', 30), 60],
         'orders' => [(int) env('COMMERCE_ORDER_RATE_LIMIT', 60), 60],
         'downloads' => [(int) env('COMMERCE_DOWNLOADS_RATE_LIMIT', 60), 60],
+        // Storefront product list/show + category tree (+ approved-review list, Task 6).
+        'catalog' => [(int) env('COMMERCE_CATALOG_RATE_LIMIT', 120), 60],
+        // Storefront review POST -- stricter than `catalog` (Task 6 wires this to the route).
+        'review_submit' => [(int) env('COMMERCE_REVIEW_SUBMIT_RATE_LIMIT', 5), 60],
     ],
 
     // Digital-delivery signed URLs (design spec §4.1).

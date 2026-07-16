@@ -61,10 +61,12 @@ use Glueful\Extensions\Commerce\Http\Admin\AdminTagController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminTaxRateController;
 use Glueful\Extensions\Commerce\Http\Storefront\AccountAddressController;
 use Glueful\Extensions\Commerce\Http\Storefront\CartController;
+use Glueful\Extensions\Commerce\Http\Storefront\CategoryController;
 use Glueful\Extensions\Commerce\Http\Storefront\CheckoutController;
 use Glueful\Extensions\Commerce\Http\Storefront\DownloadLinkController;
 use Glueful\Extensions\Commerce\Http\Storefront\OrderController;
 use Glueful\Extensions\Commerce\Http\Storefront\ProductController;
+use Glueful\Extensions\Commerce\Http\Storefront\ReviewController;
 use Glueful\Extensions\Commerce\Invoices\ConfigSellerIdentityProvider;
 use Glueful\Extensions\Commerce\Invoices\SellerIdentityProvider;
 use Glueful\Extensions\Commerce\Inventory\InventoryService;
@@ -325,6 +327,14 @@ final class CommerceServiceProvider extends ServiceProvider
             ],
             ProductController::class => [
                 'factory' => [self::class, 'makeProductController'],
+                'shared' => true,
+            ],
+            CategoryController::class => [
+                'factory' => [self::class, 'makeCategoryController'],
+                'shared' => true,
+            ],
+            ReviewController::class => [
+                'factory' => [self::class, 'makeReviewController'],
                 'shared' => true,
             ],
             CartController::class => [
@@ -787,6 +797,23 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(ProductChildrenRepository::class),
             $container->get(AddonRepository::class),
             $container->get(ShippingClassRepository::class)
+        );
+    }
+
+    public static function makeCategoryController(ContainerInterface $container): CategoryController
+    {
+        return new CategoryController(
+            $container->get(ApplicationContext::class),
+            $container->get(CategoryRepository::class),
+            self::tenantResolver($container)
+        );
+    }
+
+    public static function makeReviewController(ContainerInterface $container): ReviewController
+    {
+        return new ReviewController(
+            $container->get(ApplicationContext::class),
+            $container->get(ReviewService::class)
         );
     }
 

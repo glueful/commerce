@@ -11,6 +11,7 @@ use Glueful\Extensions\Commerce\Catalog\CategoryRepository;
 use Glueful\Extensions\Commerce\Catalog\ProductChildrenRepository;
 use Glueful\Extensions\Commerce\Catalog\ProductMediaRepository;
 use Glueful\Extensions\Commerce\Catalog\ProductRepository;
+use Glueful\Extensions\Commerce\Catalog\ResolvedProductFilters;
 use Glueful\Extensions\Commerce\Catalog\TagRepository;
 use Glueful\Extensions\Commerce\Catalog\VariantRepository;
 use Glueful\Extensions\Commerce\Http\DTOs\ProductListQuery;
@@ -59,7 +60,16 @@ final class ProductController
         $page = max(1, $query->page ?? 1);
         $perPage = max(1, min(100, $query->per_page ?? 24));
         $tenant = $this->tenants->tenantUuid($this->context);
-        $result = $this->products->listActive($this->context, $tenant, $page, $perPage);
+
+        $filters = $this->resolveFilters($tenant, $query);
+        if ($filters === null) {
+            // A requested category/tag/attribute slug (or pair) does not exist in
+            // this tenant -- enumeration-neutral empty page, never a 404/422, and
+            // never a product query at all (Layer 6 Global Constraints).
+            return Response::paginated([], 0, $page, $perPage, null, 'Products retrieved');
+        }
+
+        $result = $this->products->listActive($this->context, $tenant, $page, $perPage, $filters);
 
         // Batched per-page: one variants-for-products query, one covers-for-products
         // query, and one shipping-class slug lookup across every variant on the page
@@ -94,6 +104,53 @@ final class ProductController
             null,
             'Products retrieved'
         );
+    }
+
+    /**
+     * Resolves `category`/`tag`/`attributes` to a {@see ResolvedProductFilters}
+     * value (Layer 6 Global Constraints): category and tag are each ONE
+     * tenant-scoped slug lookup; every requested attribute pair is resolved in
+     * ONE batched query via {@see AttributeRepository::findPairsBySlugs()} --
+     * never one query per pair. Returns `null` the moment ANY requested
+     * category/tag/attribute-pair slug fails to resolve in this tenant, so
+     * `index()` can short-circuit to an empty page BEFORE the product query
+     * ever runs -- an unknown slug is enumeration-neutral, identical in shape
+     * to a slug that simply matches nothing.
+     */
+    private function resolveFilters(string $tenant, ProductListQuery $query): ?ResolvedProductFilters
+    {
+        $categoryUuid = null;
+        $category = $query->category !== null ? trim($query->category) : '';
+        if ($category !== '') {
+            $categoryUuid = $this->categories->findUuidBySlug($this->context, $tenant, $category);
+            if ($categoryUuid === null) {
+                return null;
+            }
+        }
+
+        $tagUuid = null;
+        $tag = $query->tag !== null ? trim($query->tag) : '';
+        if ($tag !== '') {
+            $tagUuid = $this->tags->findUuidBySlug($this->context, $tenant, $tag);
+            if ($tagUuid === null) {
+                return null;
+            }
+        }
+
+        $requestedPairs = $query->attributePairs();
+        $attributePairs = [];
+        if ($requestedPairs !== []) {
+            $resolved = $this->attributes->findPairsBySlugs($this->context, $tenant, $requestedPairs);
+            foreach ($requestedPairs as $pair) {
+                $key = $pair['attribute_slug'] . ':' . $pair['value_slug'];
+                if (!isset($resolved[$key])) {
+                    return null;
+                }
+                $attributePairs[] = $resolved[$key];
+            }
+        }
+
+        return new ResolvedProductFilters($categoryUuid, $tagUuid, $attributePairs);
     }
 
     #[ApiOperation(summary: 'Get an active product by slug', tags: ['Commerce Storefront'])]

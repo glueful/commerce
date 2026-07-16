@@ -11,7 +11,10 @@ use Glueful\Extensions\Commerce\Cart\CartPruner;
 use Glueful\Extensions\Commerce\Cart\CartRepository;
 use Glueful\Extensions\Commerce\Cart\CartService;
 use Glueful\Extensions\Commerce\Catalog\CatalogService;
+use Glueful\Extensions\Commerce\Catalog\CategoryRepository;
 use Glueful\Extensions\Commerce\Catalog\ProductRepository;
+use Glueful\Extensions\Commerce\Catalog\ReviewRepository;
+use Glueful\Extensions\Commerce\Catalog\ReviewService;
 use Glueful\Extensions\Commerce\Catalog\VariantRepository;
 use Glueful\Extensions\Commerce\CommerceServiceProvider;
 use Glueful\Extensions\Commerce\Contracts\ShippingRateProvider;
@@ -28,9 +31,12 @@ use Glueful\Extensions\Commerce\Http\Admin\AdminOrderController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminProductController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminStockController;
 use Glueful\Extensions\Commerce\Http\Storefront\CartController;
+use Glueful\Extensions\Commerce\Http\Storefront\CategoryController;
 use Glueful\Extensions\Commerce\Http\Storefront\CheckoutController;
 use Glueful\Extensions\Commerce\Http\Storefront\OrderController;
 use Glueful\Extensions\Commerce\Http\Storefront\ProductController;
+use Glueful\Extensions\Commerce\Http\Storefront\ReviewController;
+use Glueful\Extensions\Commerce\Http\DTOs\StoreReviewData;
 use Glueful\Extensions\Commerce\Inventory\InventoryService;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
 use Glueful\Extensions\Commerce\Orders\CheckoutService;
@@ -47,6 +53,7 @@ use Glueful\Extensions\Contracts\Payments\PaymentCollector;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Glueful\Extensions\Contracts\Tenancy\TenantTableRegistry;
 use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\Response as HttpResponse;
 
 final class ServiceProviderWiringTest extends CommerceTestCase
 {
@@ -68,6 +75,8 @@ final class ServiceProviderWiringTest extends CommerceTestCase
             ExpiryService::class,
             OrderPaymentConfirmationHandler::class,
             ProductController::class,
+            CategoryController::class,
+            ReviewController::class,
             CartController::class,
             CheckoutController::class,
             OrderController::class,
@@ -131,6 +140,68 @@ final class ServiceProviderWiringTest extends CommerceTestCase
 
         $response = $controller->show(Request::create('/x'), 'discwiring01');
         self::assertSame(200, $response->getStatusCode());
+    }
+
+    /**
+     * `Http\Storefront\CategoryController` (Layer 6 Task 5) is a brand-new
+     * controller -- this proves its factory actually resolves a working
+     * `CategoryRepository` (not just that a definition array entry exists) by
+     * exercising the real public tree endpoint end to end.
+     */
+    public function testMakeCategoryControllerFactoryResolvesTheSharedCategoryRepository(): void
+    {
+        $this->bind(ApplicationContext::class, $this->context);
+        $this->bind(CategoryRepository::class, new CategoryRepository());
+
+        $controller = CommerceServiceProvider::makeCategoryController($this->contextContainer());
+
+        $this->connection->table('commerce_categories')->insert([
+            'uuid' => 'catwiring001',
+            'tenant_uuid' => '',
+            'slug' => 'wiring',
+            'name' => 'Wiring',
+        ]);
+
+        $response = $controller->index(Request::create('/x'));
+        self::assertSame(200, $response->getStatusCode());
+        self::assertSame(['wiring'], array_column($this->json($response)['data'], 'slug'));
+    }
+
+    /**
+     * `Http\Storefront\ReviewController` (Layer 6 Task 6) is a brand-new
+     * controller -- this proves its factory actually resolves a working
+     * `ReviewService` (not just that a definition array entry exists) by
+     * exercising the real public submit endpoint end to end.
+     */
+    public function testMakeReviewControllerFactoryResolvesTheSharedReviewService(): void
+    {
+        $this->bind(ApplicationContext::class, $this->context);
+        $this->bind(ReviewRepository::class, new ReviewRepository());
+        $this->bind(ProductRepository::class, new ProductRepository());
+        $this->bind(
+            ReviewService::class,
+            new ReviewService(new ReviewRepository(), new ProductRepository(), new SentinelTenantResolver())
+        );
+
+        $controller = CommerceServiceProvider::makeReviewController($this->contextContainer());
+
+        $this->connection->table('commerce_products')->insert([
+            'uuid' => 'prodwiring01',
+            'tenant_uuid' => '',
+            'slug' => 'wiring-product',
+            'name' => 'Wiring Product',
+            'type' => 'physical',
+            'status' => 'active',
+        ]);
+
+        $response = $controller->store(
+            new StoreReviewData(rating: 5, body: 'Great.', author_name: 'Jane', author_email: 'jane@example.com'),
+            Request::create('/x', 'POST'),
+            'wiring-product'
+        );
+
+        self::assertSame(201, $response->getStatusCode());
+        self::assertSame(['status' => 'pending'], $this->json($response)['data']);
     }
 
     public function testServicesLoadThroughRealDefaultServicesLoaderInProductionMode(): void
@@ -200,6 +271,8 @@ final class ServiceProviderWiringTest extends CommerceTestCase
             ExpiryService::class,
             OrderPaymentConfirmationHandler::class,
             ProductController::class,
+            CategoryController::class,
+            ReviewController::class,
             CartController::class,
             CheckoutController::class,
             OrderController::class,
@@ -208,5 +281,14 @@ final class ServiceProviderWiringTest extends CommerceTestCase
             AdminDiscountController::class,
             AdminOrderController::class,
         ];
+    }
+
+    /** @return array<string,mixed> */
+    private function json(HttpResponse $response): array
+    {
+        $decoded = json_decode((string) $response->getContent(), true);
+        self::assertIsArray($decoded);
+
+        return $decoded;
     }
 }

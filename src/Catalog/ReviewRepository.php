@@ -32,6 +32,12 @@ final class ReviewRepository
     }
 
     /**
+     * `created_at DESC, uuid ASC` -- the `uuid` tie-break keeps page order
+     * stable when several reviews share a `created_at` value (design spec
+     * Layer 6 §2 decision 6, storefront approved list; shared here with the
+     * admin list for the same house pagination discipline used throughout
+     * commerce -- see e.g. `ProductRepository::listActive()`).
+     *
      * @param array<string,mixed> $filters 'status' and/or 'product' (product_uuid)
      * @return array{items: list<array<string,mixed>>, total: int}
      */
@@ -56,6 +62,7 @@ final class ReviewRepository
 
         return [
             'items' => $rows->orderBy('created_at', 'DESC')
+                ->orderBy('uuid', 'ASC')
                 ->limit($perPage)
                 ->offset(max(0, $page - 1) * $perPage)
                 ->get(),

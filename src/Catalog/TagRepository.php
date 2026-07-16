@@ -33,6 +33,19 @@ final class TagRepository
             ->first();
     }
 
+    /**
+     * Tenant-scoped exact-slug resolution for the storefront product list's
+     * `tag` filter (Layer 6 Global Constraints): one query, `null` for an
+     * unknown or cross-tenant slug -- the caller (`Http\Storefront\ProductController`)
+     * turns that into an enumeration-neutral empty page rather than a 404.
+     */
+    public function findUuidBySlug(ApplicationContext $context, string $tenant, string $slug): ?string
+    {
+        $row = $this->findBySlug($context, $tenant, $slug);
+
+        return $row === null ? null : (string) $row['uuid'];
+    }
+
     /** @return list<array<string,mixed>> */
     public function all(ApplicationContext $context, string $tenant): array
     {

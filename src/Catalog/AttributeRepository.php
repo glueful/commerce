@@ -112,6 +112,79 @@ final class AttributeRepository
         ];
     }
 
+    /**
+     * Batched tenant-scoped resolution for the storefront product list's
+     * `attributes` filter (Layer 6 Global Constraints): ONE query resolves
+     * every requested `attribute-slug:value-slug` pair regardless of how many
+     * pairs are requested (max 5, enforced at the DTO boundary) -- never one
+     * query per pair. Joins `commerce_attribute_values` to `commerce_attributes`
+     * (values carry no `tenant_uuid` of their own; the join is what scopes the
+     * lookup to the caller's tenant) and constrains to the distinct requested
+     * attribute/value slugs via two `IN` lists, then matches the resulting rows
+     * back to the exact requested pairs in PHP (cheap: the row count is bounded
+     * by the cross product of the distinct slug lists, not by table size).
+     *
+     * Result is keyed by the requested `"{attribute_slug}:{value_slug}"` string
+     * and contains ONLY pairs that actually resolved -- a key absent from the
+     * result means that pair is unknown in this tenant. The caller
+     * (`Http\Storefront\ProductController`) checks every requested pair against
+     * this map and short-circuits to an empty paginated response (never a 404,
+     * never a per-pair error) the moment one is missing, before the product
+     * query runs at all.
+     *
+     * @param list<array{attribute_slug:string, value_slug:string}> $pairs
+     * @return array<string, array{attribute_uuid:string, value_slug:string}>
+     */
+    public function findPairsBySlugs(ApplicationContext $context, string $tenant, array $pairs): array
+    {
+        if ($pairs === []) {
+            return [];
+        }
+
+        $attributeSlugs = array_values(array_unique(
+            array_map(static fn (array $pair): string => $pair['attribute_slug'], $pairs)
+        ));
+        $valueSlugs = array_values(array_unique(
+            array_map(static fn (array $pair): string => $pair['value_slug'], $pairs)
+        ));
+
+        $rows = db($context)->table('commerce_attribute_values')
+            ->join(
+                'commerce_attributes',
+                'commerce_attribute_values.attribute_uuid',
+                '=',
+                'commerce_attributes.uuid'
+            )
+            ->select([
+                'commerce_attributes.uuid AS attribute_uuid',
+                'commerce_attributes.slug AS attribute_slug',
+                'commerce_attribute_values.slug AS value_slug',
+            ])
+            ->where('commerce_attributes.tenant_uuid', '=', $tenant)
+            ->whereIn('commerce_attributes.slug', $attributeSlugs)
+            ->whereIn('commerce_attribute_values.slug', $valueSlugs)
+            ->get();
+
+        $byPair = [];
+        foreach ($rows as $row) {
+            $key = ((string) $row['attribute_slug']) . ':' . ((string) $row['value_slug']);
+            $byPair[$key] = [
+                'attribute_uuid' => (string) $row['attribute_uuid'],
+                'value_slug' => (string) $row['value_slug'],
+            ];
+        }
+
+        $result = [];
+        foreach ($pairs as $pair) {
+            $key = $pair['attribute_slug'] . ':' . $pair['value_slug'];
+            if (isset($byPair[$key])) {
+                $result[$key] = $byPair[$key];
+            }
+        }
+
+        return $result;
+    }
+
     /** @param array<string,mixed> $changes */
     public function update(ApplicationContext $context, string $tenant, string $uuid, array $changes): void
     {

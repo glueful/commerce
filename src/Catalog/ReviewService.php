@@ -100,6 +100,90 @@ final class ReviewService
         return $this->reviews->paginatedFor($c, $this->tenants->tenantUuid($c), $filters, $page, $perPage);
     }
 
+    /**
+     * Storefront public submit (design spec Layer 6 §2 decision 6): unlike
+     * {@see self::create()} above (admin/importer, unchanged), this path is
+     * genuinely public and carries its OWN live+active product guard -- a
+     * draft or tombstoned product is the SAME non-revealing 404 as an unknown
+     * slug, resolved via {@see self::resolveLiveActiveProduct()} BEFORE any
+     * row is written. Always lands `pending` (same `self::CREATE_STATUS` as
+     * `create()`, never touches rollups). `user_uuid` is ALWAYS stored null:
+     * the framework has no optional-auth seam for this genuinely public
+     * route, so a caller can never attribute a review to an account it
+     * doesn't control. `$input` structurally carries no `user_uuid`/
+     * `product_uuid` key -- `StoreReviewData` never declares either property
+     * -- so this method doesn't need to (and must not) read either from it.
+     *
+     * @param array{rating:mixed,body:mixed,author_name:mixed,author_email:mixed} $input
+     */
+    public function createForStorefront(ApplicationContext $c, string $slug, array $input): void
+    {
+        $tenant = $this->tenants->tenantUuid($c);
+        $product = $this->resolveLiveActiveProduct($c, $tenant, $slug);
+
+        $rating = $this->requiredRating($input['rating'] ?? null);
+        $body = $this->requiredString($input, 'body');
+        $authorName = $this->requiredString($input, 'author_name');
+        $authorEmail = $this->requiredEmail($input['author_email'] ?? null);
+
+        $this->reviews->insert($c, [
+            'uuid' => Utils::generateNanoID(),
+            'tenant_uuid' => $tenant,
+            'product_uuid' => (string) $product['uuid'],
+            'user_uuid' => null,
+            'author_name' => $authorName,
+            'author_email' => $authorEmail,
+            'rating' => $rating,
+            'body' => $body,
+            'status' => self::CREATE_STATUS,
+        ]);
+    }
+
+    /**
+     * Storefront approved-review list (design spec Layer 6 §2 decision 6):
+     * the SAME live+active guard {@see self::createForStorefront()} uses,
+     * then delegates to the SAME `paginatedFor()` primitive {@see self::list()}
+     * uses -- `status` is hardcoded to `approved` here (never client-
+     * controlled), so pending/spam rows are invisible with no separate
+     * "hidden row" count anywhere in this path.
+     *
+     * @return array{items: list<array<string,mixed>>, total: int}
+     */
+    public function listForStorefront(ApplicationContext $c, string $slug, int $page, int $perPage): array
+    {
+        $tenant = $this->tenants->tenantUuid($c);
+        $product = $this->resolveLiveActiveProduct($c, $tenant, $slug);
+
+        return $this->reviews->paginatedFor(
+            $c,
+            $tenant,
+            ['status' => 'approved', 'product' => (string) $product['uuid']],
+            $page,
+            $perPage
+        );
+    }
+
+    /**
+     * The storefront live+active product guard shared by
+     * {@see self::createForStorefront()} and {@see self::listForStorefront()}
+     * (design spec Layer 6 §2 decision 6): draft and tombstoned products
+     * collapse to the SAME non-revealing 404 as an unknown slug --
+     * `findLiveBySlug()` already excludes tombstones, so only the explicit
+     * `status === 'active'` check is needed to also exclude drafts (and any
+     * other non-active status the product vocabulary may carry).
+     *
+     * @return array<string,mixed>
+     */
+    private function resolveLiveActiveProduct(ApplicationContext $c, string $tenant, string $slug): array
+    {
+        $product = $this->products->findLiveBySlug($c, $tenant, $slug);
+        if ($product === null || ($product['status'] ?? '') !== 'active') {
+            throw new NotFoundException('Resource not found.');
+        }
+
+        return $product;
+    }
+
     /** @return array<string,mixed> */
     public function show(ApplicationContext $c, string $uuid): array
     {

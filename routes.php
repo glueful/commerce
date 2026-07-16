@@ -4,10 +4,12 @@ declare(strict_types=1);
 
 use Glueful\Extensions\Commerce\Http\Storefront\AccountAddressController;
 use Glueful\Extensions\Commerce\Http\Storefront\CartController;
+use Glueful\Extensions\Commerce\Http\Storefront\CategoryController;
 use Glueful\Extensions\Commerce\Http\Storefront\CheckoutController;
 use Glueful\Extensions\Commerce\Http\Storefront\DownloadLinkController;
 use Glueful\Extensions\Commerce\Http\Storefront\OrderController;
 use Glueful\Extensions\Commerce\Http\Storefront\ProductController;
+use Glueful\Extensions\Commerce\Http\Storefront\ReviewController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminAddonController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminAttributeController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminCategoryController;
@@ -44,11 +46,35 @@ $rate = static function (string $key, int $attempts, int $window = 60) use ($lim
 };
 
 $router->group(['prefix' => '/commerce'], function (Router $router) use ($rate): void {
+    // Products currently have NO rate middleware; `catalog` (Layer 6 Global
+    // Constraints) is a new config key applied here for the first time, and
+    // also covers the public category tree below.
+    $catalogRate = $rate('catalog', 120);
+
     $router->get('/products', [ProductController::class, 'index'])
+        ->middleware($catalogRate)
         ->name('commerce.products.index');
     $router->get('/products/{slug}', [ProductController::class, 'show'])
         ->where('slug', '[a-z0-9-]+')
+        ->middleware($catalogRate)
         ->name('commerce.products.show');
+
+    $router->get('/categories', [CategoryController::class, 'index'])
+        ->middleware($catalogRate)
+        ->name('commerce.categories.index');
+
+    // Public review submit + approved list (Layer 6 Global Constraints,
+    // storefront-reviews block): the POST uses the stricter `review_submit`
+    // key; the GET reuses `catalogRate` (same key the product/category reads
+    // above share).
+    $router->post('/products/{slug}/reviews', [ReviewController::class, 'store'])
+        ->where('slug', '[a-z0-9-]+')
+        ->middleware($rate('review_submit', 5))
+        ->name('commerce.products.reviews.store');
+    $router->get('/products/{slug}/reviews', [ReviewController::class, 'index'])
+        ->where('slug', '[a-z0-9-]+')
+        ->middleware($catalogRate)
+        ->name('commerce.products.reviews.index');
 
     $cartRate = $rate('cart', 60);
     $checkoutRate = $rate('checkout', 30);
