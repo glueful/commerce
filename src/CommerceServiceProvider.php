@@ -87,7 +87,10 @@ use Glueful\Extensions\Commerce\Orders\Refunds\RefundService;
 use Glueful\Extensions\Commerce\Payments\ManualPaymentCollector;
 use Glueful\Extensions\Commerce\Payments\OrderPaymentConfirmationHandler;
 use Glueful\Extensions\Commerce\Pricing\PricingEngine;
+use Glueful\Extensions\Commerce\Reports\CustomerReportRepository;
+use Glueful\Extensions\Commerce\Reports\ProductSalesReportRepository;
 use Glueful\Extensions\Commerce\Reports\SalesReportRepository;
+use Glueful\Extensions\Commerce\Reports\StockReportRepository;
 use Glueful\Extensions\Commerce\Shipping\ConfigShippingRateProvider;
 use Glueful\Extensions\Commerce\Shipping\DbShippingRateProvider;
 use Glueful\Extensions\Commerce\Shipping\DelegatingShippingRateProvider;
@@ -402,6 +405,18 @@ final class CommerceServiceProvider extends ServiceProvider
             ],
             SalesReportRepository::class => [
                 'class' => SalesReportRepository::class,
+                'shared' => true,
+            ],
+            ProductSalesReportRepository::class => [
+                'class' => ProductSalesReportRepository::class,
+                'shared' => true,
+            ],
+            CustomerReportRepository::class => [
+                'class' => CustomerReportRepository::class,
+                'shared' => true,
+            ],
+            StockReportRepository::class => [
+                'class' => StockReportRepository::class,
                 'shared' => true,
             ],
             AdminReportController::class => [
@@ -950,7 +965,10 @@ final class CommerceServiceProvider extends ServiceProvider
         return new AdminReportController(
             $container->get(ApplicationContext::class),
             $container->get(SalesReportRepository::class),
-            self::tenantResolver($container)
+            self::tenantResolver($container),
+            $container->get(ProductSalesReportRepository::class),
+            $container->get(CustomerReportRepository::class),
+            $container->get(StockReportRepository::class)
         );
     }
 

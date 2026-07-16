@@ -190,4 +190,7 @@ $router->group(['prefix' => '/commerce/admin', 'middleware' => ['auth']], functi
     $router->delete('/tax/rates/{uuid}', [AdminTaxRateController::class, 'destroy'])->middleware($write);
 
     $router->get('/reports/sales', [AdminReportController::class, 'sales'])->middleware($read);
+    $router->get('/reports/products', [AdminReportController::class, 'products'])->middleware($read);
+    $router->get('/reports/customers', [AdminReportController::class, 'customers'])->middleware($read);
+    $router->get('/reports/stock', [AdminReportController::class, 'stock'])->middleware($read);
 });

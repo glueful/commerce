@@ -66,8 +66,15 @@ final class CustomerAggregationRepository
         'total_spent' => 'total_spent_minor',
     ];
 
-    /** Grouping/aggregate key expression shared by the listing and both detail lookups. */
-    private const KEY_EXPR = "CASE WHEN user_uuid IS NOT NULL THEN user_uuid ELSE LOWER(TRIM(email)) END";
+    /**
+     * Grouping/aggregate key expression shared by the listing and both detail
+     * lookups. Public: reused verbatim by `Glueful\Extensions\Commerce\Reports\
+     * CustomerReportRepository` (design spec §2 decision 9) so customer
+     * identity can never drift between the customers admin surface and the
+     * customers report -- promoted from `private` to `public` only (no
+     * behavior change).
+     */
+    public const KEY_EXPR = "CASE WHEN user_uuid IS NOT NULL THEN user_uuid ELSE LOWER(TRIM(email)) END";
 
     /** MUST read MAX(user_uuid), not the bare column — see class docblock, gotcha 1. */
     private const KEY_TYPE_EXPR = "CASE WHEN MAX(user_uuid) IS NOT NULL THEN 'user' ELSE 'email' END";
