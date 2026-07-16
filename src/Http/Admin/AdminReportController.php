@@ -78,15 +78,17 @@ final class AdminReportController
         private ?CustomerReportRepository $customers = null,
         private ?StockReportRepository $stock = null,
     ) {
-        $this->sales ??= app($context, SalesReportRepository::class);
+        $this->sales ??= container($context)->has(SalesReportRepository::class)
+            ? container($context)->get(SalesReportRepository::class)
+            : new SalesReportRepository();
         $this->tenants ??= container($context)->has(CurrentTenantResolver::class)
             ? container($context)->get(CurrentTenantResolver::class)
             : new SentinelTenantResolver();
-        // has()-checked, like $tenants above -- NOT a blind app() call like $sales:
+        // has()-checked, like $sales/$tenants above: SalesReportRepository/
         // ProductSalesReportRepository/CustomerReportRepository/StockReportRepository
-        // have no dependencies, so a plain new() is a safe, side-effect-free
-        // fallback when a caller (e.g. a lightweight test container) never
-        // registered these bindings.
+        // all have no constructor dependencies, so a plain new() is a safe,
+        // side-effect-free fallback when a caller (e.g. a lightweight test
+        // container) never registered these bindings.
         $this->products ??= container($context)->has(ProductSalesReportRepository::class)
             ? container($context)->get(ProductSalesReportRepository::class)
             : new ProductSalesReportRepository();
