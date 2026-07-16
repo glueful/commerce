@@ -52,10 +52,24 @@ final class ShippingClassService
     ) {
     }
 
-    /** @return list<array<string,mixed>> */
-    public function list(ApplicationContext $c): array
+    /**
+     * @param array<string,mixed> $filters 'q' (literal substring on name/slug)
+     * @return array{items: list<array<string,mixed>>, total: int}
+     */
+    public function list(ApplicationContext $c, array $filters, int $page, int $perPage): array
     {
-        return $this->classes->all($c, $this->tenants->tenantUuid($c));
+        return $this->classes->paginatedFor($c, $this->tenants->tenantUuid($c), $filters, $page, $perPage);
+    }
+
+    /** @return array<string,mixed> */
+    public function show(ApplicationContext $c, string $uuid): array
+    {
+        $class = $this->classes->findByUuid($c, $this->tenants->tenantUuid($c), $uuid);
+        if ($class === null) {
+            throw new NotFoundException('Resource not found.');
+        }
+
+        return $class;
     }
 
     /**

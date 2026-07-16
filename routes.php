@@ -117,17 +117,21 @@ $router->group(['prefix' => '/commerce/admin', 'middleware' => ['auth']], functi
     $router->delete('/media/{uuid}', [AdminMediaController::class, 'detach'])->middleware($write);
 
     $router->get('/categories', [AdminCategoryController::class, 'index'])->middleware($read);
+    $router->get('/categories/{uuid}', [AdminCategoryController::class, 'show'])->middleware($read);
     $router->post('/categories', [AdminCategoryController::class, 'store'])->middleware($write);
     $router->patch('/categories/{uuid}', [AdminCategoryController::class, 'update'])->middleware($write);
     $router->delete('/categories/{uuid}', [AdminCategoryController::class, 'destroy'])->middleware($write);
     $router->put('/products/{uuid}/categories', [AdminCategoryController::class, 'setForProduct'])->middleware($write);
 
     $router->get('/tags', [AdminTagController::class, 'index'])->middleware($read);
+    $router->get('/tags/{uuid}', [AdminTagController::class, 'show'])->middleware($read);
     $router->post('/tags', [AdminTagController::class, 'store'])->middleware($write);
+    $router->patch('/tags/{uuid}', [AdminTagController::class, 'update'])->middleware($write);
     $router->delete('/tags/{uuid}', [AdminTagController::class, 'destroy'])->middleware($write);
     $router->put('/products/{uuid}/tags', [AdminTagController::class, 'setForProduct'])->middleware($write);
 
     $router->get('/attributes', [AdminAttributeController::class, 'index'])->middleware($read);
+    $router->get('/attributes/{uuid}', [AdminAttributeController::class, 'show'])->middleware($read);
     $router->post('/attributes', [AdminAttributeController::class, 'store'])->middleware($write);
     $router->patch('/attributes/{uuid}', [AdminAttributeController::class, 'update'])->middleware($write);
     $router->delete('/attributes/{uuid}', [AdminAttributeController::class, 'destroy'])->middleware($write);
@@ -148,7 +152,9 @@ $router->group(['prefix' => '/commerce/admin', 'middleware' => ['auth']], functi
 
     $router->get('/discounts', [AdminDiscountController::class, 'index'])->middleware($read);
     $router->post('/discounts', [AdminDiscountController::class, 'store'])->middleware($write);
+    $router->get('/discounts/{uuid}', [AdminDiscountController::class, 'show'])->middleware($read);
     $router->patch('/discounts/{uuid}', [AdminDiscountController::class, 'update'])->middleware($write);
+    $router->delete('/discounts/{uuid}', [AdminDiscountController::class, 'destroy'])->middleware($write);
 
     $router->get('/orders', [AdminOrderController::class, 'index'])->middleware($read);
     $router->get('/orders/{uuid}', [AdminOrderController::class, 'show'])->middleware($read);
@@ -158,9 +164,14 @@ $router->group(['prefix' => '/commerce/admin', 'middleware' => ['auth']], functi
     $router->post('/orders/{uuid}/refunds', [AdminRefundController::class, 'store'])->middleware($write);
     $router->get('/orders/{uuid}/refunds', [AdminRefundController::class, 'index'])->middleware($read);
     $router->post('/orders/{uuid}/notes', [AdminOrderController::class, 'addNote'])->middleware($write);
+    $router->get('/orders/{uuid}/notes', [AdminOrderController::class, 'notes'])->middleware($read);
     $router->get('/orders/{uuid}/invoice-data', [AdminOrderController::class, 'invoiceData'])->middleware($read);
 
+    $router->get('/refunds', [AdminRefundController::class, 'list'])->middleware($read);
+    $router->get('/refunds/{uuid}', [AdminRefundController::class, 'show'])->middleware($read);
+
     $router->get('/reviews', [AdminReviewController::class, 'index'])->middleware($read);
+    $router->get('/reviews/{uuid}', [AdminReviewController::class, 'show'])->middleware($read);
     $router->post('/reviews', [AdminReviewController::class, 'store'])->middleware($write);
     $router->post('/reviews/{uuid}/approve', [AdminReviewController::class, 'approve'])->middleware($write);
     $router->post('/reviews/{uuid}/spam', [AdminReviewController::class, 'spam'])->middleware($write);
@@ -168,6 +179,7 @@ $router->group(['prefix' => '/commerce/admin', 'middleware' => ['auth']], functi
     $router->post('/reviews/bulk', [AdminReviewController::class, 'bulk'])->middleware($write);
 
     $router->get('/shipping/zones', [AdminShippingZoneController::class, 'index'])->middleware($read);
+    $router->get('/shipping/zones/{uuid}', [AdminShippingZoneController::class, 'show'])->middleware($read);
     $router->post('/shipping/zones', [AdminShippingZoneController::class, 'store'])->middleware($write);
     $router->patch('/shipping/zones/{uuid}', [AdminShippingZoneController::class, 'update'])->middleware($write);
     $router->delete('/shipping/zones/{uuid}', [AdminShippingZoneController::class, 'destroy'])->middleware($write);
@@ -177,18 +189,22 @@ $router->group(['prefix' => '/commerce/admin', 'middleware' => ['auth']], functi
         ->middleware($read);
     $router->post('/shipping/zones/{uuid}/methods', [AdminShippingZoneController::class, 'storeMethod'])
         ->middleware($write);
+    $router->get('/shipping/methods/{uuid}', [AdminShippingZoneController::class, 'showMethod'])
+        ->middleware($read);
     $router->patch('/shipping/methods/{uuid}', [AdminShippingZoneController::class, 'updateMethod'])
         ->middleware($write);
     $router->delete('/shipping/methods/{uuid}', [AdminShippingZoneController::class, 'destroyMethod'])
         ->middleware($write);
 
     $router->get('/shipping/classes', [AdminShippingClassController::class, 'index'])->middleware($read);
+    $router->get('/shipping/classes/{uuid}', [AdminShippingClassController::class, 'show'])->middleware($read);
     $router->post('/shipping/classes', [AdminShippingClassController::class, 'store'])->middleware($write);
     $router->patch('/shipping/classes/{uuid}', [AdminShippingClassController::class, 'update'])->middleware($write);
     $router->delete('/shipping/classes/{uuid}', [AdminShippingClassController::class, 'destroy'])
         ->middleware($write);
 
     $router->get('/tax/rates', [AdminTaxRateController::class, 'index'])->middleware($read);
+    $router->get('/tax/rates/{uuid}', [AdminTaxRateController::class, 'show'])->middleware($read);
     $router->post('/tax/rates', [AdminTaxRateController::class, 'store'])->middleware($write);
     $router->patch('/tax/rates/{uuid}', [AdminTaxRateController::class, 'update'])->middleware($write);
     $router->delete('/tax/rates/{uuid}', [AdminTaxRateController::class, 'destroy'])->middleware($write);

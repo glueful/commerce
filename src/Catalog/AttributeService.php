@@ -63,15 +63,48 @@ final class AttributeService
     ) {
     }
 
-    /** @return list<array<string,mixed>> attributes with an embedded `values` list, ordered by position */
-    public function list(ApplicationContext $c): array
+    /**
+     * Paginated admin list: attributes with an embedded `values` list, ordered by
+     * position. Values are batch-loaded for the whole page in ONE query (Layer 6
+     * Global Constraints) rather than {@see self::withValues()}'s per-attribute
+     * N+1 -- that single-attribute helper stays reserved for create()/update()'s
+     * one-row echo.
+     *
+     * @param array<string,mixed> $filters 'q' (literal substring on name/slug)
+     * @return array{items: list<array<string,mixed>>, total: int}
+     */
+    public function list(ApplicationContext $c, array $filters, int $page, int $perPage): array
     {
         $tenant = $this->tenants->tenantUuid($c);
+        $result = $this->attributes->paginatedFor($c, $tenant, $filters, $page, $perPage);
 
-        return array_map(
-            fn (array $attribute): array => $this->withValues($c, $attribute),
-            $this->attributes->all($c, $tenant)
-        );
+        $attributeUuids = array_map(static fn (array $row): string => (string) $row['uuid'], $result['items']);
+        $valuesByAttribute = $this->attributes->valuesForAttributes($c, $attributeUuids);
+
+        $result['items'] = array_map(static function (array $attribute) use ($valuesByAttribute): array {
+            $attribute['values'] = array_map(static fn (array $value): array => [
+                'uuid' => (string) $value['uuid'],
+                'slug' => (string) $value['slug'],
+                'value' => (string) $value['value'],
+                'position' => (int) $value['position'],
+            ], $valuesByAttribute[(string) $attribute['uuid']] ?? []);
+
+            return $attribute;
+        }, $result['items']);
+
+        return $result;
+    }
+
+    /** @return array<string,mixed> attribute with an embedded `values` list, ordered by position */
+    public function show(ApplicationContext $c, string $uuid): array
+    {
+        $tenant = $this->tenants->tenantUuid($c);
+        $attribute = $this->attributes->findByUuid($c, $tenant, $uuid);
+        if ($attribute === null) {
+            throw new NotFoundException('Resource not found.');
+        }
+
+        return $this->withValues($c, $attribute);
     }
 
     /**

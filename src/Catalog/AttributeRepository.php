@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Commerce\Catalog;
 
 use Glueful\Bootstrap\ApplicationContext;
+use Glueful\Extensions\Commerce\Support\LiteralLike;
 
 final class AttributeRepository
 {
@@ -69,6 +70,46 @@ final class AttributeRepository
             ->orderBy('position', 'ASC')
             ->orderBy('name', 'ASC')
             ->get();
+    }
+
+    /**
+     * Paginated admin list (Layer 6 Global Constraints): `q` is a
+     * case-insensitive literal substring match on name OR slug via
+     * {@see LiteralLike}. Ordered `position ASC, name ASC, uuid ASC` (stable
+     * tie-break); count and row queries apply the identical predicate set.
+     *
+     * @param array<string,mixed> $filters 'q' (literal substring on name/slug)
+     * @return array{items: list<array<string,mixed>>, total: int}
+     */
+    public function paginatedFor(
+        ApplicationContext $context,
+        string $tenant,
+        array $filters,
+        int $page,
+        int $perPage
+    ): array {
+        $count = db($context)->table('commerce_attributes')->where('tenant_uuid', '=', $tenant);
+        $rows = db($context)->table('commerce_attributes')->where('tenant_uuid', '=', $tenant);
+
+        $q = isset($filters['q']) ? trim((string) $filters['q']) : '';
+        if ($q !== '') {
+            $pattern = LiteralLike::pattern($q);
+            $condition = "(LOWER(name) LIKE ? ESCAPE '!' OR LOWER(slug) LIKE ? ESCAPE '!')";
+            $count->whereRaw($condition, [$pattern, $pattern]);
+            $rows->whereRaw($condition, [$pattern, $pattern]);
+        }
+
+        $items = $rows->orderBy('position', 'ASC')
+            ->orderBy('name', 'ASC')
+            ->orderBy('uuid', 'ASC')
+            ->limit($perPage)
+            ->offset(max(0, $page - 1) * $perPage)
+            ->get();
+
+        return [
+            'items' => $items,
+            'total' => $count->count(),
+        ];
     }
 
     /** @param array<string,mixed> $changes */
@@ -141,6 +182,35 @@ SQL,
             ->where('attribute_uuid', '=', $attributeUuid)
             ->orderBy('position', 'ASC')
             ->get();
+    }
+
+    /**
+     * Batched `valuesForAttribute()`: one query for every value across every
+     * attribute in `$attributeUuids` (Layer 6 Global Constraints -- "attributes
+     * embed values without one query per attribute on list pages") -- avoids the
+     * N+1 pattern of calling {@see self::valuesForAttribute()} once per attribute
+     * when projecting an admin attribute list page.
+     *
+     * @param list<string> $attributeUuids
+     * @return array<string,list<array<string,mixed>>> values grouped by attribute_uuid, each list position-ordered
+     */
+    public function valuesForAttributes(ApplicationContext $context, array $attributeUuids): array
+    {
+        if ($attributeUuids === []) {
+            return [];
+        }
+
+        $rows = db($context)->table('commerce_attribute_values')
+            ->whereIn('attribute_uuid', $attributeUuids)
+            ->orderBy('position', 'ASC')
+            ->get();
+
+        $grouped = [];
+        foreach ($rows as $row) {
+            $grouped[(string) $row['attribute_uuid']][] = $row;
+        }
+
+        return $grouped;
     }
 
     /** @param array<string,mixed> $changes */

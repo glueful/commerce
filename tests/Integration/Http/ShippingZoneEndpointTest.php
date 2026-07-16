@@ -9,6 +9,7 @@ use Glueful\Extensions\Commerce\Http\Admin\AdminShippingZoneController;
 use Glueful\Extensions\Commerce\Http\DTOs\CreateMethodData;
 use Glueful\Extensions\Commerce\Http\DTOs\CreateZoneData;
 use Glueful\Extensions\Commerce\Http\DTOs\SetZoneLocationsData;
+use Glueful\Extensions\Commerce\Http\DTOs\ShippingZoneListQuery;
 use Glueful\Extensions\Commerce\Shipping\ShippingClassRepository;
 use Glueful\Extensions\Commerce\Shipping\ShippingZoneRepository;
 use Glueful\Extensions\Commerce\Shipping\ShippingZoneService;
@@ -68,7 +69,7 @@ final class ShippingZoneEndpointTest extends CommerceTestCase
         $this->createZone('International');
         $this->createZone('Other Tenant Zone', 'tenant-b');
 
-        $response = $this->controller()->index(Request::create('/x'));
+        $response = $this->controller()->index(new ShippingZoneListQuery(), Request::create('/x'));
 
         self::assertSame(200, $response->getStatusCode());
         self::assertCount(2, $this->json($response)['data']);
@@ -787,7 +788,7 @@ final class ShippingZoneEndpointTest extends CommerceTestCase
         $this->createZone('United States', '', 1);
         $this->setLocations($this->lastZoneUuid('United States'), [['kind' => 'country', 'value' => 'US']]);
 
-        $response = $this->controller()->index(Request::create('/x'));
+        $response = $this->controller()->index(new ShippingZoneListQuery(), Request::create('/x'));
         $byName = $this->indexByName($this->json($response)['data']);
 
         self::assertTrue($byName['Catch-all']['shadows_later_zones']);
@@ -800,7 +801,7 @@ final class ShippingZoneEndpointTest extends CommerceTestCase
         $this->setLocations($this->lastZoneUuid('United States'), [['kind' => 'country', 'value' => 'US']]);
         $this->createZone('Catch-all', '', 1);
 
-        $response = $this->controller()->index(Request::create('/x'));
+        $response = $this->controller()->index(new ShippingZoneListQuery(), Request::create('/x'));
         $byName = $this->indexByName($this->json($response)['data']);
 
         self::assertFalse($byName['United States']['shadows_later_zones']);
@@ -814,7 +815,7 @@ final class ShippingZoneEndpointTest extends CommerceTestCase
         $this->createZone('Canada', '', 1);
         $this->setLocations($this->lastZoneUuid('Canada'), [['kind' => 'country', 'value' => 'CA']]);
 
-        $response = $this->controller()->index(Request::create('/x'));
+        $response = $this->controller()->index(new ShippingZoneListQuery(), Request::create('/x'));
         $byName = $this->indexByName($this->json($response)['data']);
 
         self::assertFalse($byName['United States']['shadows_later_zones']);
@@ -827,7 +828,7 @@ final class ShippingZoneEndpointTest extends CommerceTestCase
         $this->setLocations($zone['uuid'], [['kind' => 'country', 'value' => 'US']]);
         $this->createMethod($zone['uuid'], 'flat', 'Standard', ['amount' => 500]);
 
-        $response = $this->controller()->index(Request::create('/x'));
+        $response = $this->controller()->index(new ShippingZoneListQuery(), Request::create('/x'));
         $data = $this->json($response)['data'][0];
 
         self::assertCount(1, $data['locations']);

@@ -5,8 +5,11 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Commerce\Http\Admin;
 
 use Glueful\Bootstrap\ApplicationContext;
+use Glueful\Extensions\Commerce\Discounts\DiscountRedeemedException;
 use Glueful\Extensions\Commerce\Discounts\DiscountRepository;
+use Glueful\Extensions\Commerce\Discounts\DiscountService;
 use Glueful\Extensions\Commerce\Http\DTOs\CreateDiscountData;
+use Glueful\Extensions\Commerce\Http\DTOs\DiscountListQuery;
 use Glueful\Extensions\Commerce\Http\DTOs\UpdateDiscountData;
 use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
@@ -26,21 +29,40 @@ final class AdminDiscountController
         private ApplicationContext $context,
         private ?DiscountRepository $discounts = null,
         private ?CurrentTenantResolver $tenants = null,
+        private ?DiscountService $discountService = null,
     ) {
         $this->discounts ??= app($context, DiscountRepository::class);
         $this->tenants ??= container($context)->has(CurrentTenantResolver::class)
             ? container($context)->get(CurrentTenantResolver::class)
             : new SentinelTenantResolver();
+        $this->discountService ??= app($context, DiscountService::class);
     }
 
     #[ApiOperation(summary: 'List discounts', tags: ['Commerce Admin'])]
     #[ApiResponse(200, description: 'Discounts retrieved')]
-    public function index(Request $request): Response
+    public function index(DiscountListQuery $query, Request $request): Response
     {
-        return Response::success(
-            $this->discounts->listAll($this->context, $this->tenants->tenantUuid($this->context)),
-            'Discounts retrieved'
+        $page = max(1, $query->page ?? 1);
+        $perPage = max(1, min(100, $query->per_page ?? 24));
+        $result = $this->discountService->list(
+            $this->context,
+            array_filter(
+                ['status' => $query->status, 'q' => $query->q],
+                static fn (mixed $value): bool => $value !== null
+            ),
+            $page,
+            $perPage
         );
+
+        return Response::paginated($result['items'], $result['total'], $page, $perPage, null, 'Discounts retrieved');
+    }
+
+    #[ApiOperation(summary: 'Get a discount', tags: ['Commerce Admin'])]
+    #[ApiResponse(200, description: 'Discount retrieved')]
+    #[ApiResponse(404, description: 'Discount not found')]
+    public function show(Request $request, string $uuid): Response
+    {
+        return Response::success($this->discountService->show($this->context, $uuid), 'Discount retrieved');
     }
 
     #[ApiOperation(summary: 'Create a discount', tags: ['Commerce Admin'])]
@@ -65,16 +87,32 @@ final class AdminDiscountController
     #[ApiOperation(summary: 'Update a discount', tags: ['Commerce Admin'])]
     #[ApiRequestBody(schema: UpdateDiscountData::class)]
     #[ApiResponse(200, description: 'Discount updated')]
+    #[ApiResponse(404, description: 'Discount not found')]
     #[ApiResponse(422, description: 'Validation failed')]
     public function update(Request $request, string $uuid): Response
     {
         try {
             $changes = $this->validated($this->input($request), partial: true);
-            $this->discounts->update($this->context, $this->tenants->tenantUuid($this->context), $uuid, $changes);
+            $discount = $this->discountService->update($this->context, $uuid, $changes);
 
-            return Response::success(['uuid' => $uuid], 'Discount updated');
+            return Response::success($discount, 'Discount updated');
         } catch (ValidationException $e) {
             return Response::validation($e->firstErrors());
+        }
+    }
+
+    #[ApiOperation(summary: 'Delete a discount', tags: ['Commerce Admin'])]
+    #[ApiResponse(204, description: 'Discount deleted')]
+    #[ApiResponse(404, description: 'Discount not found')]
+    #[ApiResponse(409, description: 'Discount has been redeemed and cannot be deleted')]
+    public function destroy(Request $request, string $uuid): Response
+    {
+        try {
+            $this->discountService->delete($this->context, $uuid);
+
+            return Response::noContent();
+        } catch (DiscountRedeemedException $e) {
+            return Response::error($e->getMessage(), 409);
         }
     }
 

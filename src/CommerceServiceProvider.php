@@ -854,7 +854,8 @@ final class CommerceServiceProvider extends ServiceProvider
         return new AdminDiscountController(
             $container->get(ApplicationContext::class),
             $container->get(DiscountRepository::class),
-            self::tenantResolver($container)
+            self::tenantResolver($container),
+            $container->get(DiscountService::class)
         );
     }
 

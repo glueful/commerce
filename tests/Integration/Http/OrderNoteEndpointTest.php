@@ -153,6 +153,63 @@ final class OrderNoteEndpointTest extends CommerceTestCase
         self::assertSame('customer', $note['visibility']);
     }
 
+    public function testNotesReadRoundTripsBodyAndVisibilityAsStoredByPost(): void
+    {
+        [$placed] = $this->placeOrder('SKU-NOTE-READ', 3, 1);
+        $orderUuid = (string) $placed['order']['uuid'];
+
+        $this->orderController()->addNote(
+            new CreateOrderNoteData(body: 'internal note one', visibility: 'internal'),
+            Request::create('/commerce/admin/orders/' . $orderUuid . '/notes', 'POST'),
+            $orderUuid
+        );
+        $request = Request::create('/commerce/admin/orders/' . $orderUuid . '/notes', 'POST');
+        $request->attributes->set('auth.user', new UserIdentity(uuid: 'readactor001'));
+        $this->orderController()->addNote(
+            new CreateOrderNoteData(body: 'customer note two', visibility: 'customer'),
+            $request,
+            $orderUuid
+        );
+
+        $response = $this->orderController()->notes(
+            Request::create('/commerce/admin/orders/' . $orderUuid . '/notes', 'GET'),
+            $orderUuid
+        );
+
+        self::assertSame(200, $response->getStatusCode());
+        $notes = $this->json($response)['data'];
+        self::assertCount(2, $notes);
+        self::assertSame('note.added', $notes[0]['type']);
+        self::assertSame('internal note one', $notes[0]['payload']['body']);
+        self::assertSame('internal', $notes[0]['payload']['visibility']);
+        self::assertSame('customer note two', $notes[1]['payload']['body']);
+        self::assertSame('customer', $notes[1]['payload']['visibility']);
+        self::assertSame('readactor001', $notes[1]['payload']['actor_uuid']);
+    }
+
+    public function testNotesReadOnOrderWithNoNotesReturnsEmptyArray(): void
+    {
+        [$placed] = $this->placeOrder('SKU-NOTE-EMPTY', 3, 1);
+        $orderUuid = (string) $placed['order']['uuid'];
+
+        $response = $this->orderController()->notes(
+            Request::create('/commerce/admin/orders/' . $orderUuid . '/notes', 'GET'),
+            $orderUuid
+        );
+
+        self::assertSame(200, $response->getStatusCode());
+        self::assertSame([], $this->json($response)['data']);
+    }
+
+    public function testNotesReadUnknownOrderThrowsNotFound(): void
+    {
+        $this->expectException(NotFoundException::class);
+        $this->orderController()->notes(
+            Request::create('/commerce/admin/orders/does-not-exist/notes', 'GET'),
+            'does-not-exist'
+        );
+    }
+
     /**
      * Binds a real EventService into the test container and returns a capture object whose
      * `events` list is appended to (in dispatch order) as OrderNoteAdded fires.

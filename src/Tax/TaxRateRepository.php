@@ -43,6 +43,49 @@ final class TaxRateRepository
     }
 
     /**
+     * Paginated admin list (Layer 6 Global Constraints): the SAME `country`/
+     * `class` predicates {@see self::search()} applies (kept as a separate
+     * method -- {@see \Glueful\Extensions\Commerce\Tax\DbTaxCalculator} calls
+     * `search()` directly at quote time and must not gain a pagination
+     * dependency). Ordered `country ASC, priority ASC, uuid ASC` (already a
+     * stable tie-break); count and row queries apply the identical predicate set.
+     *
+     * @return array{items: list<array<string,mixed>>, total: int}
+     */
+    public function paginatedSearch(
+        ApplicationContext $context,
+        string $tenant,
+        ?string $country,
+        ?string $class,
+        int $page,
+        int $perPage
+    ): array {
+        $count = db($context)->table('commerce_tax_rates')->where('tenant_uuid', '=', $tenant);
+        $rows = db($context)->table('commerce_tax_rates')->where('tenant_uuid', '=', $tenant);
+
+        if ($country !== null) {
+            $count->where('country', '=', $country);
+            $rows->where('country', '=', $country);
+        }
+        if ($class !== null) {
+            $count->where('class', '=', $class);
+            $rows->where('class', '=', $class);
+        }
+
+        $items = $rows->orderBy('country', 'ASC')
+            ->orderBy('priority', 'ASC')
+            ->orderBy('uuid', 'ASC')
+            ->limit($perPage)
+            ->offset(max(0, $page - 1) * $perPage)
+            ->get();
+
+        return [
+            'items' => $items,
+            'total' => $count->count(),
+        ];
+    }
+
+    /**
      * Delegation existence check (spec §4): one index-covered query per quote
      * deciding DB-vs-flat-rate -- a tenant with ANY rate row is wholly on the
      * data-driven tax path (mirrors

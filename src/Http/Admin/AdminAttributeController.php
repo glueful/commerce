@@ -6,6 +6,7 @@ namespace Glueful\Extensions\Commerce\Http\Admin;
 
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Catalog\AttributeService;
+use Glueful\Extensions\Commerce\Http\DTOs\AttributeListQuery;
 use Glueful\Extensions\Commerce\Http\DTOs\CreateAttributeData;
 use Glueful\Extensions\Commerce\Http\DTOs\CreateAttributeValueData;
 use Glueful\Extensions\Commerce\Http\DTOs\SetProductAttributesData;
@@ -31,9 +32,33 @@ final class AdminAttributeController
 
     #[ApiOperation(summary: 'List attributes', tags: ['Commerce Admin'])]
     #[ApiResponse(200, description: 'Attributes retrieved')]
-    public function index(Request $request): Response
+    public function index(AttributeListQuery $query, Request $request): Response
     {
-        return Response::success($this->attributes->list($this->context), 'Attributes retrieved');
+        $page = max(1, $query->page ?? 1);
+        $perPage = max(1, min(100, $query->per_page ?? 24));
+        $result = $this->attributes->list(
+            $this->context,
+            array_filter(['q' => $query->q], static fn (mixed $value): bool => $value !== null),
+            $page,
+            $perPage
+        );
+
+        return Response::paginated(
+            $result['items'],
+            $result['total'],
+            $page,
+            $perPage,
+            null,
+            'Attributes retrieved'
+        );
+    }
+
+    #[ApiOperation(summary: 'Get an attribute', tags: ['Commerce Admin'])]
+    #[ApiResponse(200, description: 'Attribute retrieved')]
+    #[ApiResponse(404, description: 'Attribute not found')]
+    public function show(Request $request, string $uuid): Response
+    {
+        return Response::success($this->attributes->show($this->context, $uuid), 'Attribute retrieved');
     }
 
     #[ApiOperation(summary: 'Create an attribute', tags: ['Commerce Admin'])]

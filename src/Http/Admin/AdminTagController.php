@@ -8,6 +8,7 @@ use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Catalog\TagService;
 use Glueful\Extensions\Commerce\Http\DTOs\CreateTagData;
 use Glueful\Extensions\Commerce\Http\DTOs\SetProductTagsData;
+use Glueful\Extensions\Commerce\Http\DTOs\TagListQuery;
 use Glueful\Http\Response;
 use Glueful\Routing\Attributes\ApiOperation;
 use Glueful\Routing\Attributes\ApiResponse;
@@ -16,6 +17,8 @@ use Symfony\Component\HttpFoundation\Request;
 
 final class AdminTagController
 {
+    use ReadsAdminInput;
+
     public function __construct(
         private ApplicationContext $context,
         private ?TagService $tags = null,
@@ -25,9 +28,41 @@ final class AdminTagController
 
     #[ApiOperation(summary: 'List tags', tags: ['Commerce Admin'])]
     #[ApiResponse(200, description: 'Tags retrieved')]
-    public function index(Request $request): Response
+    public function index(TagListQuery $query, Request $request): Response
     {
-        return Response::success($this->tags->list($this->context), 'Tags retrieved');
+        $page = max(1, $query->page ?? 1);
+        $perPage = max(1, min(100, $query->per_page ?? 24));
+        $result = $this->tags->list(
+            $this->context,
+            array_filter(['q' => $query->q], static fn (mixed $value): bool => $value !== null),
+            $page,
+            $perPage
+        );
+
+        return Response::paginated($result['items'], $result['total'], $page, $perPage, null, 'Tags retrieved');
+    }
+
+    #[ApiOperation(summary: 'Get a tag', tags: ['Commerce Admin'])]
+    #[ApiResponse(200, description: 'Tag retrieved')]
+    #[ApiResponse(404, description: 'Tag not found')]
+    public function show(Request $request, string $uuid): Response
+    {
+        return Response::success($this->tags->show($this->context, $uuid), 'Tag retrieved');
+    }
+
+    #[ApiOperation(summary: 'Rename a tag', tags: ['Commerce Admin'])]
+    #[ApiResponse(200, description: 'Tag updated')]
+    #[ApiResponse(404, description: 'Tag not found')]
+    #[ApiResponse(422, description: 'Validation failed')]
+    public function update(Request $request, string $uuid): Response
+    {
+        try {
+            $tag = $this->tags->rename($this->context, $uuid, $this->input($request));
+
+            return Response::success($tag, 'Tag updated');
+        } catch (ValidationException $e) {
+            return Response::validation($e->firstErrors());
+        }
     }
 
     #[ApiOperation(summary: 'Create a tag', tags: ['Commerce Admin'])]

@@ -8,6 +8,7 @@ use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Http\DTOs\CreateMethodData;
 use Glueful\Extensions\Commerce\Http\DTOs\CreateZoneData;
 use Glueful\Extensions\Commerce\Http\DTOs\SetZoneLocationsData;
+use Glueful\Extensions\Commerce\Http\DTOs\ShippingZoneListQuery;
 use Glueful\Extensions\Commerce\Http\DTOs\UpdateMethodData;
 use Glueful\Extensions\Commerce\Http\DTOs\UpdateZoneData;
 use Glueful\Extensions\Commerce\Shipping\ShippingZoneService;
@@ -31,9 +32,28 @@ final class AdminShippingZoneController
 
     #[ApiOperation(summary: 'List shipping zones', tags: ['Commerce Admin'])]
     #[ApiResponse(200, description: 'Shipping zones retrieved')]
-    public function index(Request $request): Response
+    public function index(ShippingZoneListQuery $query, Request $request): Response
     {
-        return Response::success($this->zones->list($this->context), 'Shipping zones retrieved');
+        $page = max(1, $query->page ?? 1);
+        $perPage = max(1, min(100, $query->per_page ?? 24));
+        $result = $this->zones->list($this->context, $page, $perPage);
+
+        return Response::paginated(
+            $result['items'],
+            $result['total'],
+            $page,
+            $perPage,
+            null,
+            'Shipping zones retrieved'
+        );
+    }
+
+    #[ApiOperation(summary: 'Get a shipping zone', tags: ['Commerce Admin'])]
+    #[ApiResponse(200, description: 'Shipping zone retrieved')]
+    #[ApiResponse(404, description: 'Shipping zone not found')]
+    public function show(Request $request, string $uuid): Response
+    {
+        return Response::success($this->zones->show($this->context, $uuid), 'Shipping zone retrieved');
     }
 
     #[ApiOperation(summary: 'Create a shipping zone', tags: ['Commerce Admin'])]
@@ -121,6 +141,14 @@ final class AdminShippingZoneController
         } catch (ValidationException $e) {
             return Response::validation($e->firstErrors());
         }
+    }
+
+    #[ApiOperation(summary: 'Get a shipping method', tags: ['Commerce Admin'])]
+    #[ApiResponse(200, description: 'Shipping method retrieved')]
+    #[ApiResponse(404, description: 'Shipping method not found')]
+    public function showMethod(Request $request, string $uuid): Response
+    {
+        return Response::success($this->zones->showMethod($this->context, $uuid), 'Shipping method retrieved');
     }
 
     #[ApiOperation(summary: 'Update a shipping method', tags: ['Commerce Admin'])]

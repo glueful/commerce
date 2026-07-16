@@ -8,15 +8,15 @@ use Glueful\Validation\Attributes\FromQuery;
 use Glueful\Validation\Attributes\Rule;
 use Glueful\Validation\Contracts\RequestData;
 
-final class TaxRateListQuery implements RequestData
+final class DiscountListQuery implements RequestData
 {
     public function __construct(
-        #[FromQuery(description: 'Filter by ISO-3166 alpha-2 country code.')]
+        #[FromQuery(description: 'Filter by discount status.')]
         #[Rule('string')]
-        public readonly ?string $country = null,
-        #[FromQuery(description: 'Filter by tax class slug.')]
+        public readonly ?string $status = null,
+        #[FromQuery(description: 'Case-insensitive literal substring match on discount code.')]
         #[Rule('string')]
-        public readonly ?string $class = null,
+        public readonly ?string $q = null,
         #[FromQuery(description: 'Page number.')]
         #[Rule('numeric')]
         public readonly ?int $page = null,

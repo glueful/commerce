@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Glueful\Extensions\Commerce\Tests\Integration;
 
+use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Container\Definition\FactoryDefinition;
 use Glueful\Container\Loader\DefaultServicesLoader;
 use Glueful\Extensions\Commerce\Cart\CartPruner;
@@ -39,11 +40,13 @@ use Glueful\Extensions\Commerce\Orders\OrderPaymentService;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
 use Glueful\Extensions\Commerce\Payments\OrderPaymentConfirmationHandler;
 use Glueful\Extensions\Commerce\Pricing\PricingEngine;
+use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
 use Glueful\Extensions\Commerce\Tenancy\TenantAdopter;
 use Glueful\Extensions\Commerce\Tests\Support\CommerceTestCase;
 use Glueful\Extensions\Contracts\Payments\PaymentCollector;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Glueful\Extensions\Contracts\Tenancy\TenantTableRegistry;
+use Symfony\Component\HttpFoundation\Request;
 
 final class ServiceProviderWiringTest extends CommerceTestCase
 {
@@ -99,6 +102,35 @@ final class ServiceProviderWiringTest extends CommerceTestCase
         self::assertArrayNotHasKey(PaymentCollector::class, $services);
         self::assertArrayNotHasKey(CurrentTenantResolver::class, $services);
         self::assertArrayNotHasKey(TenantTableRegistry::class, $services);
+    }
+
+    /**
+     * `makeAdminDiscountController` (Layer 6 Task 3) was previously missing the
+     * `DiscountService` binding the show/update/delete actions delegate to --
+     * this proves the factory-built controller resolves and actually exercises
+     * the shared service (not just that a definition array entry exists).
+     */
+    public function testMakeAdminDiscountControllerFactoryResolvesTheSharedDiscountService(): void
+    {
+        $this->bind(ApplicationContext::class, $this->context);
+        $this->bind(DiscountRepository::class, new DiscountRepository());
+        $this->bind(
+            DiscountService::class,
+            new DiscountService(new DiscountRepository(), new SentinelTenantResolver())
+        );
+
+        $controller = CommerceServiceProvider::makeAdminDiscountController($this->contextContainer());
+
+        $this->connection->table('commerce_discounts')->insert([
+            'uuid' => 'discwiring01',
+            'tenant_uuid' => '',
+            'code' => 'WIRING',
+            'type' => 'percentage',
+            'value' => 500,
+        ]);
+
+        $response = $controller->show(Request::create('/x'), 'discwiring01');
+        self::assertSame(200, $response->getStatusCode());
     }
 
     public function testServicesLoadThroughRealDefaultServicesLoaderInProductionMode(): void

@@ -64,6 +64,17 @@ final class CategoryService
         return $this->categories->all($c, $this->tenants->tenantUuid($c));
     }
 
+    /** @return array<string,mixed> */
+    public function show(ApplicationContext $c, string $uuid): array
+    {
+        $category = $this->categories->findByUuid($c, $this->tenants->tenantUuid($c), $uuid);
+        if ($category === null) {
+            throw new NotFoundException('Resource not found.');
+        }
+
+        return $category;
+    }
+
     /**
      * @param array<string,mixed> $input
      * @return array<string,mixed>

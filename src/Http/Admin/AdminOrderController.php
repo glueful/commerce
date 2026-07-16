@@ -184,6 +184,23 @@ final class AdminOrderController
         return Response::success(['order_uuid' => $uuid, 'note' => $note], 'Note added');
     }
 
+    #[ApiOperation(summary: "Get an order's notes", tags: ['Commerce Admin'])]
+    #[ApiResponse(200, description: 'Notes retrieved')]
+    #[ApiResponse(404, description: 'Order not found')]
+    public function notes(Request $request, string $uuid): Response
+    {
+        $tenant = $this->tenants->tenantUuid($this->context);
+        // Tenant-scoped 404 guard first (non-revealing), before any further reads.
+        $this->order($uuid);
+
+        $notes = array_values(array_filter(
+            $this->orders->eventsForOrder($this->context, $tenant, $uuid),
+            static fn (array $event): bool => ($event['type'] ?? null) === 'note.added'
+        ));
+
+        return Response::success($notes, 'Notes retrieved');
+    }
+
     #[ApiOperation(summary: 'Get invoice data for an order', tags: ['Commerce Admin'])]
     #[ApiResponse(200, description: 'Invoice data retrieved')]
     #[ApiResponse(404, description: 'Order not found')]

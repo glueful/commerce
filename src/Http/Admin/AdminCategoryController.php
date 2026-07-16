@@ -35,6 +35,14 @@ final class AdminCategoryController
         return Response::success($this->categories->list($this->context), 'Categories retrieved');
     }
 
+    #[ApiOperation(summary: 'Get a category', tags: ['Commerce Admin'])]
+    #[ApiResponse(200, description: 'Category retrieved')]
+    #[ApiResponse(404, description: 'Category not found')]
+    public function show(Request $request, string $uuid): Response
+    {
+        return Response::success($this->categories->show($this->context, $uuid), 'Category retrieved');
+    }
+
     #[ApiOperation(summary: 'Create a category', tags: ['Commerce Admin'])]
     #[ApiResponse(201, description: 'Category created')]
     #[ApiResponse(409, description: 'Category ancestry changed concurrently; retry')]

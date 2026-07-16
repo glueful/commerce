@@ -44,6 +44,14 @@ final class AdminReviewController
         return Response::paginated($result['items'], $result['total'], $page, $perPage, null, 'Reviews retrieved');
     }
 
+    #[ApiOperation(summary: 'Get a review', tags: ['Commerce Admin'])]
+    #[ApiResponse(200, description: 'Review retrieved')]
+    #[ApiResponse(404, description: 'Review not found')]
+    public function show(Request $request, string $uuid): Response
+    {
+        return Response::success($this->reviews->show($this->context, $uuid), 'Review retrieved');
+    }
+
     #[ApiOperation(summary: 'Create a review', tags: ['Commerce Admin'])]
     #[ApiResponse(201, description: 'Review created')]
     #[ApiResponse(422, description: 'Validation failed')]

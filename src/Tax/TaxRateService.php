@@ -42,14 +42,25 @@ final class TaxRateService
     ) {
     }
 
-    /** @return list<array<string,mixed>> */
-    public function list(ApplicationContext $c, ?string $country, ?string $class): array
+    /** @return array{items: list<array<string,mixed>>, total: int} */
+    public function list(ApplicationContext $c, ?string $country, ?string $class, int $page, int $perPage): array
     {
         $tenant = $this->tenants->tenantUuid($c);
         $normalizedCountry = $country !== null ? $this->normalizeCountry($country) : null;
         $normalizedClass = $class !== null ? OpenVocabularySlug::normalize($class, 'class') : null;
 
-        return $this->rates->search($c, $tenant, $normalizedCountry, $normalizedClass);
+        return $this->rates->paginatedSearch($c, $tenant, $normalizedCountry, $normalizedClass, $page, $perPage);
+    }
+
+    /** @return array<string,mixed> */
+    public function show(ApplicationContext $c, string $uuid): array
+    {
+        $rate = $this->rates->findByUuid($c, $this->tenants->tenantUuid($c), $uuid);
+        if ($rate === null) {
+            throw new NotFoundException('Resource not found.');
+        }
+
+        return $rate;
     }
 
     /**

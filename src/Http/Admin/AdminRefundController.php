@@ -6,6 +6,7 @@ namespace Glueful\Extensions\Commerce\Http\Admin;
 
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Http\DTOs\CreateRefundData;
+use Glueful\Extensions\Commerce\Http\DTOs\RefundListQuery;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
 use Glueful\Extensions\Commerce\Orders\Refunds\ConcurrentRefundException;
 use Glueful\Extensions\Commerce\Orders\Refunds\IdempotencyConflictException;
@@ -98,6 +99,41 @@ final class AdminRefundController
             $this->refundsRepo->listForOrder($this->context, $tenant, $uuid),
             'Refunds retrieved'
         );
+    }
+
+    #[ApiOperation(summary: 'List refunds across orders', tags: ['Commerce Admin'])]
+    #[ApiResponse(200, description: 'Refunds retrieved')]
+    public function list(RefundListQuery $query, Request $request): Response
+    {
+        $page = max(1, $query->page ?? 1);
+        $perPage = max(1, min(100, $query->per_page ?? 24));
+        $tenant = $this->tenants->tenantUuid($this->context);
+        $result = $this->refundsRepo->paginatedForTenant(
+            $this->context,
+            $tenant,
+            array_filter(
+                ['status' => $query->status, 'order' => $query->order, 'from' => $query->from, 'to' => $query->to],
+                static fn (mixed $value): bool => $value !== null
+            ),
+            $page,
+            $perPage
+        );
+
+        return Response::paginated($result['items'], $result['total'], $page, $perPage, null, 'Refunds retrieved');
+    }
+
+    #[ApiOperation(summary: 'Get a refund', tags: ['Commerce Admin'])]
+    #[ApiResponse(200, description: 'Refund retrieved')]
+    #[ApiResponse(404, description: 'Refund not found')]
+    public function show(Request $request, string $uuid): Response
+    {
+        $tenant = $this->tenants->tenantUuid($this->context);
+        $refund = $this->refundsRepo->findByUuid($this->context, $tenant, $uuid);
+        if ($refund === null) {
+            throw new NotFoundException('Resource not found.');
+        }
+
+        return Response::success($refund, 'Refund retrieved');
     }
 
     /**

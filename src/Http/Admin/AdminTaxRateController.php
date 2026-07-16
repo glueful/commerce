@@ -31,10 +31,19 @@ final class AdminTaxRateController
     #[ApiResponse(200, description: 'Tax rates retrieved')]
     public function index(TaxRateListQuery $query): Response
     {
-        return Response::success(
-            $this->rates->list($this->context, $query->country, $query->class),
-            'Tax rates retrieved'
-        );
+        $page = max(1, $query->page ?? 1);
+        $perPage = max(1, min(100, $query->per_page ?? 24));
+        $result = $this->rates->list($this->context, $query->country, $query->class, $page, $perPage);
+
+        return Response::paginated($result['items'], $result['total'], $page, $perPage, null, 'Tax rates retrieved');
+    }
+
+    #[ApiOperation(summary: 'Get a tax rate', tags: ['Commerce Admin'])]
+    #[ApiResponse(200, description: 'Tax rate retrieved')]
+    #[ApiResponse(404, description: 'Tax rate not found')]
+    public function show(Request $request, string $uuid): Response
+    {
+        return Response::success($this->rates->show($this->context, $uuid), 'Tax rate retrieved');
     }
 
     #[ApiOperation(summary: 'Create a tax rate', tags: ['Commerce Admin'])]

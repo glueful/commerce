@@ -27,6 +27,7 @@ final class CreateCommerceDiscountTables implements MigrationInterface
                 $table->bigInteger('usage_count')->default(0);
                 $table->json('product_scope')->nullable();
                 $table->string('status', 16)->default('active');
+                $table->integer('revision')->default(0);
                 $table->timestamp('created_at')->default('CURRENT_TIMESTAMP');
                 $table->timestamp('updated_at')->nullable();
 

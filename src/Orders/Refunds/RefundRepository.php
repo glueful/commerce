@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Glueful\Extensions\Commerce\Orders\Refunds;
 
+use DateTimeImmutable;
+use DateTimeZone;
 use Glueful\Bootstrap\ApplicationContext;
 
 final class RefundRepository
@@ -65,6 +67,90 @@ final class RefundRepository
         unset($refund);
 
         return $refunds;
+    }
+
+    /**
+     * Cross-order paginated admin list (design spec Layer 6 §2 decision 4, new
+     * `GET /refunds`): `status`/`order` (order uuid) are exact matches; `from`/
+     * `to` are HALF-OPEN `[from 00:00:00, to+1day 00:00:00)` bounds on
+     * `completed_at` -- the same half-open shape {@see
+     * \Glueful\Extensions\Commerce\Reports\ReportWindow} uses, computed directly
+     * here rather than through that class (no defaulting, no 366-day cap, per
+     * spec). A plain `completed_at >= ?`/`completed_at < ?` predicate already
+     * excludes `NULL` under standard SQL comparison semantics, so pending/failed
+     * refunds (which never carry a `completed_at`) never match a date-bounded
+     * request without any extra guard. Ordered `created_at DESC, uuid ASC`
+     * (stable tie-break); count and row queries apply the identical predicate
+     * set.
+     *
+     * @param array<string,mixed> $filters 'status'/'order' (exact) and/or 'from'/'to' (Y-m-d)
+     * @return array{items: list<array<string,mixed>>, total: int}
+     */
+    public function paginatedForTenant(
+        ApplicationContext $context,
+        string $tenant,
+        array $filters,
+        int $page,
+        int $perPage
+    ): array {
+        $count = db($context)->table('commerce_refunds')->where('tenant_uuid', '=', $tenant);
+        $rows = db($context)->table('commerce_refunds')->where('tenant_uuid', '=', $tenant);
+
+        if (isset($filters['status']) && (string) $filters['status'] !== '') {
+            $count->where('status', '=', (string) $filters['status']);
+            $rows->where('status', '=', (string) $filters['status']);
+        }
+        if (isset($filters['order']) && (string) $filters['order'] !== '') {
+            $count->where('order_uuid', '=', (string) $filters['order']);
+            $rows->where('order_uuid', '=', (string) $filters['order']);
+        }
+        if (isset($filters['from']) && (string) $filters['from'] !== '') {
+            $fromSql = self::inclusiveDayStartSql((string) $filters['from']);
+            $count->where('completed_at', '>=', $fromSql);
+            $rows->where('completed_at', '>=', $fromSql);
+        }
+        if (isset($filters['to']) && (string) $filters['to'] !== '') {
+            $toExclusiveSql = self::exclusiveDayEndSql((string) $filters['to']);
+            $count->where('completed_at', '<', $toExclusiveSql);
+            $rows->where('completed_at', '<', $toExclusiveSql);
+        }
+
+        $items = $rows->orderBy('created_at', 'DESC')
+            ->orderBy('uuid', 'ASC')
+            ->limit($perPage)
+            ->offset(max(0, $page - 1) * $perPage)
+            ->get();
+
+        return [
+            'items' => $items,
+            'total' => $count->count(),
+        ];
+    }
+
+    /** Inclusive UTC window start, `Y-m-d 00:00:00`, mirroring `ReportWindow::fromSql()`. */
+    private static function inclusiveDayStartSql(string $ymd): string
+    {
+        return self::parseYmd($ymd)->format('Y-m-d H:i:s');
+    }
+
+    /** Exclusive UTC window end (`$ymd` + 1 day, `00:00:00`), mirroring `ReportWindow::toExclusiveSql()`. */
+    private static function exclusiveDayEndSql(string $ymd): string
+    {
+        return self::parseYmd($ymd)->modify('+1 day')->format('Y-m-d H:i:s');
+    }
+
+    /**
+     * The `#[Rule('date:Y-m-d')]` DTO boundary already guarantees a
+     * strictly-formatted `Y-m-d` string by the time it reaches here.
+     */
+    private static function parseYmd(string $ymd): DateTimeImmutable
+    {
+        $date = DateTimeImmutable::createFromFormat('!Y-m-d', $ymd, new DateTimeZone('UTC'));
+        if ($date === false) {
+            throw new \InvalidArgumentException("Invalid date: {$ymd}");
+        }
+
+        return $date;
     }
 
     /** @param list<array{order_line_uuid:string,quantity:int,amount:int}> $lines */

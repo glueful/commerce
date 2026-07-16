@@ -6,6 +6,7 @@ namespace Glueful\Extensions\Commerce\Http\Admin;
 
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Http\DTOs\CreateShippingClassData;
+use Glueful\Extensions\Commerce\Http\DTOs\ShippingClassListQuery;
 use Glueful\Extensions\Commerce\Http\DTOs\UpdateShippingClassData;
 use Glueful\Extensions\Commerce\Shipping\ShippingClassInUseException;
 use Glueful\Extensions\Commerce\Shipping\ShippingClassService;
@@ -29,9 +30,33 @@ final class AdminShippingClassController
 
     #[ApiOperation(summary: 'List shipping classes', tags: ['Commerce Admin'])]
     #[ApiResponse(200, description: 'Shipping classes retrieved')]
-    public function index(Request $request): Response
+    public function index(ShippingClassListQuery $query, Request $request): Response
     {
-        return Response::success($this->classes->list($this->context), 'Shipping classes retrieved');
+        $page = max(1, $query->page ?? 1);
+        $perPage = max(1, min(100, $query->per_page ?? 24));
+        $result = $this->classes->list(
+            $this->context,
+            array_filter(['q' => $query->q], static fn (mixed $value): bool => $value !== null),
+            $page,
+            $perPage
+        );
+
+        return Response::paginated(
+            $result['items'],
+            $result['total'],
+            $page,
+            $perPage,
+            null,
+            'Shipping classes retrieved'
+        );
+    }
+
+    #[ApiOperation(summary: 'Get a shipping class', tags: ['Commerce Admin'])]
+    #[ApiResponse(200, description: 'Shipping class retrieved')]
+    #[ApiResponse(404, description: 'Shipping class not found')]
+    public function show(Request $request, string $uuid): Response
+    {
+        return Response::success($this->classes->show($this->context, $uuid), 'Shipping class retrieved');
     }
 
     #[ApiOperation(summary: 'Create a shipping class', tags: ['Commerce Admin'])]

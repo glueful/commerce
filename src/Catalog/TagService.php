@@ -30,10 +30,75 @@ final class TagService
     ) {
     }
 
-    /** @return list<array<string,mixed>> */
-    public function list(ApplicationContext $c): array
+    /**
+     * @param array<string,mixed> $filters 'q' (literal substring on name/slug)
+     * @return array{items: list<array<string,mixed>>, total: int}
+     */
+    public function list(ApplicationContext $c, array $filters, int $page, int $perPage): array
     {
-        return $this->tags->all($c, $this->tenants->tenantUuid($c));
+        return $this->tags->paginatedFor($c, $this->tenants->tenantUuid($c), $filters, $page, $perPage);
+    }
+
+    /** @return array<string,mixed> */
+    public function show(ApplicationContext $c, string $uuid): array
+    {
+        $tag = $this->tags->findByUuid($c, $this->tenants->tenantUuid($c), $uuid);
+        if ($tag === null) {
+            throw new NotFoundException('Resource not found.');
+        }
+
+        return $tag;
+    }
+
+    /**
+     * `PATCH /tags/{uuid}` rename (design spec Layer 6 §2 decision 4): name only
+     * -- slug is immutable (referenced by storefront filters), mirroring
+     * {@see \Glueful\Extensions\Commerce\Shipping\ShippingClassService::update()}'s
+     * loud-rejection-of-a-present-slug-key posture rather than silently dropping
+     * it. Uses the existing {@see TagRepository::claimRevision()} -> post-claim
+     * re-read -> update discipline, one transaction.
+     *
+     * @param array<string,mixed> $changes
+     * @return array<string,mixed>
+     */
+    public function rename(ApplicationContext $c, string $uuid, array $changes): array
+    {
+        if (array_key_exists('slug', $changes)) {
+            throw ValidationException::forField('slug', 'slug is immutable and cannot be changed after creation.');
+        }
+
+        $tenant = $this->tenants->tenantUuid($c);
+
+        return db($c)->transaction(function () use ($c, $tenant, $uuid, $changes): array {
+            if (!$this->tags->claimRevision($c, $tenant, $uuid)) {
+                throw new NotFoundException('Resource not found.');
+            }
+
+            $current = $this->tags->findByUuid($c, $tenant, $uuid);
+            if ($current === null) {
+                throw new NotFoundException('Resource not found.');
+            }
+
+            $set = [];
+            if (array_key_exists('name', $changes) && $changes['name'] !== null) {
+                $name = trim((string) $changes['name']);
+                if ($name === '') {
+                    throw ValidationException::forField('name', 'Name is required.');
+                }
+                $set['name'] = $name;
+            }
+
+            if ($set !== []) {
+                $this->tags->update($c, $tenant, $uuid, $set);
+            }
+
+            $tag = $this->tags->findByUuid($c, $tenant, $uuid);
+            if ($tag === null) {
+                throw new \RuntimeException('Renamed tag could not be reloaded.');
+            }
+
+            return $tag;
+        });
     }
 
     /**

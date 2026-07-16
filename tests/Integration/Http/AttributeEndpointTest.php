@@ -15,6 +15,7 @@ use Glueful\Extensions\Commerce\Catalog\ProductRepository;
 use Glueful\Extensions\Commerce\Catalog\TagRepository;
 use Glueful\Extensions\Commerce\Catalog\VariantRepository;
 use Glueful\Extensions\Commerce\Http\Admin\AdminAttributeController;
+use Glueful\Extensions\Commerce\Http\DTOs\AttributeListQuery;
 use Glueful\Extensions\Commerce\Http\DTOs\CreateAttributeData;
 use Glueful\Extensions\Commerce\Http\DTOs\CreateAttributeValueData;
 use Glueful\Extensions\Commerce\Http\DTOs\SetProductAttributesData;
@@ -76,7 +77,7 @@ final class AttributeEndpointTest extends CommerceTestCase
         $this->createAttribute('size', 'Size');
         $this->createAttribute('other-tenant-attr', 'Other', 'tenant-b');
 
-        $response = $this->controller()->index(Request::create('/x'));
+        $response = $this->controller()->index(new AttributeListQuery(), Request::create('/x'));
 
         self::assertSame(200, $response->getStatusCode());
         self::assertCount(2, $this->json($response)['data']);
@@ -217,7 +218,7 @@ final class AttributeEndpointTest extends CommerceTestCase
         $this->createValue($attribute['uuid'], 'blue', 'Blue', 1);
         $this->createValue($attribute['uuid'], 'red', 'Red', 0);
 
-        $response = $this->controller()->index(Request::create('/x'));
+        $response = $this->controller()->index(new AttributeListQuery(), Request::create('/x'));
 
         $found = null;
         foreach ($this->json($response)['data'] as $row) {

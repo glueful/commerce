@@ -121,7 +121,7 @@ final class CatalogBreadthTenancyTest extends CommerceTestCase
     {
         $tagA = $this->tags(self::TENANT_A)->create($this->context, ['slug' => 'breadth-tag', 'name' => 'Breadth Tag']);
 
-        $uuidsForB = array_column($this->tags(self::TENANT_B)->list($this->context), 'uuid');
+        $uuidsForB = array_column($this->tags(self::TENANT_B)->list($this->context, [], 1, 100)['items'], 'uuid');
         self::assertNotContains($tagA['uuid'], $uuidsForB);
 
         try {
@@ -142,7 +142,10 @@ final class CatalogBreadthTenancyTest extends CommerceTestCase
             'name' => 'Breadth Attribute',
         ]);
 
-        $uuidsForB = array_column($this->attributes(self::TENANT_B)->list($this->context), 'uuid');
+        $uuidsForB = array_column(
+            $this->attributes(self::TENANT_B)->list($this->context, [], 1, 100)['items'],
+            'uuid'
+        );
         self::assertNotContains($attributeA['uuid'], $uuidsForB);
 
         try {

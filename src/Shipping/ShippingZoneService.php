@@ -64,15 +64,81 @@ final class ShippingZoneService
     }
 
     /**
-     * Zone list projection (spec §6): each zone carries its locations, its methods
-     * (decoded config, ordered position ASC/uuid ASC), and a derived
-     * `shadows_later_zones` -- true when the zone has zero locations (an
-     * "everywhere" zone, spec §3) AND at least one other zone follows it in the
-     * same (position, uuid) evaluation order.
+     * Paginated zone list (Layer 6 Global Constraints; spec §6 zone projection):
+     * each zone carries its locations, its methods (decoded config, ordered
+     * position ASC/uuid ASC), and a derived `shadows_later_zones` -- true when
+     * the zone has zero locations (an "everywhere" zone, spec §3) AND at least
+     * one other zone follows it in the same (position, uuid) evaluation order.
      *
+     * `shadows_later_zones` is a LIST-LEVEL derived field: whether a zone shadows
+     * a "later" zone depends on the tenant's FULL ordered zone set, not just
+     * whatever fits on one page. {@see self::fullProjection()} therefore always
+     * computes it over every zone first; pagination is applied afterward as a
+     * page slice of that already-computed, already-ordered (position ASC, uuid
+     * ASC -- a stable tie-break) projection. Zones carry no `q` filter (unlike
+     * tags/attributes/classes), so there is no predicate-identity concern between
+     * a "count" and a "rows" query here.
+     *
+     * @return array{items: list<array<string,mixed>>, total: int}
+     */
+    public function list(ApplicationContext $c, int $page, int $perPage): array
+    {
+        $projection = $this->fullProjection($c);
+
+        return [
+            'items' => array_slice($projection, max(0, $page - 1) * $perPage, $perPage),
+            'total' => count($projection),
+        ];
+    }
+
+    /**
+     * Single zone show (design spec Layer 6 §2 decision 3): embeds locations +
+     * methods, mirroring the list projection's shape minus the list-context-only
+     * `shadows_later_zones` derived field.
+     *
+     * @return array<string,mixed>
+     */
+    public function show(ApplicationContext $c, string $uuid): array
+    {
+        $tenant = $this->tenants->tenantUuid($c);
+        $zone = $this->zones->findByUuid($c, $tenant, $uuid);
+        if ($zone === null) {
+            throw new NotFoundException('Resource not found.');
+        }
+
+        $zone['locations'] = $this->zones->locationsForZone($c, $uuid);
+        $zone['methods'] = array_map(
+            fn (array $method): array => $this->decodeMethod($method),
+            $this->zones->methodsForZone($c, $uuid)
+        );
+
+        return $zone;
+    }
+
+    /**
+     * Single shipping method show (design spec Layer 6 §2 decision 3):
+     * tenant-scoped via the owning zone, mirroring the update/delete method
+     * mutations' "peek the method, then verify its zone resolves in-tenant"
+     * discipline.
+     *
+     * @return array<string,mixed>
+     */
+    public function showMethod(ApplicationContext $c, string $methodUuid): array
+    {
+        $tenant = $this->tenants->tenantUuid($c);
+        $method = $this->zones->findMethodByUuid($c, $methodUuid);
+        if ($method === null || $this->zones->findByUuid($c, $tenant, (string) $method['zone_uuid']) === null) {
+            throw new NotFoundException('Resource not found.');
+        }
+
+        return $this->decodeMethod($method);
+    }
+
+    /**
+     * @see self::list() for why this always spans every tenant zone.
      * @return list<array<string,mixed>>
      */
-    public function list(ApplicationContext $c): array
+    private function fullProjection(ApplicationContext $c): array
     {
         $tenant = $this->tenants->tenantUuid($c);
         $zones = $this->zones->all($c, $tenant);

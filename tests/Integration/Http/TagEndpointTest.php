@@ -17,6 +17,7 @@ use Glueful\Extensions\Commerce\Catalog\VariantRepository;
 use Glueful\Extensions\Commerce\Http\Admin\AdminTagController;
 use Glueful\Extensions\Commerce\Http\DTOs\CreateTagData;
 use Glueful\Extensions\Commerce\Http\DTOs\SetProductTagsData;
+use Glueful\Extensions\Commerce\Http\DTOs\TagListQuery;
 use Glueful\Extensions\Commerce\Http\Storefront\ProductController;
 use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
 use Glueful\Extensions\Commerce\Tests\Support\CommerceTestCase;
@@ -72,7 +73,7 @@ final class TagEndpointTest extends CommerceTestCase
         $this->createTag('sale', 'Sale');
         $this->createTag('other-tenant-tag', 'Other', 'tenant-b');
 
-        $response = $this->controller()->index(Request::create('/x'));
+        $response = $this->controller()->index(new TagListQuery(), Request::create('/x'));
 
         self::assertSame(200, $response->getStatusCode());
         self::assertCount(2, $this->json($response)['data']);

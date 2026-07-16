@@ -100,6 +100,18 @@ final class ReviewService
         return $this->reviews->paginatedFor($c, $this->tenants->tenantUuid($c), $filters, $page, $perPage);
     }
 
+    /** @return array<string,mixed> */
+    public function show(ApplicationContext $c, string $uuid): array
+    {
+        $tenant = $this->tenants->tenantUuid($c);
+        $review = $this->reviews->findByUuid($c, $tenant, $uuid);
+        if ($review === null) {
+            throw new NotFoundException('Resource not found.');
+        }
+
+        return $review;
+    }
+
     /**
      * `pending -> approved`: claim, then add the review's rating to the
      * product's rollup in the same transaction.

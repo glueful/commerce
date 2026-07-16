@@ -22,6 +22,7 @@ use Glueful\Extensions\Commerce\Contracts\TaxCalculator;
 use Glueful\Extensions\Commerce\Discounts\DiscountRepository;
 use Glueful\Extensions\Commerce\Discounts\DiscountService;
 use Glueful\Extensions\Commerce\Http\Admin\AdminProductController;
+use Glueful\Extensions\Commerce\Http\DTOs\AdminProductListQuery;
 use Glueful\Extensions\Commerce\Http\DTOs\CreateProductData;
 use Glueful\Extensions\Commerce\Http\DTOs\ProductListQuery;
 use Glueful\Extensions\Commerce\Http\DTOs\ProductVariantData;
@@ -143,7 +144,7 @@ final class ProductDeleteTest extends CommerceTestCase
         $deleted = $this->seedActiveProduct('delprodE002', 'del-e-002');
         $this->catalog()->deleteProduct($this->context, $deleted['uuid']);
 
-        $response = $this->adminController()->index(Request::create('/x', 'GET'));
+        $response = $this->adminController()->index(new AdminProductListQuery(), Request::create('/x', 'GET'));
         $uuids = array_column($this->json($response)['data'], 'uuid');
 
         self::assertContains($visible['uuid'], $uuids);

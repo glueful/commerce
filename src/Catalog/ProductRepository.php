@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Commerce\Catalog;
 
 use Glueful\Bootstrap\ApplicationContext;
+use Glueful\Extensions\Commerce\Support\LiteralLike;
 use Glueful\Extensions\Commerce\Support\UtcNowSql;
 
 final class ProductRepository
@@ -140,6 +141,60 @@ SQL,
         return [
             'items' => array_map(fn (array $row): array => $this->decodeJson($row), $rows),
             'total' => $total,
+        ];
+    }
+
+    /**
+     * Admin list projection (Layer 6 Global Constraints): replaces the raw
+     * unbounded `db()->get()` AdminProductController::index() used to run.
+     * `status`/`type` are exact (already vocabulary-validated at the DTO
+     * boundary); `q` is a case-insensitive literal substring match on `name` via
+     * {@see LiteralLike}. Tombstoned rows (`deleted_at IS NOT NULL`) are excluded
+     * -- this is an interactive admin catalog surface, not a named
+     * history/integrity read. Ordered `created_at DESC, uuid ASC` (stable
+     * tie-break); count and row queries apply the identical predicate set.
+     *
+     * @param array<string,mixed> $filters 'status'/'type' (exact) and/or 'q' (literal substring on name)
+     * @return array{items: list<array<string,mixed>>, total: int}
+     */
+    public function paginatedForAdmin(
+        ApplicationContext $context,
+        string $tenant,
+        array $filters,
+        int $page,
+        int $perPage
+    ): array {
+        $count = db($context)->table('commerce_products')
+            ->where('tenant_uuid', '=', $tenant)
+            ->whereRaw('deleted_at IS NULL');
+        $rows = db($context)->table('commerce_products')
+            ->where('tenant_uuid', '=', $tenant)
+            ->whereRaw('deleted_at IS NULL');
+
+        if (isset($filters['status']) && (string) $filters['status'] !== '') {
+            $count->where('status', '=', (string) $filters['status']);
+            $rows->where('status', '=', (string) $filters['status']);
+        }
+        if (isset($filters['type']) && (string) $filters['type'] !== '') {
+            $count->where('type', '=', (string) $filters['type']);
+            $rows->where('type', '=', (string) $filters['type']);
+        }
+        $q = isset($filters['q']) ? trim((string) $filters['q']) : '';
+        if ($q !== '') {
+            $pattern = LiteralLike::pattern($q);
+            $count->whereRaw("LOWER(name) LIKE ? ESCAPE '!'", [$pattern]);
+            $rows->whereRaw("LOWER(name) LIKE ? ESCAPE '!'", [$pattern]);
+        }
+
+        $items = $rows->orderBy('created_at', 'DESC')
+            ->orderBy('uuid', 'ASC')
+            ->limit($perPage)
+            ->offset(max(0, $page - 1) * $perPage)
+            ->get();
+
+        return [
+            'items' => array_map(fn (array $row): array => $this->decodeJson($row), $items),
+            'total' => $count->count(),
         ];
     }
 

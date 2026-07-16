@@ -8,6 +8,7 @@ use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Catalog\CatalogService;
 use Glueful\Extensions\Commerce\Catalog\ProductRepository;
 use Glueful\Extensions\Commerce\Catalog\VariantRepository;
+use Glueful\Extensions\Commerce\Http\DTOs\AdminProductListQuery;
 use Glueful\Extensions\Commerce\Http\DTOs\BulkPriceData;
 use Glueful\Extensions\Commerce\Http\DTOs\BulkStatusData;
 use Glueful\Extensions\Commerce\Http\DTOs\CreateProductData;
@@ -50,15 +51,23 @@ final class AdminProductController
 
     #[ApiOperation(summary: 'List products', tags: ['Commerce Admin'])]
     #[ApiResponse(200, description: 'Products retrieved')]
-    public function index(Request $request): Response
+    public function index(AdminProductListQuery $query, Request $request): Response
     {
+        $page = max(1, $query->page ?? 1);
+        $perPage = max(1, min(100, $query->per_page ?? 24));
         $tenant = $this->tenants->tenantUuid($this->context);
-        $rows = db($this->context)->table('commerce_products')
-            ->where('tenant_uuid', '=', $tenant)
-            ->orderBy('created_at', 'DESC')
-            ->get();
+        $result = $this->products->paginatedForAdmin(
+            $this->context,
+            $tenant,
+            array_filter(
+                ['status' => $query->status, 'type' => $query->type, 'q' => $query->q],
+                static fn (mixed $value): bool => $value !== null
+            ),
+            $page,
+            $perPage
+        );
 
-        return Response::success($rows, 'Products retrieved');
+        return Response::paginated($result['items'], $result['total'], $page, $perPage, null, 'Products retrieved');
     }
 
     #[ApiOperation(summary: 'Get a product', tags: ['Commerce Admin'])]

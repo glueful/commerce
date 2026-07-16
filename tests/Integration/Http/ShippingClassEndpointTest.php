@@ -11,6 +11,7 @@ use Glueful\Extensions\Commerce\Catalog\ProductRepository;
 use Glueful\Extensions\Commerce\Catalog\VariantRepository;
 use Glueful\Extensions\Commerce\Http\Admin\AdminShippingClassController;
 use Glueful\Extensions\Commerce\Http\DTOs\CreateShippingClassData;
+use Glueful\Extensions\Commerce\Http\DTOs\ShippingClassListQuery;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
 use Glueful\Extensions\Commerce\Shipping\ShippingClassRepository;
 use Glueful\Extensions\Commerce\Shipping\ShippingClassService;
@@ -88,7 +89,7 @@ final class ShippingClassEndpointTest extends CommerceTestCase
         $this->createClass('oversized', 'Oversized');
         $this->createClass('other', 'Other Tenant', 'tenant-b');
 
-        $response = $this->controller()->index(Request::create('/x'));
+        $response = $this->controller()->index(new ShippingClassListQuery(), Request::create('/x'));
 
         self::assertSame(200, $response->getStatusCode());
         self::assertCount(2, $this->json($response)['data']);

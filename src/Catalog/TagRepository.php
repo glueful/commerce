@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Commerce\Catalog;
 
 use Glueful\Bootstrap\ApplicationContext;
+use Glueful\Extensions\Commerce\Support\LiteralLike;
 
 final class TagRepository
 {
@@ -41,6 +42,45 @@ final class TagRepository
             ->get();
     }
 
+    /**
+     * Paginated admin list (Layer 6 Global Constraints): `q` is a
+     * case-insensitive literal substring match on name OR slug via
+     * {@see LiteralLike}. Ordered `name ASC, uuid ASC` (stable tie-break); count
+     * and row queries apply the identical predicate set.
+     *
+     * @param array<string,mixed> $filters 'q' (literal substring on name/slug)
+     * @return array{items: list<array<string,mixed>>, total: int}
+     */
+    public function paginatedFor(
+        ApplicationContext $context,
+        string $tenant,
+        array $filters,
+        int $page,
+        int $perPage
+    ): array {
+        $count = db($context)->table('commerce_tags')->where('tenant_uuid', '=', $tenant);
+        $rows = db($context)->table('commerce_tags')->where('tenant_uuid', '=', $tenant);
+
+        $q = isset($filters['q']) ? trim((string) $filters['q']) : '';
+        if ($q !== '') {
+            $pattern = LiteralLike::pattern($q);
+            $condition = "(LOWER(name) LIKE ? ESCAPE '!' OR LOWER(slug) LIKE ? ESCAPE '!')";
+            $count->whereRaw($condition, [$pattern, $pattern]);
+            $rows->whereRaw($condition, [$pattern, $pattern]);
+        }
+
+        $items = $rows->orderBy('name', 'ASC')
+            ->orderBy('uuid', 'ASC')
+            ->limit($perPage)
+            ->offset(max(0, $page - 1) * $perPage)
+            ->get();
+
+        return [
+            'items' => $items,
+            'total' => $count->count(),
+        ];
+    }
+
     public function delete(ApplicationContext $context, string $tenant, string $uuid): void
     {
         db($context)->table('commerce_tags')
@@ -65,6 +105,15 @@ SQL,
         );
 
         return $affected === 1;
+    }
+
+    /** @param array<string,mixed> $changes */
+    public function update(ApplicationContext $context, string $tenant, string $uuid, array $changes): void
+    {
+        db($context)->table('commerce_tags')
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('uuid', '=', $uuid)
+            ->update($changes);
     }
 
     /** Detaches every product from a tag being deleted. */
