@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-07-16 — Initial Release
+
+**Theme: the complete commerce platform** — catalog breadth (categories, tags, attributes,
+media, add-ons, reviews), orders with refunds and transactional email, digital delivery,
+customer aggregates, DB-backed shipping zones and tax tables behind delegating provider
+contracts, reports, and full API parity (pagination, filters, shows, bulk endpoints, public
+storefront browse/reviews). Integer minor units throughout; claim-based concurrency proven
+by two-connection PostgreSQL race tests; requires framework ≥ 1.70.0.
+
 - Added Commerce extension scaffold and Glueful extension metadata.
 - Added integer-minor-unit money utilities and hashed cart/order token handling.
 - Added catalog tables and services for products, variants, and single-store currency enforcement.
