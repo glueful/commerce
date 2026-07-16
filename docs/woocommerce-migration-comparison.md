@@ -74,6 +74,14 @@ Short answer: **migration is possible only for a simple store today, not a serio
   (the generic, multi-contributor `BlobAccessPolicy` composite this feature's policy
   backstop depends on); consumption is minted-signed-URL-based (a time-boxed URL per
   mint), not a raw fetch-count meter.
+- Reports/analytics — sales (gross/net revenue, refunds, AOV, and a pending-orders
+  count over a date window), products (ranked variant sales with line-attributed
+  refunds), customers (new vs. returning), and stock (out-of-stock/low-stock) reports,
+  with day/week/ISO-week/month rollups where applicable, computed live from migrated
+  orders/refunds/stock. Caveat: API-only (admin JSON endpoints; no dashboard/chart UI
+  — see "No bundled merchant admin UI" below) and no import of WooCommerce's own
+  historical report/analytics data — these are freshly computed from whatever orders
+  actually migrated in, not a Woo report-data carryover.
 
 That works for: a custom headless storefront selling physical, grouped, or external/affiliate products, organized into categories/tags with attributes, media galleries, add-ons, and moderated reviews, with simple variants and basic checkout, customer accounts backed by Users, saved addresses, full digital-product delivery, and data-driven shipping zones/classes and tax rates.
 
@@ -86,7 +94,6 @@ Major gaps:
 - No migration/import tool from WooCommerce yet.
 - No composite/bundle products (grouped and external/affiliate now work — see above).
 - No generated invoice documents (PDF/printable).
-- No reports/analytics.
 - No abandoned cart, subscriptions, memberships, marketplaces, POS, etc.
 - No bundled merchant admin UI comparable to WooCommerce. This is intentional: Commerce should provide API/domain parity, while app creators build the merchant experience that fits their product.
 - No REST import parity for Woo resources like customers, refunds, product attributes, categories, tags, reviews, reports.
@@ -121,14 +128,13 @@ deliberately last (an importer written before its target models exist gets rewri
 every model added; build the destination schema first, write the importer once against the
 final shape):
 
-1. Reports/analytics APIs.
-2. API parity for WooCommerce resources needed by importers and app-level UIs.
-3. WooCommerce importer, written against the finished models above.
+1. API parity for WooCommerce resources needed by importers and app-level UIs.
+2. WooCommerce importer, written against the finished models above.
 
 (Refunds, order notes, transactional emails, the whole product-media/categories/
 tags/attributes/reviews/add-ons/grouped-external-product-type batch, customers via
-Users integration, the storefront address book, full digital-product delivery, and
-data-driven shipping zones/classes and tax rates — formerly items 1 and 1a here —
-have shipped; see "What Can Migrate Today" above.)
+Users integration, the storefront address book, full digital-product delivery,
+data-driven shipping zones/classes and tax rates, and reports/analytics APIs —
+formerly items 1 and 1a here — have shipped; see "What Can Migrate Today" above.)
 
 
