@@ -1,0 +1,77 @@
+# Changelog
+
+## [Unreleased]
+
+## [1.0.0] - 2026-07-16 — Initial Release
+
+**Theme: the complete commerce platform** — catalog breadth (categories, tags, attributes,
+media, add-ons, reviews), orders with refunds and transactional email, digital delivery,
+customer aggregates, DB-backed shipping zones and tax tables behind delegating provider
+contracts, reports, and full API parity (pagination, filters, shows, bulk endpoints, public
+storefront browse/reviews). Integer minor units throughout; claim-based concurrency proven
+by two-connection PostgreSQL race tests; requires framework ≥ 1.70.0.
+
+- Added Commerce extension scaffold and Glueful extension metadata.
+- Added integer-minor-unit money utilities and hashed cart/order token handling.
+- Added catalog tables and services for products, variants, and single-store currency enforcement.
+- Added inventory stock ledger with atomic oversell-safe decrements.
+- Added pure pricing totals with discount, shipping, and tax composition.
+- Added transactional discounts with usage limits and once-per-buyer redemption keys.
+- Added cart tokens, line management, discount application, and guest cart merge support.
+- Added shipping and tax contracts with config-backed defaults.
+- Added order numbering, immutable line snapshots, order events, state transitions, expiry, and restock behavior.
+- Added checkout orchestration with transactional stock decrement, totals validation, order placement, and retryable payment initiation.
+- Added payment confirmation handling through `glueful/extension-contracts`, including amount/currency checks and late-payment rejection events.
+- Added storefront product, cart, checkout, and guest order APIs with header-only bearer tokens.
+- Added admin catalog, stock, discount, and order APIs.
+- Added runtime request DTOs plus OpenAPI operation/response metadata for Commerce HTTP APIs.
+- Added pagination for admin and customer order listing APIs.
+- Added maintenance CLI commands and `commerce:diagnose`.
+- Added tenant-mode resolver wiring, fail-closed tenant context handling, tenant table registration, and `commerce:tenancy:adopt`.
+- Added partial/full order refunds with automatic stock restock, a gateway-backed settlement saga, and idempotent refund requests.
+- Added order notes attached to admin/system order actions, with actor resolution.
+- Added opt-in transactional email for order lifecycle events (placed, fulfilled, refund settled, etc.), with mailer, listeners, and templates.
+- Added invoice data v1 (seller identity, line/tax/totals snapshot) and a dedicated invoice endpoint.
+- Fixed `fulfill()` to dispatch the `OrderFulfilled` event, which was previously silently skipped.
+- Removed the standalone admin `mark-refunded` endpoint; refunds are now the single source of truth for an order's refunded state.
+- Added product media (cover + gallery) attach/reorder/detach endpoints with blob validation.
+- Added categories and tags taxonomy with per-product assignment endpoints.
+- Added product attributes (global and per-product custom) with visible/hidden storefront echo control.
+- Added external and grouped product types, including grouped-child ordering and external URL/button metadata.
+- Added product add-ons (select/checkbox/text) with snapshot pricing, cart-line hash identity, and admin CRUD.
+- Added customer reviews with a moderation workflow and transactional rating rollups.
+- Added storefront `GET /commerce/products` and `GET /commerce/products/{slug}` enrichments: media, categories, tags, attributes, add-ons, children, rating, and external metadata.
+- Added multi-tenant coverage and claim-based concurrency protection for all Layer 2 catalog tables.
+- Added digital-download definitions (admin CRUD on variants, private-blob and digital-variant validation) and a checkout-time purchase-line entitlement snapshot that survives later definition edits or deletes.
+- Added snapshot-derived, idempotent, self-healing digital-download grant issuance (quantity aggregation across add-on-distinct lines, overflow guard, bounded token-collision retry) plus a `commerce:downloads:backfill` operator CLI.
+- Added order-authenticated digital-download listing and atomic signed-URL minting, plus a public email deep-link redemption route, sharing one guarded mint primitive with full-refund and expiry/revocation handling.
+- Added `CommerceDownloadBlobPolicy`, a blob-access policy contributor enforcing grant/definition-aware VIEW/INFO/DELETE/SIGN rules through the framework's composite blob-policy registry.
+- Added digital-download deep links to the `order_paid` transactional email on first grant issuance, with issuance failures isolated from mail delivery so the plain email always still sends.
+- Added order-derived admin customer aggregation (`GET /commerce/admin/customers` and `/{key}`, grouped by user uuid or normalized email) with soft username enrichment via `UserProviderInterface`.
+- Added `commerce:customers:link-guests`, an operator CLI that links guest orders to a resolvable user account by exact-match normalized email.
+- Added a storefront authenticated address book (`GET/POST /commerce/account/addresses`, `PATCH/DELETE /commerce/account/addresses/{uuid}`) with parent-claim serialization and default shipping/billing swap-in-transaction.
+- Added optional `shipping_address_uuid`/`billing_address_uuid` checkout integration that snapshots a caller-owned saved address into the order exactly like an inline address.
+- Added the address book to the admin customer detail endpoint when keyed by user uuid.
+- Added shipping zones with geographic locations (country/state/postcode, including wildcard patterns) and per-zone methods (flat, free-over-threshold, per-shipping-class table), a shipping-class taxonomy, and tax-rate tables (country/state/postcode-matched, per tax-class, priority-ordered, `shipping_taxable`), with full admin CRUD, claim-serialized zone/class/rate mutations, and cascading zone deletes.
+- Added nullable `tax_class` (products) and `shipping_class_uuid` (variants) fields end-to-end through create/update DTOs, services, repositories, and admin/storefront projections, preserving the resolved shipping-class slug alongside the raw uuid.
+- Added DB-backed shipping-zone rate quoting and line-level tax calculation (per-class tax rates, `shipping_taxable`, largest-remainder discount allocation into per-line taxable amounts) via delegating providers that fall back to config-based shipping/flat-rate tax byte-identically when a tenant has no zone or rate rows.
+- Hardened variant creation to claim (not just read) a referenced shipping class's revision, closing a TOCTOU gap against a concurrent class delete so create/update/delete all serialize against the same class row.
+- Added multi-tenant coverage (isolation, name/slug reuse, adopter/registry coverage) and pgsql-verified claim-based concurrency protection for shipping zones, shipping classes, and tax rates.
+- Added four read-only admin reports over a UTC date window (`GET /commerce/admin/reports/{sales,products,customers,stock}`, `commerce:read`-scoped): sales (gross/net revenue, refunds, AOV, and a window-scoped pending-orders count, bucketed by day/ISO-week/month with zero-filled series and an independently-computed summary), products (ranked variant sales by revenue or quantity with deterministic tie-breaks and line-attributed refunds, paginated), customers (new-vs-returning counts keyed by the same user/guest-email identity as the customer aggregation endpoint, bounded DB-side distinct aggregates instead of a `(days x customers)` blowup), and stock (point-in-time out-of-stock/low-stock variant list against a configurable threshold, paginated).
+- Added a shared `ReportWindow` (UTC `from`/`to` defaults, 366-day span cap, day/week/month bucket boundaries) and `ReportRollup` (pure-PHP day-to-week/month folding with zero-fill) used by the sales and customers reports, plus driver-aware `DateBucketSql`/`ReportBoundarySql` SQL helpers (SQLite/MySQL/PostgreSQL) so bucketed and boundary-table queries stay indexable instead of predicating on a database week/month function.
+- Added two folded range indexes on `commerce_orders` (`tenant_uuid, placed_at` and `tenant_uuid, created_at`) and one on `commerce_refunds` (`tenant_uuid, completed_at`) so the reports' windowed order/refund scans stay indexable; promoted `CustomerAggregationRepository::KEY_EXPR` to `public` so the customers report reuses the exact same new/returning identity expression as the customers admin endpoint.
+- Added `commerce.reports.low_stock_threshold` config (env `COMMERCE_REPORTS_LOW_STOCK_THRESHOLD`, default 2) as the stock report's default threshold, validated 0-100000 alongside any `?threshold=` override.
+- Added tenant isolation (including the `''` sentinel tenant), `commerce:read` scope enforcement, and endpoint-specific empty-result contract coverage across all four report endpoints.
+- Added shared `ProductStatus`/`ProductType` vocabularies (`draft|active|archived` / `physical|digital|external|grouped`) consumed by product create, update, list filtering, and bulk status, rejecting unknown values at the boundary instead of persisting them.
+- Added a live-vs-history product read split (`ProductRepository::findLiveByUuid/findLiveBySlug` vs. `findIncludingDeletedByUuid/findIncludingDeletedBySlug`), retiring the ambiguous `findByUuid`/`findBySlug`, and `DELETE /commerce/admin/products/{uuid}` (soft delete): a tombstoned product 404s on every interactive admin/storefront/relationship/review-create path, keeps reserving its slug (a normal 422 on reuse, never a raw unique-constraint error), leaves variants/stock/media untouched, and refuses a silent cart-line drop with a controlled unavailable-product 422 instead.
+- Added compositional guarded product/variant patch primitives (claim → live re-read → validate-full-patch → single write) shared by ordinary status/price PATCH and the new bulk endpoints, so a bulk write and a single-resource PATCH always serialize against the same row lock.
+- Added three bulk admin endpoints — `POST /commerce/admin/products/bulk-status`, `/variants/bulk-price`, `/reviews/bulk` — capped at 100 items, rejecting duplicate/malformed input as one whole-request 422 before any write, processing the rest per-item with a closed `{applied, failed: [{uuid, reason}]}` outcome vocabulary.
+- Added a folded `commerce_discounts.revision` column, a guarded `DELETE /commerce/admin/discounts/{uuid}` (409 with a "disable via status" hint once redeemed, row left intact) serialized against checkout redemption through the same claimed row, and a paginated/filtered (`status`/`q`) admin discount list.
+- Added pagination and shared literal-substring `q` filters (escaping `%`/`_`/the escape character via a new `Support\LiteralLike` helper) to the admin products, tags, attributes, shipping zones, shipping classes, and tax rates lists, plus `status`/`type` filters on products; every retrofitted list carries a stable uuid tie-break and identical count/row predicates.
+- Added new admin show endpoints for categories, tags, attributes (embedding values), shipping zones (embedding locations + methods), shipping methods, shipping classes, tax rates, discounts, reviews, and a new cross-order refunds list/show (`GET /commerce/admin/refunds`, `/{uuid}`, filtered by `status`/`order`/`from`/`to`).
+- Added `PATCH /commerce/admin/tags/{uuid}` (name-only rename; slug stays immutable) and `GET /commerce/admin/orders/{uuid}/notes`, symmetric with the existing notes write.
+- Added public storefront category browse (`GET /commerce/categories`, a strict `slug,name,description,position,image_url,children` allowlist tree) and `category`/`tag`/`attributes` filters on `GET /commerce/products` (exact-slug category/tag, `attribute-slug:value-slug` pairs with AND semantics, max 5), resolved via one batched tenant-scoped lookup per filter kind and correlated `EXISTS` semijoins — never a result-multiplying join — with a new `Support\JsonStringArrayContainsSql` helper giving exact (never substring) cross-driver attribute-value membership.
+- Added public storefront reviews: `POST /commerce/products/{slug}/reviews` (always lands `pending`; caller-supplied identity is never trusted) and `GET .../reviews` (approved-only, paginated, field-allowlisted), both gated behind new `commerce.rate_limits.catalog`/`commerce.rate_limits.review_submit` config keys.
+- Hardened `HttpDocumentationTest` to build a fresh `Router` from `routes.php` and walk every registered commerce route action instead of a hand-maintained controller list, failing explicitly (named `class::method`) on any unannotated action or unsupported handler shape.
+- Added a pgsql-gated API-parity lane (`ApiParityPgsqlTest`) proving the storefront attribute-value filter's exact JSON containment on real PostgreSQL (`red` never matches `bred`), the discount delete-vs-checkout-redemption race in both orderings under true two-connection row-lock interleaving, the product soft-delete race (exactly one winner), and bulk-vs-single-write serialization against a real concurrent connection.
+- Applied an explicit field allowlist to the storefront product projection (`GET /commerce/products` and `GET /commerce/products/{slug}`): products now expose only `uuid,slug,name,description,type,options,created_at` plus derived enrichments, and variants only `uuid,sku,option_values,price,compare_at_price,currency,position,status,shipping_class_uuid,shipping_class` — the previously spread internal columns (`tenant_uuid`, `status`, raw `metadata`, `rating_sum`/`rating_count`, `catalog_revision`, `tax_class`, numeric ids, `updated_at`/`deleted_at`) no longer leave the public surface.

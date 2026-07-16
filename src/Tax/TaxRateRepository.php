@@ -1,0 +1,133 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Glueful\Extensions\Commerce\Tax;
+
+use Glueful\Bootstrap\ApplicationContext;
+
+final class TaxRateRepository
+{
+    /** @param array<string,mixed> $row */
+    public function insert(ApplicationContext $context, array $row): void
+    {
+        db($context)->table('commerce_tax_rates')->insert($row);
+    }
+
+    /** @return array<string,mixed>|null */
+    public function findByUuid(ApplicationContext $context, string $tenant, string $uuid): ?array
+    {
+        return db($context)->table('commerce_tax_rates')
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('uuid', '=', $uuid)
+            ->first();
+    }
+
+    /**
+     * @return list<array<string,mixed>> tenant's tax rates, optionally filtered by
+     *   country/class (spec §6: "list filterable by country/class"), ordered
+     *   country ASC, priority ASC, uuid ASC -- priority-then-uuid mirrors the rate
+     *   selection order the calculator uses at quote time (spec §5).
+     */
+    public function search(ApplicationContext $context, string $tenant, ?string $country, ?string $class): array
+    {
+        $query = db($context)->table('commerce_tax_rates')->where('tenant_uuid', '=', $tenant);
+        if ($country !== null) {
+            $query = $query->where('country', '=', $country);
+        }
+        if ($class !== null) {
+            $query = $query->where('class', '=', $class);
+        }
+
+        return $query->orderBy('country', 'ASC')->orderBy('priority', 'ASC')->orderBy('uuid', 'ASC')->get();
+    }
+
+    /**
+     * Paginated admin list (Layer 6 Global Constraints): the SAME `country`/
+     * `class` predicates {@see self::search()} applies (kept as a separate
+     * method -- {@see \Glueful\Extensions\Commerce\Tax\DbTaxCalculator} calls
+     * `search()` directly at quote time and must not gain a pagination
+     * dependency). Ordered `country ASC, priority ASC, uuid ASC` (already a
+     * stable tie-break); count and row queries apply the identical predicate set.
+     *
+     * @return array{items: list<array<string,mixed>>, total: int}
+     */
+    public function paginatedSearch(
+        ApplicationContext $context,
+        string $tenant,
+        ?string $country,
+        ?string $class,
+        int $page,
+        int $perPage
+    ): array {
+        $count = db($context)->table('commerce_tax_rates')->where('tenant_uuid', '=', $tenant);
+        $rows = db($context)->table('commerce_tax_rates')->where('tenant_uuid', '=', $tenant);
+
+        if ($country !== null) {
+            $count->where('country', '=', $country);
+            $rows->where('country', '=', $country);
+        }
+        if ($class !== null) {
+            $count->where('class', '=', $class);
+            $rows->where('class', '=', $class);
+        }
+
+        $items = $rows->orderBy('country', 'ASC')
+            ->orderBy('priority', 'ASC')
+            ->orderBy('uuid', 'ASC')
+            ->limit($perPage)
+            ->offset(max(0, $page - 1) * $perPage)
+            ->get();
+
+        return [
+            'items' => $items,
+            'total' => $count->count(),
+        ];
+    }
+
+    /**
+     * Delegation existence check (spec §4): one index-covered query per quote
+     * deciding DB-vs-flat-rate -- a tenant with ANY rate row is wholly on the
+     * data-driven tax path (mirrors
+     * {@see \Glueful\Extensions\Commerce\Shipping\ShippingZoneRepository::existsForTenant()}).
+     */
+    public function existsForTenant(ApplicationContext $context, string $tenant): bool
+    {
+        return db($context)->table('commerce_tax_rates')
+            ->where('tenant_uuid', '=', $tenant)
+            ->count() > 0;
+    }
+
+    /** @param array<string,mixed> $changes */
+    public function update(ApplicationContext $context, string $tenant, string $uuid, array $changes): void
+    {
+        db($context)->table('commerce_tax_rates')
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('uuid', '=', $uuid)
+            ->update($changes);
+    }
+
+    public function delete(ApplicationContext $context, string $tenant, string $uuid): void
+    {
+        db($context)->table('commerce_tax_rates')
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('uuid', '=', $uuid)
+            ->delete();
+    }
+
+    /**
+     * Affected-row-checked serialization primitive for tax-rate PATCH/DELETE
+     * (URL's primary resource -- a failed claim is a non-revealing 404).
+     */
+    public function claimRevision(ApplicationContext $context, string $tenant, string $uuid): bool
+    {
+        $affected = db($context)->table('commerce_tax_rates')->executeModification(
+            <<<'SQL'
+UPDATE commerce_tax_rates SET revision = revision + 1 WHERE tenant_uuid = ? AND uuid = ?
+SQL,
+            [$tenant, $uuid]
+        );
+
+        return $affected === 1;
+    }
+}
