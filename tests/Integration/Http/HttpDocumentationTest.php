@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Glueful\Extensions\Commerce\Tests\Integration\Http;
 
+use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Http\Admin\AdminDiscountController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminOrderController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminProductController;
@@ -16,41 +17,126 @@ use Glueful\Extensions\Commerce\Http\Storefront\ProductController;
 use Glueful\Extensions\Commerce\Tests\Support\CommerceTestCase;
 use Glueful\Routing\Attributes\ApiOperation;
 use Glueful\Routing\Attributes\ApiResponse;
+use Glueful\Routing\Router;
 use Glueful\Validation\Contracts\RequestData;
-use ReflectionClass;
 use ReflectionMethod;
 
+/**
+ * Hardened OpenAPI enforcement (Layer 6 Task 7, design spec §2 decision 7):
+ * rather than a hand-maintained 9-controller list, this walks EVERY route
+ * `routes.php` actually registers -- a fresh `Router` is constructed against
+ * this test's own `ApplicationContext` (bound into the container so
+ * `Router::getContext()`/the `config()` helper `routes.php` calls both
+ * resolve), `routes.php` is `require`d with that local `$router` in scope
+ * (mirroring how `ServiceProvider::loadRoutesFrom()` exposes `$router` to the
+ * included file), and `Router::getAllRoutes()` is walked to collect every
+ * `[class, method]` action whose class lives under the commerce HTTP
+ * namespace (never a framework/application route the extension doesn't own).
+ * Every such action must carry `#[ApiOperation]` plus at least one
+ * `#[ApiResponse]`; an unsupported handler shape (a closure, an invokable
+ * object, anything that isn't a `[class-string, method]` pair) fails
+ * EXPLICITLY rather than being silently skipped. This test therefore proves
+ * coverage for every Layer 6 route (retrofit lists/filters, shows, tag
+ * rename, product/discount delete, bulk endpoints, storefront catalog/review
+ * additions) with no hand-list to fall out of sync. `Router`'s constructor
+ * only ever loads a route cache when one already exists on disk for this
+ * exact context+signature; this test never calls `RouteCache::save()`, so
+ * `wasLoadedFromCache()` staying false also proves the manifest was built
+ * fresh rather than depending on any app route cache.
+ */
 final class HttpDocumentationTest extends CommerceTestCase
 {
-    /** @return iterable<string, array{0: class-string}> */
-    public static function controllers(): iterable
-    {
-        yield 'storefront products' => [ProductController::class];
-        yield 'storefront cart' => [CartController::class];
-        yield 'storefront checkout' => [CheckoutController::class];
-        yield 'storefront orders' => [OrderController::class];
-        yield 'admin products' => [AdminProductController::class];
-        yield 'admin stock' => [AdminStockController::class];
-        yield 'admin discounts' => [AdminDiscountController::class];
-        yield 'admin orders' => [AdminOrderController::class];
-        yield 'admin refunds' => [AdminRefundController::class];
-    }
+    private const COMMERCE_HTTP_NAMESPACE_PREFIX = 'Glueful\\Extensions\\Commerce\\Http\\';
 
-    /** @dataProvider controllers */
-    public function testRouteMethodsDeclareOpenApiOperationAndResponses(string $controller): void
+    public function testEveryRegisteredCommerceRouteActionDeclaresOpenApiOperationAndResponse(): void
     {
-        foreach ($this->routeMethods($controller) as $method) {
+        $router = $this->freshRouter();
+        $actions = $this->commerceRouteActions($router);
+
+        self::assertNotSame(
+            [],
+            $actions,
+            'Expected at least one commerce route action to be registered by routes.php.'
+        );
+
+        foreach ($actions as [$class, $methodName]) {
+            $method = new ReflectionMethod($class, $methodName);
+
             self::assertNotSame(
                 [],
                 $method->getAttributes(ApiOperation::class),
-                $controller . '::' . $method->getName() . ' is missing #[ApiOperation].'
+                "{$class}::{$methodName} is missing #[ApiOperation]."
             );
             self::assertNotSame(
                 [],
                 $method->getAttributes(ApiResponse::class),
-                $controller . '::' . $method->getName() . ' is missing #[ApiResponse].'
+                "{$class}::{$methodName} is missing at least one #[ApiResponse]."
             );
         }
+    }
+
+    /**
+     * Builds a fresh `Router` bound to THIS test's `ApplicationContext` (never
+     * the minimal/anonymous container `CommerceTestCase` otherwise wires) and
+     * registers every commerce route by `require`-ing the real `routes.php`
+     * against it -- the exact manifest-construction approach the plan pins.
+     */
+    private function freshRouter(): Router
+    {
+        $this->bind(ApplicationContext::class, $this->context);
+        $router = new Router($this->contextContainer());
+
+        self::assertFalse(
+            $router->wasLoadedFromCache(),
+            'The route manifest must be built fresh, never loaded from an app route cache.'
+        );
+
+        require __DIR__ . '/../../../routes.php';
+
+        return $router;
+    }
+
+    /**
+     * @return list<array{0: class-string, 1: string}>
+     */
+    private function commerceRouteActions(Router $router): array
+    {
+        $actions = [];
+
+        foreach ($router->getAllRoutes() as $route) {
+            $handler = $route['handler'];
+
+            if (
+                is_array($handler)
+                && count($handler) === 2
+                && array_is_list($handler)
+                && is_string($handler[0])
+                && is_string($handler[1])
+                && class_exists($handler[0])
+            ) {
+                if (!str_starts_with($handler[0], self::COMMERCE_HTTP_NAMESPACE_PREFIX)) {
+                    // Not one of this extension's own controllers -- a fresh
+                    // Router built solely from this extension's routes.php
+                    // should never actually reach this branch, but the filter
+                    // stays explicit per the design spec rather than assuming.
+                    continue;
+                }
+
+                /** @var class-string $class */
+                $class = $handler[0];
+                $actions[] = [$class, $handler[1]];
+                continue;
+            }
+
+            self::fail(sprintf(
+                'Unsupported commerce route handler shape for %s %s: expected [class-string, method], got %s.',
+                (string) $route['method'],
+                (string) $route['path'],
+                is_object($handler) ? get_class($handler) : get_debug_type($handler)
+            ));
+        }
+
+        return $actions;
     }
 
     public function testJsonWriteMethodsHaveDtoBackedRequestBodies(): void
@@ -159,22 +245,6 @@ final class HttpDocumentationTest extends CommerceTestCase
                 $controller . '::' . $name . ' must accept a RequestData query DTO.'
             );
         }
-    }
-
-    /**
-     * @param class-string $controller
-     * @return list<ReflectionMethod>
-     */
-    private function routeMethods(string $controller): array
-    {
-        $reflection = new ReflectionClass($controller);
-
-        return array_values(array_filter(
-            $reflection->getMethods(ReflectionMethod::IS_PUBLIC),
-            static fn (ReflectionMethod $method): bool =>
-                $method->getDeclaringClass()->getName() === $controller
-                && $method->getName() !== '__construct'
-        ));
     }
 
     private function hasRequestDataParameter(ReflectionMethod $method): bool

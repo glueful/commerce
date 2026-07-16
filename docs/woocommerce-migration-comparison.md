@@ -44,12 +44,25 @@ Short answer: **migration is possible only for a simple store today, not a serio
   time so later add-on edits never retroactively change an existing line.
 - Reviews with moderation (`pending` → `approved`/`spam`) and a live rating rollup
   (`{average, count}`) on the product payload.
-
-  Caveat: this whole catalog-breadth batch is admin/importer-facing only. Storefront
-  category-browse and attribute-filter endpoints, and storefront review submission,
-  are Layer 6 and not shipped yet — the storefront product payload already echoes
-  categories/tags/attributes/media/rating read-only, but there is no browse/filter/
-  submit API surface yet.
+- Storefront category browse (`GET /commerce/categories`, a strict-allowlist public
+  tree), product list filters on `GET /commerce/products` (`category`/`tag` exact
+  slug, `attributes` `attribute-slug:value-slug` pairs with AND semantics, max 5),
+  and public review submission/listing (`POST`/`GET /commerce/products/{slug}/reviews`
+  — submissions always land `pending`; listing is approved-only). Caveat: category
+  filtering is exact (no descendant-category rollup); custom free-text product
+  attributes are not addressable by the stable slug filter API.
+- Admin list/show/write parity retrofit across the catalog-breadth and shipping/tax
+  surfaces: pagination + filters on the admin products/tags/attributes/shipping-zones/
+  shipping-classes/tax-rates/discounts lists; new show endpoints (categories, tags,
+  attributes, shipping zones/methods/classes, tax rates, discounts, reviews, refunds);
+  tag rename; product soft delete; a guarded discount delete (409 once redeemed,
+  disable via status instead); a cross-order admin refunds list/show; and an order
+  notes read (symmetric with the existing notes write).
+- Three bulk write endpoints — product bulk status, variant bulk price, review bulk
+  moderation (approve/spam/delete) — each per-item atomic with a closed failure-reason
+  vocabulary (`{applied, failed}`). Caveat: these are the only three bulk endpoints;
+  there is no Woo-style batch-create/update/delete for every resource (products,
+  categories, tags, attributes, etc. are still single-resource writes only).
 - Customers, derived from orders rather than a bundled accounts table (`GET
   /commerce/admin/customers` and `/{key}`, keyed by `user_uuid` or normalized guest
   email, with soft username enrichment via `UserProviderInterface`). Caveat: no
@@ -83,7 +96,7 @@ Short answer: **migration is possible only for a simple store today, not a serio
   historical report/analytics data — these are freshly computed from whatever orders
   actually migrated in, not a Woo report-data carryover.
 
-That works for: a custom headless storefront selling physical, grouped, or external/affiliate products, organized into categories/tags with attributes, media galleries, add-ons, and moderated reviews, with simple variants and basic checkout, customer accounts backed by Users, saved addresses, full digital-product delivery, and data-driven shipping zones/classes and tax rates.
+That works for: a custom headless storefront selling physical, grouped, or external/affiliate products, browsable/filterable by category, tag, and attribute, with moderated public reviews, media galleries, add-ons, simple variants and basic checkout, customer accounts backed by Users, saved addresses, full digital-product delivery, data-driven shipping zones/classes and tax rates, and an admin surface with pagination/filters/shows/bulk writes across the catalog and commerce-ops resources.
 
 ## What Is Missing Versus WooCommerce
 
@@ -97,6 +110,10 @@ Major gaps:
 - No abandoned cart, subscriptions, memberships, marketplaces, POS, etc.
 - No bundled merchant admin UI comparable to WooCommerce. This is intentional: Commerce should provide API/domain parity, while app creators build the merchant experience that fits their product.
 - No REST import parity for Woo resources like customers, refunds, product attributes, categories, tags, reviews, reports.
+- No Woo-style batch endpoints for every resource. Only three purpose-built bulk
+  writes exist (product bulk status, variant bulk price, review bulk moderation) —
+  there is no generic batch-create/update/delete surface for products, categories,
+  tags, attributes, shipping zones/classes, tax rates, or discounts.
 
 ## What Commerce Is Doing Better Than WooCommerce
 
@@ -128,13 +145,16 @@ deliberately last (an importer written before its target models exist gets rewri
 every model added; build the destination schema first, write the importer once against the
 final shape):
 
-1. API parity for WooCommerce resources needed by importers and app-level UIs.
+1. ~~API parity for WooCommerce resources needed by importers and app-level UIs.~~ Shipped.
 2. WooCommerce importer, written against the finished models above.
 
 (Refunds, order notes, transactional emails, the whole product-media/categories/
 tags/attributes/reviews/add-ons/grouped-external-product-type batch, customers via
 Users integration, the storefront address book, full digital-product delivery,
-data-driven shipping zones/classes and tax rates, and reports/analytics APIs —
-formerly items 1 and 1a here — have shipped; see "What Can Migrate Today" above.)
+data-driven shipping zones/classes and tax rates, reports/analytics APIs, and the
+API-parity retrofit — pagination/filters/shows/writes across the admin catalog and
+commerce-ops surfaces, storefront category browse/product filters/public reviews,
+and the three pinned bulk write endpoints — have shipped; see "What Can Migrate
+Today" above. The only remaining item is the WooCommerce importer itself.)
 
 
