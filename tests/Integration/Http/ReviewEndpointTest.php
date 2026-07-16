@@ -51,7 +51,7 @@ final class ReviewEndpointTest extends CommerceTestCase
         self::assertSame('Jane Doe', $data['author_name']);
         self::assertSame('jane@example.com', $data['author_email']);
 
-        $reloadedProduct = (new ProductRepository())->findByUuid($this->context, '', $product['uuid']);
+        $reloadedProduct = (new ProductRepository())->findLiveByUuid($this->context, '', $product['uuid']);
         self::assertNotNull($reloadedProduct);
         self::assertSame(0, (int) $reloadedProduct['rating_sum']);
         self::assertSame(0, (int) $reloadedProduct['rating_count']);
@@ -248,7 +248,7 @@ final class ReviewEndpointTest extends CommerceTestCase
         self::assertSame(200, $response->getStatusCode());
         self::assertSame('approved', $this->json($response)['data']['status']);
 
-        $reloadedProduct = (new ProductRepository())->findByUuid($this->context, '', $product['uuid']);
+        $reloadedProduct = (new ProductRepository())->findLiveByUuid($this->context, '', $product['uuid']);
         self::assertNotNull($reloadedProduct);
         self::assertSame(4, (int) $reloadedProduct['rating_sum']);
         self::assertSame(1, (int) $reloadedProduct['rating_count']);
@@ -264,7 +264,7 @@ final class ReviewEndpointTest extends CommerceTestCase
 
         self::assertSame(409, $response->getStatusCode());
 
-        $reloadedProduct = (new ProductRepository())->findByUuid($this->context, '', $product['uuid']);
+        $reloadedProduct = (new ProductRepository())->findLiveByUuid($this->context, '', $product['uuid']);
         self::assertNotNull($reloadedProduct);
         self::assertSame(3, (int) $reloadedProduct['rating_sum']);
         self::assertSame(1, (int) $reloadedProduct['rating_count']);
@@ -308,7 +308,7 @@ final class ReviewEndpointTest extends CommerceTestCase
         self::assertSame(200, $response->getStatusCode());
         self::assertSame('spam', $this->json($response)['data']['status']);
 
-        $reloadedProduct = (new ProductRepository())->findByUuid($this->context, '', $product['uuid']);
+        $reloadedProduct = (new ProductRepository())->findLiveByUuid($this->context, '', $product['uuid']);
         self::assertNotNull($reloadedProduct);
         self::assertSame(0, (int) $reloadedProduct['rating_sum']);
         self::assertSame(0, (int) $reloadedProduct['rating_count']);
@@ -325,7 +325,7 @@ final class ReviewEndpointTest extends CommerceTestCase
         self::assertSame(200, $response->getStatusCode());
         self::assertSame('spam', $this->json($response)['data']['status']);
 
-        $reloadedProduct = (new ProductRepository())->findByUuid($this->context, '', $product['uuid']);
+        $reloadedProduct = (new ProductRepository())->findLiveByUuid($this->context, '', $product['uuid']);
         self::assertNotNull($reloadedProduct);
         self::assertSame(0, (int) $reloadedProduct['rating_sum']);
         self::assertSame(0, (int) $reloadedProduct['rating_count']);
@@ -396,7 +396,7 @@ final class ReviewEndpointTest extends CommerceTestCase
         }
 
         self::assertNotNull((new ReviewRepository())->findByUuid($this->context, '', $review['uuid']));
-        $reloadedProduct = (new ProductRepository())->findByUuid($this->context, '', $product['uuid']);
+        $reloadedProduct = (new ProductRepository())->findLiveByUuid($this->context, '', $product['uuid']);
         self::assertNotNull($reloadedProduct);
         self::assertSame(5, (int) $reloadedProduct['rating_sum']);
         self::assertSame(1, (int) $reloadedProduct['rating_count']);
@@ -431,14 +431,14 @@ final class ReviewEndpointTest extends CommerceTestCase
         $this->approve($b['uuid']);
         $this->approve($c['uuid']);
 
-        $afterThreeApprovals = (new ProductRepository())->findByUuid($this->context, '', $product['uuid']);
+        $afterThreeApprovals = (new ProductRepository())->findLiveByUuid($this->context, '', $product['uuid']);
         self::assertNotNull($afterThreeApprovals);
         self::assertSame(9, (int) $afterThreeApprovals['rating_sum']);
         self::assertSame(3, (int) $afterThreeApprovals['rating_count']);
 
         // Retract b (approved -> spam): reverses its +3/+1 contribution.
         $this->spam($b['uuid']);
-        $afterRetraction = (new ProductRepository())->findByUuid($this->context, '', $product['uuid']);
+        $afterRetraction = (new ProductRepository())->findLiveByUuid($this->context, '', $product['uuid']);
         self::assertNotNull($afterRetraction);
         self::assertSame(6, (int) $afterRetraction['rating_sum']);
         self::assertSame(2, (int) $afterRetraction['rating_count']);
@@ -446,7 +446,7 @@ final class ReviewEndpointTest extends CommerceTestCase
         // Deleting the now-spam review does not touch the rollup further (it was
         // already reversed by the spam transition).
         $this->controller()->destroy(Request::create('/x', 'DELETE'), $b['uuid']);
-        $afterDelete = (new ProductRepository())->findByUuid($this->context, '', $product['uuid']);
+        $afterDelete = (new ProductRepository())->findLiveByUuid($this->context, '', $product['uuid']);
         self::assertNotNull($afterDelete);
         self::assertSame(6, (int) $afterDelete['rating_sum']);
         self::assertSame(2, (int) $afterDelete['rating_count']);
@@ -540,7 +540,7 @@ final class ReviewEndpointTest extends CommerceTestCase
             'status' => 'active',
         ]);
 
-        $product = (new ProductRepository())->findByUuid($this->context, $tenant, $uuid);
+        $product = (new ProductRepository())->findLiveByUuid($this->context, $tenant, $uuid);
         self::assertNotNull($product);
 
         return $product;

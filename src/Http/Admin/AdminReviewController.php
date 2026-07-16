@@ -7,6 +7,7 @@ namespace Glueful\Extensions\Commerce\Http\Admin;
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Catalog\ReviewService;
 use Glueful\Extensions\Commerce\Catalog\ReviewStateException;
+use Glueful\Extensions\Commerce\Http\DTOs\BulkReviewData;
 use Glueful\Extensions\Commerce\Http\DTOs\CreateReviewData;
 use Glueful\Extensions\Commerce\Http\DTOs\ReviewListQuery;
 use Glueful\Http\Response;
@@ -88,6 +89,16 @@ final class AdminReviewController
         } catch (ReviewStateException $e) {
             return Response::error($e->getMessage(), 409);
         }
+    }
+
+    #[ApiOperation(summary: 'Bulk moderate reviews', tags: ['Commerce Admin'])]
+    #[ApiResponse(200, description: 'Bulk review moderation processed')]
+    #[ApiResponse(422, description: 'Validation failed')]
+    public function bulk(BulkReviewData $input, Request $request): Response
+    {
+        $result = $this->reviews->bulk($this->context, $input->action, $input->uuids);
+
+        return Response::success($result, 'Bulk review moderation processed');
     }
 
     #[ApiOperation(summary: 'Delete a review', tags: ['Commerce Admin'])]

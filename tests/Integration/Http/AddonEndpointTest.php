@@ -165,7 +165,7 @@ final class AddonEndpointTest extends CommerceTestCase
             $product['uuid']
         );
 
-        $after = (new ProductRepository())->findByUuid($this->context, '', $product['uuid']);
+        $after = (new ProductRepository())->findLiveByUuid($this->context, '', $product['uuid']);
         self::assertNotNull($after);
         self::assertSame($before + 1, (int) $after['catalog_revision']);
     }
@@ -391,7 +391,7 @@ final class AddonEndpointTest extends CommerceTestCase
             'status' => 'active',
         ]);
 
-        $product = (new ProductRepository())->findByUuid($this->context, $tenant, $uuid);
+        $product = (new ProductRepository())->findLiveByUuid($this->context, $tenant, $uuid);
         self::assertNotNull($product);
 
         return $product;

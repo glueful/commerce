@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Commerce\Catalog;
 
 use Glueful\Bootstrap\ApplicationContext;
+use Glueful\Extensions\Commerce\Support\UtcNowSql;
 
 final class ProductRepository
 {
@@ -14,10 +15,55 @@ final class ProductRepository
         db($context)->table('commerce_products')->insert($this->encodeJson($row));
     }
 
-    /** @return array<string,mixed>|null */
-    public function findByUuid(ApplicationContext $context, string $tenant, string $uuid): ?array
+    /**
+     * Live read (design spec Layer 6 §2): excludes a tombstoned row. This is the
+     * read EVERY interactive admin/storefront/relationship/review-create/cart/
+     * catalog-mutation path must use. The framework's query builder already
+     * auto-excludes soft-deleted rows for a plain `where()->first()` on a table
+     * carrying a `deleted_at` column (see `SoftDeleteHandler`) -- the explicit
+     * `deleted_at IS NULL` predicate below is deliberate belt-and-suspenders: this
+     * read's safety must not depend on that framework mechanism staying enabled.
+     *
+     * @return array<string,mixed>|null
+     */
+    public function findLiveByUuid(ApplicationContext $context, string $tenant, string $uuid): ?array
     {
         $row = db($context)->table('commerce_products')
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('uuid', '=', $uuid)
+            ->whereRaw('deleted_at IS NULL')
+            ->first();
+
+        return $row === null ? null : $this->decodeJson($row);
+    }
+
+    /** @see self::findLiveByUuid() @return array<string,mixed>|null */
+    public function findLiveBySlug(ApplicationContext $context, string $tenant, string $slug): ?array
+    {
+        $row = db($context)->table('commerce_products')
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('slug', '=', $slug)
+            ->whereRaw('deleted_at IS NULL')
+            ->first();
+
+        return $row === null ? null : $this->decodeJson($row);
+    }
+
+    /**
+     * Explicitly named integrity/uniqueness read (design spec Layer 6 §2): reaches
+     * a tombstoned row ON PURPOSE via `withTrashed()` (bypassing the framework's
+     * automatic soft-delete filter). Reserved for named history/integrity paths
+     * (a direct product-row integrity check) and slug create/rename collision
+     * checks -- a tombstone keeps reserving its slug, so a new/renamed product
+     * colliding with it is a normal slug-in-use 422, never a raw unique-constraint
+     * error. NEVER an interactive admin/storefront/relationship/cart path.
+     *
+     * @return array<string,mixed>|null
+     */
+    public function findIncludingDeletedByUuid(ApplicationContext $context, string $tenant, string $uuid): ?array
+    {
+        $row = db($context)->table('commerce_products')
+            ->withTrashed()
             ->where('tenant_uuid', '=', $tenant)
             ->where('uuid', '=', $uuid)
             ->first();
@@ -25,15 +71,52 @@ final class ProductRepository
         return $row === null ? null : $this->decodeJson($row);
     }
 
-    /** @return array<string,mixed>|null */
-    public function findBySlug(ApplicationContext $context, string $tenant, string $slug): ?array
+    /** @see self::findIncludingDeletedByUuid() @return array<string,mixed>|null */
+    public function findIncludingDeletedBySlug(ApplicationContext $context, string $tenant, string $slug): ?array
     {
         $row = db($context)->table('commerce_products')
+            ->withTrashed()
             ->where('tenant_uuid', '=', $tenant)
             ->where('slug', '=', $slug)
             ->first();
 
         return $row === null ? null : $this->decodeJson($row);
+    }
+
+    /**
+     * ONE affected-row-checked soft-delete write (design spec Layer 6 §2):
+     * DB-time `deleted_at`, guarded by `deleted_at IS NULL` so a re-delete (or a
+     * losing concurrent racer) affects zero rows. Raw SQL rather than the query
+     * builder's generic soft-delete-aware `delete()` -- consistent with every
+     * other affected-row-checked primitive on this table
+     * ({@see self::claimCatalogRevision()}, {@see self::adjustRating()}) and
+     * unaffected by the framework's soft-delete column-existence cache. False
+     * means "already deleted or unknown/cross-tenant" --
+     * {@see CatalogService::deleteProduct()} maps that to the same 404 as an
+     * unknown product. Variants/stock/media rows are untouched; there is no
+     * restore.
+     */
+    public function markDeleted(ApplicationContext $context, string $tenant, string $uuid): bool
+    {
+        // UtcNowSql, not formatDateTime() (PHP-process tz + clock skew) and not bare
+        // CURRENT_TIMESTAMP (non-UTC pgsql sessions) -- same rationale as
+        // DownloadGrantRepository::mint(). The stamp is forensic only; delete/visibility
+        // logic tests deleted_at solely via IS [NOT] NULL.
+        $utcNow = UtcNowSql::expression(db($context)->getDriverName());
+
+        $affected = db($context)->table('commerce_products')->executeModification(
+            <<<SQL
+UPDATE commerce_products
+SET deleted_at = {$utcNow}
+WHERE tenant_uuid = ? AND uuid = ? AND deleted_at IS NULL
+SQL,
+            [
+                $tenant,
+                $uuid,
+            ]
+        );
+
+        return $affected === 1;
     }
 
     /** @return array{items: list<array<string,mixed>>, total: int} */

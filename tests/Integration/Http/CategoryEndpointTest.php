@@ -554,7 +554,7 @@ final class CategoryEndpointTest extends CommerceTestCase
             'status' => 'active',
         ]);
 
-        $product = (new ProductRepository())->findByUuid($this->context, $tenant, $uuid);
+        $product = (new ProductRepository())->findLiveByUuid($this->context, $tenant, $uuid);
         self::assertNotNull($product);
 
         return $product;

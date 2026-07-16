@@ -8,6 +8,8 @@ use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Catalog\CatalogService;
 use Glueful\Extensions\Commerce\Catalog\ProductRepository;
 use Glueful\Extensions\Commerce\Catalog\VariantRepository;
+use Glueful\Extensions\Commerce\Http\DTOs\BulkPriceData;
+use Glueful\Extensions\Commerce\Http\DTOs\BulkStatusData;
 use Glueful\Extensions\Commerce\Http\DTOs\CreateProductData;
 use Glueful\Extensions\Commerce\Http\DTOs\CreateVariantData;
 use Glueful\Extensions\Commerce\Http\DTOs\ProductVariantData;
@@ -97,6 +99,16 @@ final class AdminProductController
         }
     }
 
+    #[ApiOperation(summary: 'Delete a product', tags: ['Commerce Admin'])]
+    #[ApiResponse(204, description: 'Product deleted')]
+    #[ApiResponse(404, description: 'Product not found')]
+    public function destroy(Request $request, string $uuid): Response
+    {
+        $this->catalog->deleteProduct($this->context, $uuid);
+
+        return Response::noContent();
+    }
+
     #[ApiOperation(summary: 'Create a product variant', tags: ['Commerce Admin'])]
     #[ApiResponse(201, description: 'Variant created')]
     #[ApiResponse(422, description: 'Validation failed')]
@@ -134,6 +146,52 @@ final class AdminProductController
         }
     }
 
+    #[ApiOperation(summary: 'Bulk update product status', tags: ['Commerce Admin'])]
+    #[ApiResponse(200, description: 'Bulk product status update processed')]
+    #[ApiResponse(422, description: 'Validation failed')]
+    public function bulkStatus(BulkStatusData $input, Request $request): Response
+    {
+        $applied = [];
+        $failed = [];
+
+        foreach ($input->uuids as $uuid) {
+            try {
+                $this->catalog->setProductStatus($this->context, $uuid, $input->status);
+                $applied[] = $uuid;
+            } catch (NotFoundException) {
+                $failed[] = ['uuid' => $uuid, 'reason' => 'not_found'];
+            }
+        }
+
+        return Response::success(
+            ['applied' => $applied, 'failed' => $failed],
+            'Bulk product status update processed'
+        );
+    }
+
+    #[ApiOperation(summary: 'Bulk update variant prices', tags: ['Commerce Admin'])]
+    #[ApiResponse(200, description: 'Bulk variant price update processed')]
+    #[ApiResponse(422, description: 'Validation failed')]
+    public function bulkPrice(BulkPriceData $input, Request $request): Response
+    {
+        $applied = [];
+        $failed = [];
+
+        foreach ($input->items as $item) {
+            try {
+                $this->catalog->setVariantPrice($this->context, $item->uuid, $item->price);
+                $applied[] = $item->uuid;
+            } catch (NotFoundException) {
+                $failed[] = ['uuid' => $item->uuid, 'reason' => 'not_found'];
+            }
+        }
+
+        return Response::success(
+            ['applied' => $applied, 'failed' => $failed],
+            'Bulk variant price update processed'
+        );
+    }
+
     #[ApiOperation(summary: 'Set the children attached to a grouped product', tags: ['Commerce Admin'])]
     #[ApiResponse(200, description: 'Product children updated')]
     #[ApiResponse(404, description: 'Product not found')]
@@ -153,7 +211,7 @@ final class AdminProductController
     private function product(string $uuid): array
     {
         $tenant = $this->tenants->tenantUuid($this->context);
-        $product = $this->products->findByUuid($this->context, $tenant, $uuid);
+        $product = $this->products->findLiveByUuid($this->context, $tenant, $uuid);
         if ($product === null) {
             throw new NotFoundException('Resource not found.');
         }

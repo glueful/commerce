@@ -71,7 +71,7 @@ final class ReviewService
         $authorEmail = $this->requiredEmail($input['author_email'] ?? null);
         $userUuid = $this->normalizeNullableString($input['user_uuid'] ?? null);
 
-        if ($this->products->findByUuid($c, $tenant, $productUuid) === null) {
+        if ($this->products->findLiveByUuid($c, $tenant, $productUuid) === null) {
             throw ValidationException::forField('product_uuid', 'product_uuid must reference an existing product.');
         }
 
@@ -162,6 +162,85 @@ final class ReviewService
         if (!$this->reviews->guardedDelete($c, $tenant, $uuid)) {
             throw new NotFoundException('Resource not found.');
         }
+    }
+
+    /**
+     * `POST /commerce/admin/reviews/bulk` (design spec Layer 6 §2/Task 2):
+     * per-item atomicity, input order preserved, reusing the SAME
+     * `claimTransition`/`guardedDelete`-backed primitives ({@see self::approve()},
+     * {@see self::spam()}, {@see self::delete()}) a single-resource moderation
+     * call reaches -- a bulk write can never race a single write with different
+     * serialization discipline. Each item gets its OWN transaction (one
+     * expected item failure never rolls back neighbors); an unexpected
+     * exception (anything other than {@see NotFoundException}/
+     * {@see ReviewStateException}) is NOT caught here and aborts the whole
+     * request with 500 rather than being mislabeled as an item failure.
+     *
+     * `delete` classifies its failure the same way {@see self::throwTransitionFailure()}
+     * does for approve/spam -- a post-failure re-read purely to pick a reason,
+     * never a business decision -- so an `approved` review (ineligible for
+     * delete) reports `invalid_transition` instead of collapsing into
+     * `not_found` the way the single-resource {@see self::delete()} endpoint
+     * deliberately does for its own non-revealing-404 posture.
+     *
+     * @param list<string> $uuids
+     * @return array{applied: list<string>, failed: list<array{uuid: string, reason: string}>}
+     */
+    public function bulk(ApplicationContext $c, string $action, array $uuids): array
+    {
+        $tenant = $this->tenants->tenantUuid($c);
+        $applied = [];
+        $failed = [];
+
+        foreach ($uuids as $uuid) {
+            $reason = match ($action) {
+                'approve' => $this->bulkAttempt(fn (): array => $this->approve($c, $uuid)),
+                'spam' => $this->bulkAttempt(fn (): array => $this->spam($c, $uuid)),
+                'delete' => $this->bulkDeleteReason($c, $tenant, $uuid),
+                default => throw ValidationException::forField(
+                    'action',
+                    'action must be one of: approve, spam, delete.'
+                ),
+            };
+
+            if ($reason === null) {
+                $applied[] = $uuid;
+            } else {
+                $failed[] = ['uuid' => $uuid, 'reason' => $reason];
+            }
+        }
+
+        return ['applied' => $applied, 'failed' => $failed];
+    }
+
+    /** @param callable(): array<string,mixed> $attempt */
+    private function bulkAttempt(callable $attempt): ?string
+    {
+        try {
+            $attempt();
+
+            return null;
+        } catch (NotFoundException) {
+            return 'not_found';
+        } catch (ReviewStateException) {
+            return 'invalid_transition';
+        }
+    }
+
+    /**
+     * `delete` outcome classifier for {@see self::bulk()}: attempts the SAME
+     * guarded `guardedDelete()` primitive {@see self::delete()} uses, then --
+     * only on failure, and only to pick a reason -- re-reads to distinguish an
+     * unknown/cross-tenant review from one that exists but isn't currently
+     * `pending`/`spam` (i.e. `approved`).
+     */
+    private function bulkDeleteReason(ApplicationContext $c, string $tenant, string $uuid): ?string
+    {
+        if ($this->reviews->guardedDelete($c, $tenant, $uuid)) {
+            return null;
+        }
+
+        return $this->reviews->findByUuid($c, $tenant, $uuid) === null ? 'not_found' : 'invalid_transition';
     }
 
     /** @param array<string,mixed> $review */

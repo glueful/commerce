@@ -82,7 +82,7 @@ final class DownloadService
                 throw new NotFoundException('Resource not found.');
             }
 
-            $product = $this->products->findByUuid($c, $tenant, $productUuid);
+            $product = $this->products->findLiveByUuid($c, $tenant, $productUuid);
             if ($product === null) {
                 throw new NotFoundException('Resource not found.');
             }

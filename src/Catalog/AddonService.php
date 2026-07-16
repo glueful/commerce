@@ -64,7 +64,7 @@ final class AddonService
 
             // Post-claim re-read: the product must still exist under this tenant
             // now that we hold its claim (the pre-claim caller never checked this).
-            if ($this->products->findByUuid($c, $tenant, $productUuid) === null) {
+            if ($this->products->findLiveByUuid($c, $tenant, $productUuid) === null) {
                 throw new NotFoundException('Resource not found.');
             }
 

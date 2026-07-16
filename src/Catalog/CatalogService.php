@@ -49,7 +49,6 @@ use Glueful\Validation\ValidationException;
  */
 final class CatalogService
 {
-    private const TYPES = ['physical', 'digital', 'external', 'grouped'];
     private const PURCHASABLE_TYPES = ['physical', 'digital'];
 
     public function __construct(
@@ -82,11 +81,17 @@ final class CatalogService
             $this->assertExternalMetadata($input['metadata'] ?? null);
         }
 
+        $status = (string) ($input['status'] ?? 'draft');
+        $this->assertValidStatus($status);
+
         $variants = $this->planCreationVariants($context, $tenant, $type, $input['variants'] ?? [], $storeCurrency);
         $slug = $this->requiredString($input, 'slug');
         $taxClass = $this->normalizeTaxClass($input['tax_class'] ?? null);
 
-        if ($this->products->findBySlug($context, $tenant, $slug) !== null) {
+        // Including-deleted (design spec Layer 6 §2): a tombstone keeps
+        // reserving its slug, so colliding with one is the same slug-in-use 422
+        // as colliding with a live product -- never a raw unique-constraint error.
+        if ($this->products->findIncludingDeletedBySlug($context, $tenant, $slug) !== null) {
             throw ValidationException::forField('slug', 'Slug already in use.');
         }
 
@@ -99,7 +104,7 @@ final class CatalogService
             'name' => $this->requiredString($input, 'name'),
             'description' => $input['description'] ?? null,
             'type' => $type,
-            'status' => (string) ($input['status'] ?? 'draft'),
+            'status' => $status,
             'options' => $input['options'] ?? null,
             'metadata' => $input['metadata'] ?? null,
             'tax_class' => $taxClass,
@@ -120,7 +125,7 @@ final class CatalogService
             }
         );
 
-        $product = $this->products->findByUuid($context, $tenant, $productUuid);
+        $product = $this->products->findLiveByUuid($context, $tenant, $productUuid);
         if ($product === null) {
             throw new \RuntimeException('Created product could not be reloaded.');
         }
@@ -188,7 +193,7 @@ final class CatalogService
     {
         $tenant = $this->tenants->tenantUuid($context);
         $storeCurrency = $this->storeCurrency($context);
-        $product = $this->products->findByUuid($context, $tenant, $productUuid);
+        $product = $this->products->findLiveByUuid($context, $tenant, $productUuid);
         if ($product === null) {
             throw ValidationException::forField('product_uuid', 'Product not found.');
         }
@@ -237,33 +242,119 @@ final class CatalogService
 
     /**
      * @param array<string,mixed> $changes a `type` key triggers the immutability
-     *   guard below; other fields are applied as before.
+     *   guard below; other fields are applied as before. A `status` key is a
+     *   GUARDED field (design spec Layer 6 §2/Task 2): its presence routes the
+     *   WHOLE patch through {@see self::applyGuardedProductPatch()} -- one
+     *   transaction, one `catalog_revision` claim, one live re-read, one final
+     *   write -- so a status-bearing PATCH and a bulk status write always
+     *   serialize against the SAME row lock. Absent `status`, this stays the
+     *   plain unconditional-live-read-then-write path (no claim/transaction).
      */
     public function updateProduct(ApplicationContext $context, string $productUuid, array $changes): void
     {
         $tenant = $this->tenants->tenantUuid($context);
+
+        if (array_key_exists('status', $changes)) {
+            $this->applyGuardedProductPatch($context, $tenant, $productUuid, $changes);
+
+            return;
+        }
+
+        // Every catalog-mutation path requires a live product (design spec Layer
+        // 6 §2): loaded UNCONDITIONALLY, before any other change is validated or
+        // applied, so a PATCH against a tombstoned product 404s outright rather
+        // than silently rewriting a dead row's other columns (the plain
+        // `ProductRepository::update()` write below carries no `deleted_at`
+        // guard of its own).
+        $current = $this->products->findLiveByUuid($context, $tenant, $productUuid);
+        if ($current === null) {
+            throw new NotFoundException('Resource not found.');
+        }
+
+        $this->applyProductPatch($context, $tenant, $productUuid, $changes, $current);
+    }
+
+    /**
+     * Guarded setter (design spec Layer 6 §2/Task 2): delegates to the EXACT
+     * SAME whole-patch primitive an ordinary `status`-bearing
+     * {@see self::updateProduct()} call reaches, so a bulk status write and a
+     * single-resource PATCH can never race each other with different
+     * serialization discipline. Never calls updateProduct() itself -- that
+     * would double-claim.
+     */
+    public function setProductStatus(ApplicationContext $context, string $uuid, string $status): void
+    {
+        $tenant = $this->tenants->tenantUuid($context);
+        $this->applyGuardedProductPatch($context, $tenant, $uuid, ['status' => $status]);
+    }
+
+    /**
+     * Compositional guarded product-patch primitive (design spec Layer 6 §2/
+     * Task 2), reached whenever $changes carries a `status` key: ONE
+     * transaction that claims `catalog_revision` ONCE (the same row-lock
+     * primitive every other product mutation uses -- serializes against a
+     * concurrent soft delete or another guarded patch on the SAME row),
+     * `findLiveByUuid` re-reads ONCE, validates the ENTIRE patch against that
+     * fresh row via {@see self::applyProductPatch()}, then applies ONE final
+     * update. A failure at any validation step rolls back the whole
+     * transaction -- including the claim -- leaving every field unchanged.
+     *
+     * @param array<string,mixed> $changes
+     */
+    private function applyGuardedProductPatch(
+        ApplicationContext $context,
+        string $tenant,
+        string $productUuid,
+        array $changes
+    ): void {
+        db($context)->transaction(function () use ($context, $tenant, $productUuid, $changes): void {
+            if (!$this->products->claimCatalogRevision($context, $tenant, $productUuid)) {
+                throw new NotFoundException('Resource not found.');
+            }
+
+            $current = $this->products->findLiveByUuid($context, $tenant, $productUuid);
+            if ($current === null) {
+                throw new NotFoundException('Resource not found.');
+            }
+
+            $this->applyProductPatch($context, $tenant, $productUuid, $changes, $current);
+        });
+    }
+
+    /**
+     * Validates $changes against the freshly-read $current row and applies ONE
+     * final write -- the shared body BOTH product-patch entry points
+     * ({@see self::updateProduct()}'s plain path and
+     * {@see self::applyGuardedProductPatch()}) funnel through, so validation
+     * and the eventual write can never drift between a guarded and a plain
+     * patch.
+     *
+     * @param array<string,mixed> $changes
+     * @param array<string,mixed> $current
+     */
+    private function applyProductPatch(
+        ApplicationContext $context,
+        string $tenant,
+        string $productUuid,
+        array $changes,
+        array $current
+    ): void {
         if (isset($changes['slug'])) {
-            $existing = $this->products->findBySlug($context, $tenant, (string) $changes['slug']);
+            // Including-deleted (design spec Layer 6 §2): a tombstone keeps
+            // reserving its slug, so a rename colliding with one is the same
+            // slug-in-use 422 as colliding with a live product.
+            $existing = $this->products->findIncludingDeletedBySlug($context, $tenant, (string) $changes['slug']);
             if ($existing !== null && ($existing['uuid'] ?? null) !== $productUuid) {
                 throw ValidationException::forField('slug', 'Slug already in use.');
             }
         }
 
+        if (array_key_exists('status', $changes)) {
+            $this->assertValidStatus((string) $changes['status']);
+        }
+
         $touchesType = array_key_exists('type', $changes);
         $touchesMetadata = array_key_exists('metadata', $changes);
-
-        // Loaded whenever either key is present: a `type` change needs the
-        // CURRENT type/metadata to decide the immutability guard and the
-        // fallback metadata to re-validate against; a metadata-only change needs
-        // the current type to know whether the product is (still) external at
-        // all -- see the metadata re-validation block below.
-        $current = null;
-        if ($touchesType || $touchesMetadata) {
-            $current = $this->products->findByUuid($context, $tenant, $productUuid);
-            if ($current === null) {
-                throw new NotFoundException('Resource not found.');
-            }
-        }
 
         if ($touchesType) {
             $newType = (string) $changes['type'];
@@ -305,6 +396,36 @@ final class CatalogService
     }
 
     /**
+     * Soft delete (design spec Layer 6 §2): claim `catalog_revision` (the SAME
+     * row-lock primitive every other product-scoped mutation uses), post-claim
+     * confirm the product is still live, then tombstone it via
+     * {@see ProductRepository::markDeleted()}'s affected-row-checked DB-time
+     * write -- all in ONE transaction. Variant/stock/media rows are left
+     * completely untouched; the tombstoned row keeps reserving its slug (create/
+     * rename uniqueness checks deliberately use `findIncludingDeletedBySlug()`).
+     * An unknown/cross-tenant product, a losing concurrent racer, and a repeat
+     * delete all observe the same non-revealing 404. There is no restore.
+     */
+    public function deleteProduct(ApplicationContext $context, string $uuid): void
+    {
+        $tenant = $this->tenants->tenantUuid($context);
+
+        db($context)->transaction(function () use ($context, $tenant, $uuid): void {
+            if (!$this->products->claimCatalogRevision($context, $tenant, $uuid)) {
+                throw new NotFoundException('Resource not found.');
+            }
+
+            if ($this->products->findLiveByUuid($context, $tenant, $uuid) === null) {
+                throw new NotFoundException('Resource not found.');
+            }
+
+            if (!$this->products->markDeleted($context, $tenant, $uuid)) {
+                throw new NotFoundException('Resource not found.');
+            }
+        });
+    }
+
+    /**
      * Idempotent ordered set-list replace for a grouped product's children. See
      * class docblock for the full claim/re-read discipline. Currently-attached
      * children no longer proposed are simply detached; submitting the same
@@ -323,7 +444,7 @@ final class CatalogService
                 throw new NotFoundException('Resource not found.');
             }
 
-            $parent = $this->products->findByUuid($context, $tenant, $productUuid);
+            $parent = $this->products->findLiveByUuid($context, $tenant, $productUuid);
             if ($parent === null) {
                 throw new NotFoundException('Resource not found.');
             }
@@ -363,7 +484,7 @@ final class CatalogService
                     );
                 }
 
-                $child = $this->products->findByUuid($context, $tenant, $childUuid);
+                $child = $this->products->findLiveByUuid($context, $tenant, $childUuid);
                 if ($child === null) {
                     throw ValidationException::forField(
                         "child_uuids.{$index}",
@@ -387,10 +508,11 @@ final class CatalogService
     }
 
     /**
-     * A `shipping_class_uuid` key present in $changes (spec §6) routes through
-     * the shared-claim protocol below regardless of whether it is a real change
-     * or a no-op reassertion; its ABSENCE preserves the current assignment via
-     * the plain write path unchanged from before this field existed.
+     * `price` and/or `shipping_class_uuid` present in $changes (design spec
+     * Layer 6 §2/Task 2 and the earlier §6 shared-claim protocol) route the
+     * WHOLE patch through {@see self::applyGuardedVariantPatch()} regardless of
+     * whether either is a real change or a no-op reassertion; their ABSENCE
+     * preserves every other field via the plain write path.
      *
      * @param array<string,mixed> $changes
      */
@@ -416,84 +538,127 @@ final class CatalogService
             }
         }
 
-        if (!array_key_exists('shipping_class_uuid', $changes)) {
+        if (!array_key_exists('price', $changes) && !array_key_exists('shipping_class_uuid', $changes)) {
             $this->variants->update($context, $tenant, $variantUuid, $changes);
 
             return;
         }
 
-        $this->updateVariantShippingClass($context, $tenant, $variantUuid, $changes);
+        $this->applyGuardedVariantPatch($context, $tenant, $variantUuid, $changes);
     }
 
     /**
-     * The §6 shared-claim protocol for variant shipping-class assignment/clear:
-     * one transaction that resolves variant->product, claims the product's
-     * `catalog_revision`, claims the sorted-uuid union of the variant's CURRENT
-     * and PROPOSED shipping class (affected-row-checked revision bumps on
-     * `commerce_shipping_classes`), re-validates the proposed class still exists
-     * in-tenant, then writes. See {@see \Glueful\Extensions\Commerce\Shipping\ShippingClassService}'s
-     * class docblock for the full class-delete-vs-variant-assign race analysis
-     * this claim set serializes against. A `null` proposed value CLEARS the
-     * assignment; updateVariant() only reaches this method when
-     * `shipping_class_uuid` is present in $changes at all -- omission never calls
-     * this path.
+     * Guarded setter (design spec Layer 6 §2/Task 2): delegates to the EXACT
+     * SAME whole-patch primitive an ordinary `price`-bearing
+     * {@see self::updateVariant()} call reaches, so a bulk price write and a
+     * single-resource PATCH always serialize against the SAME parent-product
+     * lock. Never calls updateVariant() itself -- that would double-claim.
+     */
+    public function setVariantPrice(ApplicationContext $context, string $variantUuid, int $price): void
+    {
+        if ($price < 0) {
+            throw ValidationException::forField('price', 'Price must be a non-negative integer (minor units).');
+        }
+
+        $tenant = $this->tenants->tenantUuid($context);
+        $this->applyGuardedVariantPatch($context, $tenant, $variantUuid, ['price' => $price]);
+    }
+
+    /**
+     * Compositional guarded variant-patch primitive (design spec Layer 6 §2/
+     * Task 2), reached whenever $changes carries `price` and/or
+     * `shipping_class_uuid`: ONE transaction that resolves variant->product
+     * (a pre-claim read, never trusted for a decision), claims the PARENT
+     * product's `catalog_revision` ONCE, live re-reads BOTH the parent product
+     * (closing the tombstone gap the pre-Task-1 §6 protocol didn't check) and
+     * the variant, preserves the §6 sorted current/proposed shipping-class
+     * claim protocol (affected-row-checked revision bumps on
+     * `commerce_shipping_classes` -- see
+     * {@see \Glueful\Extensions\Commerce\Shipping\ShippingClassService}'s class
+     * docblock for the full class-delete-vs-variant-assign race analysis) when
+     * `shipping_class_uuid` is present, validates the ENTIRE patch, then
+     * applies ONE final variant update. A `null` proposed shipping class CLEARS
+     * the assignment.
      *
      * @param array<string,mixed> $changes
      */
-    private function updateVariantShippingClass(
+    private function applyGuardedVariantPatch(
         ApplicationContext $context,
         string $tenant,
         string $variantUuid,
         array $changes
     ): void {
-        $proposed = $changes['shipping_class_uuid'] ?? null;
-        if ($proposed !== null && (!is_string($proposed) || trim($proposed) === '')) {
+        $hasClassChange = array_key_exists('shipping_class_uuid', $changes);
+        $proposedClass = $changes['shipping_class_uuid'] ?? null;
+        if ($hasClassChange && $proposedClass !== null && (!is_string($proposedClass) || trim($proposedClass) === '')) {
             throw ValidationException::forField(
                 'shipping_class_uuid',
                 'shipping_class_uuid must be a non-empty string or null.'
             );
         }
 
-        db($context)->transaction(function () use ($context, $tenant, $variantUuid, $changes, $proposed): void {
-            $variant = $this->variants->findByUuid($context, $tenant, $variantUuid);
-            if ($variant === null) {
-                throw new NotFoundException('Resource not found.');
-            }
-            $productUuid = (string) $variant['product_uuid'];
-
-            if (!$this->products->claimCatalogRevision($context, $tenant, $productUuid)) {
-                throw new NotFoundException('Resource not found.');
-            }
-
-            $current = $variant['shipping_class_uuid'] ?? null;
-            $claimSet = array_values(array_unique(array_filter(
-                [$current, $proposed],
-                static fn (mixed $uuid): bool => $uuid !== null
-            )));
-            sort($claimSet);
-
-            foreach ($claimSet as $classUuid) {
-                $claimed = $this->shippingClasses->claimRevision($context, $tenant, (string) $classUuid);
-                if (!$claimed && $classUuid === $proposed) {
-                    throw ValidationException::forField(
-                        'shipping_class_uuid',
-                        'shipping_class_uuid must reference an existing shipping class in this tenant.'
-                    );
+        db($context)->transaction(
+            function () use ($context, $tenant, $variantUuid, $changes, $hasClassChange, $proposedClass): void {
+                $variant = $this->variants->findByUuid($context, $tenant, $variantUuid);
+                if ($variant === null) {
+                    throw new NotFoundException('Resource not found.');
                 }
-            }
+                $productUuid = (string) $variant['product_uuid'];
 
-            // Post-claim re-read: the claim already proved the proposed class
-            // existed in-tenant at claim time, but this mirrors the house
-            // discipline of never deciding on a pre-claim snapshot alone.
-            if ($proposed !== null && $this->shippingClasses->findByUuid($context, $tenant, $proposed) === null) {
-                throw ValidationException::forField(
-                    'shipping_class_uuid',
-                    'shipping_class_uuid must reference an existing shipping class in this tenant.'
-                );
-            }
+                if (!$this->products->claimCatalogRevision($context, $tenant, $productUuid)) {
+                    throw new NotFoundException('Resource not found.');
+                }
 
-            $this->variants->update($context, $tenant, $variantUuid, $changes);
-        });
+                if ($this->products->findLiveByUuid($context, $tenant, $productUuid) === null) {
+                    throw new NotFoundException('Resource not found.');
+                }
+
+                // Post-claim re-read (design spec Layer 6 §2/Task 2): never trust
+                // the pre-claim snapshot above for the shipping-class "current"
+                // decision below -- a concurrent writer may have committed a
+                // different assignment while this transaction waited on the
+                // product-row lock.
+                $variant = $this->variants->findByUuid($context, $tenant, $variantUuid);
+                if ($variant === null) {
+                    throw new NotFoundException('Resource not found.');
+                }
+
+                if ($hasClassChange) {
+                    $current = $variant['shipping_class_uuid'] ?? null;
+                    $claimSet = array_values(array_unique(array_filter(
+                        [$current, $proposedClass],
+                        static fn (mixed $uuid): bool => $uuid !== null
+                    )));
+                    sort($claimSet);
+
+                    foreach ($claimSet as $classUuid) {
+                        $claimed = $this->shippingClasses->claimRevision($context, $tenant, (string) $classUuid);
+                        if (!$claimed && $classUuid === $proposedClass) {
+                            throw ValidationException::forField(
+                                'shipping_class_uuid',
+                                'shipping_class_uuid must reference an existing shipping class in this tenant.'
+                            );
+                        }
+                    }
+
+                    // Post-claim re-read: the claim already proved the proposed
+                    // class existed in-tenant at claim time, but this mirrors the
+                    // house discipline of never deciding on a pre-claim snapshot
+                    // alone.
+                    if (
+                        $proposedClass !== null
+                        && $this->shippingClasses->findByUuid($context, $tenant, $proposedClass) === null
+                    ) {
+                        throw ValidationException::forField(
+                            'shipping_class_uuid',
+                            'shipping_class_uuid must reference an existing shipping class in this tenant.'
+                        );
+                    }
+                }
+
+                $this->variants->update($context, $tenant, $variantUuid, $changes);
+            }
+        );
     }
 
     /**
@@ -645,10 +810,20 @@ final class CatalogService
 
     private function assertValidType(string $type): void
     {
-        if (!in_array($type, self::TYPES, true)) {
+        if (!ProductType::isValid($type)) {
             throw ValidationException::forField(
                 'type',
-                'type must be one of: ' . implode(', ', self::TYPES) . '.'
+                'type must be one of: ' . implode(', ', ProductType::all()) . '.'
+            );
+        }
+    }
+
+    private function assertValidStatus(string $status): void
+    {
+        if (!ProductStatus::isValid($status)) {
+            throw ValidationException::forField(
+                'status',
+                'status must be one of: ' . implode(', ', ProductStatus::all()) . '.'
             );
         }
     }

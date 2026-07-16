@@ -313,7 +313,7 @@ final class AttributeService
             if (!$this->products->claimCatalogRevision($c, $tenant, $productUuid)) {
                 throw new NotFoundException('Resource not found.');
             }
-            if ($this->products->findByUuid($c, $tenant, $productUuid) === null) {
+            if ($this->products->findLiveByUuid($c, $tenant, $productUuid) === null) {
                 throw new NotFoundException('Resource not found.');
             }
 

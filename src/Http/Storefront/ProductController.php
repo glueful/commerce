@@ -102,8 +102,8 @@ final class ProductController
     public function show(Request $request, string $slug): Response
     {
         $tenant = $this->tenants->tenantUuid($this->context);
-        $product = $this->products->findBySlug($this->context, $tenant, $slug);
-        if ($product === null || ($product['status'] ?? '') !== 'active' || ($product['deleted_at'] ?? null) !== null) {
+        $product = $this->products->findLiveBySlug($this->context, $tenant, $slug);
+        if ($product === null || ($product['status'] ?? '') !== 'active') {
             throw new NotFoundException('Resource not found.');
         }
 

@@ -244,6 +244,18 @@ final class CartService
      * (mirrors {@see ShippingClassRepository::slugsByUuids()}'s batch
      * pattern), never one lookup per line.
      *
+     * A line whose variant no longer resolves live (design spec Layer 6 §2:
+     * product soft delete) is NOT silently dropped -- unlike a genuinely
+     * dangling variant reference (variant rows are never soft-deleted, so a
+     * missing variant here would indicate real orphan data and is left as a
+     * silent `continue`), a tombstoned product is an expected, reachable state
+     * this method must surface: it throws a controlled 422 naming the offending
+     * line so the caller (cart view, reprice, checkout quote/place) fails
+     * closed instead of quietly re-totaling around a product that no longer
+     * exists. A checkout that already read the product live before the delete
+     * landed may still finish -- soft delete is not retroactive order
+     * cancellation.
+     *
      * @param array<string,mixed> $cart
      * @return list<array<string,mixed>>
      */
@@ -251,14 +263,17 @@ final class CartService
     {
         $tenant = $this->tenants->tenantUuid($context);
         $rows = [];
-        foreach ($this->carts->lines($context, (string) $cart['uuid']) as $line) {
+        foreach ($this->carts->lines($context, (string) $cart['uuid']) as $index => $line) {
             $variant = $this->variants->findByUuid($context, $tenant, (string) $line['variant_uuid']);
             if ($variant === null) {
                 continue;
             }
-            $product = $this->products->findByUuid($context, $tenant, (string) $variant['product_uuid']);
+            $product = $this->products->findLiveByUuid($context, $tenant, (string) $variant['product_uuid']);
             if ($product === null) {
-                continue;
+                throw ValidationException::forField(
+                    "lines.{$index}",
+                    'This product is no longer available.'
+                );
             }
 
             $rows[] = ['line' => $line, 'variant' => $variant, 'product' => $product];
@@ -338,6 +353,14 @@ final class CartService
      * could still exist (e.g. seeded directly, or a future code path). Reject it
      * here too, naming the offending type, rather than trusting the catalog side
      * alone.
+     *
+     * Also the cart-ADD half of the tombstoned-product guard (design spec Layer
+     * 6 §2): variant rows are never soft-deleted, so a live variant can still
+     * reference a now-tombstoned product. A live product lookup here rejects
+     * adding such a line outright with a controlled 422, rather than defaulting
+     * to `'physical'` and letting an unavailable product be added silently --
+     * {@see self::pricedLines()} is the symmetric guard for a line added before
+     * its product was deleted.
      */
     private function assertVariantCanSupply(
         ApplicationContext $context,
@@ -350,8 +373,12 @@ final class CartService
             throw ValidationException::forField('variant_uuid', 'Variant not found.');
         }
 
-        $product = $this->products->findByUuid($context, $tenant, (string) $variant['product_uuid']);
-        $type = $product !== null ? (string) ($product['type'] ?? 'physical') : 'physical';
+        $product = $this->products->findLiveByUuid($context, $tenant, (string) $variant['product_uuid']);
+        if ($product === null) {
+            throw ValidationException::forField('variant_uuid', 'This product is no longer available.');
+        }
+
+        $type = (string) ($product['type'] ?? 'physical');
         if (!in_array($type, ['physical', 'digital'], true)) {
             throw ValidationException::forField(
                 'variant_uuid',

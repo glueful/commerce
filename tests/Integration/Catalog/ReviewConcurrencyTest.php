@@ -84,7 +84,7 @@ final class ReviewConcurrencyTest extends CommerceTestCase
             self::assertStringContainsString('approved', $e->getMessage());
         }
 
-        $reloadedProduct = (new ProductRepository())->findByUuid($this->context, '', $product['uuid']);
+        $reloadedProduct = (new ProductRepository())->findLiveByUuid($this->context, '', $product['uuid']);
         self::assertSame(4, (int) $reloadedProduct['rating_sum']);
         self::assertSame(1, (int) $reloadedProduct['rating_count']);
     }
@@ -110,7 +110,7 @@ final class ReviewConcurrencyTest extends CommerceTestCase
         self::assertNotNull($reloadedReview);
         self::assertSame('approved', $reloadedReview['status']);
 
-        $reloadedProduct = (new ProductRepository())->findByUuid($this->context, '', $product['uuid']);
+        $reloadedProduct = (new ProductRepository())->findLiveByUuid($this->context, '', $product['uuid']);
         self::assertSame(5, (int) $reloadedProduct['rating_sum']);
         self::assertSame(1, (int) $reloadedProduct['rating_count']);
     }
@@ -132,7 +132,7 @@ final class ReviewConcurrencyTest extends CommerceTestCase
 
         self::assertNull((new ReviewRepository())->findByUuid($this->context, '', $review['uuid']));
 
-        $reloadedProduct = (new ProductRepository())->findByUuid($this->context, '', $product['uuid']);
+        $reloadedProduct = (new ProductRepository())->findLiveByUuid($this->context, '', $product['uuid']);
         self::assertSame(0, (int) $reloadedProduct['rating_sum']);
         self::assertSame(0, (int) $reloadedProduct['rating_count']);
     }
@@ -149,13 +149,13 @@ final class ReviewConcurrencyTest extends CommerceTestCase
         $service->approve($this->context, $keep['uuid']);
         $service->approve($this->context, $reverse['uuid']);
 
-        $afterBothApproved = (new ProductRepository())->findByUuid($this->context, '', $product['uuid']);
+        $afterBothApproved = (new ProductRepository())->findLiveByUuid($this->context, '', $product['uuid']);
         self::assertSame(8, (int) $afterBothApproved['rating_sum']);
         self::assertSame(2, (int) $afterBothApproved['rating_count']);
 
         $service->spam($this->context, $reverse['uuid']);
 
-        $afterReversal = (new ProductRepository())->findByUuid($this->context, '', $product['uuid']);
+        $afterReversal = (new ProductRepository())->findLiveByUuid($this->context, '', $product['uuid']);
         // Only $reverse's contribution (+5/+1) is undone -- $keep's (+3/+1) stands.
         self::assertSame(3, (int) $afterReversal['rating_sum']);
         self::assertSame(1, (int) $afterReversal['rating_count']);
@@ -285,7 +285,7 @@ final class ReviewConcurrencyTest extends CommerceTestCase
             'status' => 'active',
         ]);
 
-        $product = (new ProductRepository())->findByUuid($this->context, $tenant, $uuid);
+        $product = (new ProductRepository())->findLiveByUuid($this->context, $tenant, $uuid);
         self::assertNotNull($product);
 
         return $product;

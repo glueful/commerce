@@ -32,11 +32,11 @@ final class TenantScopingTest extends CommerceTestCase
 
         self::assertSame(
             'T1 Tee',
-            (new ProductRepository())->findBySlug($this->context, 'tenantAAAA01', 'tee')['name']
+            (new ProductRepository())->findLiveBySlug($this->context, 'tenantAAAA01', 'tee')['name']
         );
         self::assertSame(
             'T2 Tee',
-            (new ProductRepository())->findBySlug($this->context, 'tenantBBBB02', 'tee')['name']
+            (new ProductRepository())->findLiveBySlug($this->context, 'tenantBBBB02', 'tee')['name']
         );
 
         $variantT1 = (string) $p1['variants'][0]['uuid'];

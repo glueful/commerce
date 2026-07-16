@@ -93,6 +93,9 @@ $router->group(['prefix' => '/commerce/admin', 'middleware' => ['auth']], functi
     $router->post('/products/{uuid}/variants', [AdminProductController::class, 'storeVariant'])->middleware($write);
     $router->patch('/variants/{uuid}', [AdminProductController::class, 'updateVariant'])->middleware($write);
     $router->put('/products/{uuid}/children', [AdminProductController::class, 'setChildren'])->middleware($write);
+    $router->delete('/products/{uuid}', [AdminProductController::class, 'destroy'])->middleware($write);
+    $router->post('/products/bulk-status', [AdminProductController::class, 'bulkStatus'])->middleware($write);
+    $router->post('/variants/bulk-price', [AdminProductController::class, 'bulkPrice'])->middleware($write);
 
     $router->get('/variants/{uuid}/downloads', [AdminDownloadController::class, 'index'])->middleware($read);
     $router->post('/variants/{uuid}/downloads', [AdminDownloadController::class, 'attach'])->middleware($write);
@@ -162,6 +165,7 @@ $router->group(['prefix' => '/commerce/admin', 'middleware' => ['auth']], functi
     $router->post('/reviews/{uuid}/approve', [AdminReviewController::class, 'approve'])->middleware($write);
     $router->post('/reviews/{uuid}/spam', [AdminReviewController::class, 'spam'])->middleware($write);
     $router->delete('/reviews/{uuid}', [AdminReviewController::class, 'destroy'])->middleware($write);
+    $router->post('/reviews/bulk', [AdminReviewController::class, 'bulk'])->middleware($write);
 
     $router->get('/shipping/zones', [AdminShippingZoneController::class, 'index'])->middleware($read);
     $router->post('/shipping/zones', [AdminShippingZoneController::class, 'store'])->middleware($write);
