@@ -49,4 +49,28 @@ final class StockTest extends CommerceTestCase
         (new InventoryService($repository, new SentinelTenantResolver()))
             ->adjust($this->context, 'var000000003', -1);
     }
+
+    public function testEnsureRowAcceptsOnlyAnIdempotentDuplicate(): void
+    {
+        $repository = new StockRepository();
+        $repository->ensureRow($this->context, '', 'var000000004', true);
+
+        $repository->ensureRow($this->context, '', 'var000000004', true);
+
+        self::assertTrue($repository->isTracked($this->context, '', 'var000000004'));
+        self::assertSame(1, $this->connection->table('commerce_stock')
+            ->where('variant_uuid', '=', 'var000000004')
+            ->count());
+    }
+
+    public function testEnsureRowRejectsAConflictingTrackingMode(): void
+    {
+        $repository = new StockRepository();
+        $repository->ensureRow($this->context, '', 'var000000005', false);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Existing stock tracking mode does not match the variant.');
+
+        $repository->ensureRow($this->context, '', 'var000000005', true);
+    }
 }

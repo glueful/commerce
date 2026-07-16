@@ -55,6 +55,26 @@ final class OrderFulfilledDispatchTest extends CommerceTestCase
         self::assertCount(1, $captured->events);
         self::assertInstanceOf(OrderFulfilled::class, $captured->events[0]);
         self::assertSame($orderUuid, (string) $captured->events[0]->order['uuid']);
+        self::assertSame('fulfilled', $captured->events[0]->order['fulfillment_status']);
+        self::assertSame('TRACK-DISPATCH', $captured->events[0]->order['tracking_ref']);
+    }
+
+    public function testFulfillingAnUnknownOrderIsANotFound404NotA500(): void
+    {
+        $captured = $this->bindEventCapture();
+
+        try {
+            $this->orderController()->fulfill(
+                new FulfillOrderData(tracking_ref: null),
+                Request::create('/commerce/admin/orders/nosuchorder1/fulfill', 'POST'),
+                'nosuchorder1'
+            );
+            self::fail('Expected NotFoundException for an unknown order.');
+        } catch (\Glueful\Http\Exceptions\Client\NotFoundException $e) {
+            self::assertSame('Resource not found.', $e->getMessage());
+        }
+
+        self::assertCount(0, $captured->events);
     }
 
     public function testCancelingAnOrderDispatchesNoOrderFulfilledEvent(): void

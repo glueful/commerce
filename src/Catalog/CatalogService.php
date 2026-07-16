@@ -97,22 +97,34 @@ final class CatalogService
 
         $productUuid = Utils::generateNanoID();
 
-        $this->products->insert($context, [
-            'uuid' => $productUuid,
-            'tenant_uuid' => $tenant,
-            'slug' => $slug,
-            'name' => $this->requiredString($input, 'name'),
-            'description' => $input['description'] ?? null,
-            'type' => $type,
-            'status' => $status,
-            'options' => $input['options'] ?? null,
-            'metadata' => $input['metadata'] ?? null,
-            'tax_class' => $taxClass,
-        ]);
-
         $created = [];
         db($context)->transaction(
-            function () use ($context, $tenant, $productUuid, $variants, $storeCurrency, $type, &$created): void {
+            function () use (
+                $context,
+                $tenant,
+                $productUuid,
+                $slug,
+                $input,
+                $type,
+                $status,
+                $taxClass,
+                $variants,
+                $storeCurrency,
+                &$created
+            ): void {
+                $this->products->insert($context, [
+                    'uuid' => $productUuid,
+                    'tenant_uuid' => $tenant,
+                    'slug' => $slug,
+                    'name' => $this->requiredString($input, 'name'),
+                    'description' => $input['description'] ?? null,
+                    'type' => $type,
+                    'status' => $status,
+                    'options' => $input['options'] ?? null,
+                    'metadata' => $input['metadata'] ?? null,
+                    'tax_class' => $taxClass,
+                ]);
+
                 $this->claimAndInsertCreatedVariants(
                     $context,
                     $tenant,
@@ -212,6 +224,22 @@ final class CatalogService
 
         db($context)->transaction(
             function () use ($context, $tenant, $productUuid, $variant, $variantUuid, $storeCurrency): void {
+                if (!$this->products->claimCatalogRevision($context, $tenant, $productUuid)) {
+                    throw ValidationException::forField('product_uuid', 'Product not found.');
+                }
+
+                $product = $this->products->findLiveByUuid($context, $tenant, $productUuid);
+                if ($product === null) {
+                    throw ValidationException::forField('product_uuid', 'Product not found.');
+                }
+                $type = (string) ($product['type'] ?? 'physical');
+                if (!in_array($type, self::PURCHASABLE_TYPES, true)) {
+                    throw ValidationException::forField(
+                        'product_uuid',
+                        "Cannot add variants to a '{$type}' product."
+                    );
+                }
+
                 $this->claimShippingClassesForCreate($context, $tenant, [$variant['shipping_class_uuid'] ?? null]);
 
                 $this->variants->insert($context, [
@@ -227,10 +255,10 @@ final class CatalogService
                     'status' => (string) ($variant['status'] ?? 'active'),
                     'shipping_class_uuid' => $variant['shipping_class_uuid'] ?? null,
                 ]);
+
+                $this->stock->ensureRow($context, $tenant, $variantUuid, $type === 'physical');
             }
         );
-
-        $this->stock->ensureRow($context, $tenant, $variantUuid, ($product['type'] ?? 'physical') === 'physical');
 
         $created = $this->variants->findByUuid($context, $tenant, $variantUuid);
         if ($created === null) {
@@ -241,37 +269,18 @@ final class CatalogService
     }
 
     /**
-     * @param array<string,mixed> $changes a `type` key triggers the immutability
-     *   guard below; other fields are applied as before. A `status` key is a
-     *   GUARDED field (design spec Layer 6 §2/Task 2): its presence routes the
-     *   WHOLE patch through {@see self::applyGuardedProductPatch()} -- one
-     *   transaction, one `catalog_revision` claim, one live re-read, one final
-     *   write -- so a status-bearing PATCH and a bulk status write always
-     *   serialize against the SAME row lock. Absent `status`, this stays the
-     *   plain unconditional-live-read-then-write path (no claim/transaction).
+     * Every patch uses the guarded product primitive: one transaction, one
+     * `catalog_revision` claim, one live re-read, and one final write. This keeps
+     * ordinary metadata edits from racing product deletion as well as serializing
+     * status and type changes against the same row claim used by bulk operations.
+     *
+     * @param array<string,mixed> $changes
      */
     public function updateProduct(ApplicationContext $context, string $productUuid, array $changes): void
     {
         $tenant = $this->tenants->tenantUuid($context);
 
-        if (array_key_exists('status', $changes)) {
-            $this->applyGuardedProductPatch($context, $tenant, $productUuid, $changes);
-
-            return;
-        }
-
-        // Every catalog-mutation path requires a live product (design spec Layer
-        // 6 §2): loaded UNCONDITIONALLY, before any other change is validated or
-        // applied, so a PATCH against a tombstoned product 404s outright rather
-        // than silently rewriting a dead row's other columns (the plain
-        // `ProductRepository::update()` write below carries no `deleted_at`
-        // guard of its own).
-        $current = $this->products->findLiveByUuid($context, $tenant, $productUuid);
-        if ($current === null) {
-            throw new NotFoundException('Resource not found.');
-        }
-
-        $this->applyProductPatch($context, $tenant, $productUuid, $changes, $current);
+        $this->applyGuardedProductPatch($context, $tenant, $productUuid, $changes);
     }
 
     /**
@@ -508,11 +517,8 @@ final class CatalogService
     }
 
     /**
-     * `price` and/or `shipping_class_uuid` present in $changes (design spec
-     * Layer 6 §2/Task 2 and the earlier §6 shared-claim protocol) route the
-     * WHOLE patch through {@see self::applyGuardedVariantPatch()} regardless of
-     * whether either is a real change or a no-op reassertion; their ABSENCE
-     * preserves every other field via the plain write path.
+     * Every patch claims and live re-reads the parent product before writing the
+     * variant. Shipping-class changes additionally use the shared class claim.
      *
      * @param array<string,mixed> $changes
      */
@@ -538,12 +544,6 @@ final class CatalogService
             }
         }
 
-        if (!array_key_exists('price', $changes) && !array_key_exists('shipping_class_uuid', $changes)) {
-            $this->variants->update($context, $tenant, $variantUuid, $changes);
-
-            return;
-        }
-
         $this->applyGuardedVariantPatch($context, $tenant, $variantUuid, $changes);
     }
 
@@ -566,8 +566,7 @@ final class CatalogService
 
     /**
      * Compositional guarded variant-patch primitive (design spec Layer 6 §2/
-     * Task 2), reached whenever $changes carries `price` and/or
-     * `shipping_class_uuid`: ONE transaction that resolves variant->product
+     * Task 2), used for every variant patch: ONE transaction that resolves variant->product
      * (a pre-claim read, never trusted for a decision), claims the PARENT
      * product's `catalog_revision` ONCE, live re-reads BOTH the parent product
      * (closing the tombstone gap the pre-Task-1 §6 protocol didn't check) and
@@ -721,6 +720,7 @@ final class CatalogService
         }
 
         $variants = array_values($raw);
+        $seenSkus = [];
         foreach ($variants as $index => $variant) {
             if (!is_array($variant)) {
                 throw ValidationException::forField("variants.{$index}", 'Variant must be an object.');
@@ -744,6 +744,10 @@ final class CatalogService
             if ($sku === '') {
                 throw ValidationException::forField("variants.{$index}.sku", 'SKU is required.');
             }
+            if (isset($seenSkus[$sku])) {
+                throw ValidationException::forField("variants.{$index}.sku", 'SKU is duplicated in this request.');
+            }
+            $seenSkus[$sku] = true;
             if ($this->variants->findBySku($context, $tenant, $sku) !== null) {
                 throw ValidationException::forField("variants.{$index}.sku", 'SKU already in use.');
             }

@@ -75,6 +75,36 @@ final class HttpDocumentationTest extends CommerceTestCase
         }
     }
 
+    public function testTenancyEnabledRoutesResolveTenantBeforeCommerceHandlers(): void
+    {
+        $this->context->overrideConfig('commerce.tenancy.enabled', true);
+        $router = $this->freshRouter();
+
+        foreach ($router->getAllRoutes() as $route) {
+            if (!str_starts_with((string) $route['path'], '/commerce')) {
+                continue;
+            }
+
+            self::assertContains('tenant', $route['middleware'], (string) $route['path']);
+            if (str_starts_with((string) $route['path'], '/commerce/admin')) {
+                self::assertLessThan(
+                    array_search('tenant', $route['middleware'], true),
+                    array_search('auth', $route['middleware'], true),
+                    'Authentication must run before tenant membership resolution.'
+                );
+            }
+        }
+    }
+
+    public function testSingleStoreRoutesDoNotRequireTenancyExtensionMiddleware(): void
+    {
+        $router = $this->freshRouter();
+
+        foreach ($router->getAllRoutes() as $route) {
+            self::assertNotContains('tenant', $route['middleware']);
+        }
+    }
+
     /**
      * Builds a fresh `Router` bound to THIS test's `ApplicationContext` (never
      * the minimal/anonymous container `CommerceTestCase` otherwise wires) and

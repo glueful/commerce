@@ -157,21 +157,35 @@ SQL,
         return $affected === 1;
     }
 
-    public function transition(ApplicationContext $context, string $tenant, string $uuid, string $to): void
-    {
+    /** @param array<string,mixed> $changes */
+    public function transition(
+        ApplicationContext $context,
+        string $tenant,
+        string $uuid,
+        string $to,
+        array $changes = []
+    ): void {
         $order = $this->findByUuid($context, $tenant, $uuid);
         if ($order === null) {
             throw new \RuntimeException('Order not found.');
         }
 
-        OrderStateMachine::assertTransition((string) $order['status'], $to);
-        db($context)->table('commerce_orders')
+        $from = (string) $order['status'];
+        OrderStateMachine::assertTransition($from, $to);
+
+        unset($changes['tenant_uuid'], $changes['uuid'], $changes['status']);
+        $changes['status'] = $to;
+        $changes['updated_at'] = db($context)->getDriver()->formatDateTime();
+
+        $query = db($context)->table('commerce_orders')
             ->where('tenant_uuid', '=', $tenant)
             ->where('uuid', '=', $uuid)
-            ->update([
-                'status' => $to,
-                'updated_at' => db($context)->getDriver()->formatDateTime(),
-            ]);
+            ->where('status', '=', $from);
+        $affected = $query->update($changes);
+
+        if ($affected !== 1) {
+            throw new \DomainException('Order status changed concurrently; retry the operation.');
+        }
 
         $this->recordEvent($context, $uuid, 'status:' . $to);
     }

@@ -436,6 +436,22 @@ final class ProductDeleteTest extends CommerceTestCase
         self::assertArrayHasKey('status', $this->json($response)['error']['details']);
     }
 
+    public function testVariantPatchRejectsADeletedParentProduct(): void
+    {
+        $product = $this->seedActiveProduct('delprodT001', 'del-t-001');
+        $variantUuid = (string) $product['variants'][0]['uuid'];
+        $this->catalog()->deleteProduct($this->context, (string) $product['uuid']);
+
+        try {
+            $this->catalog()->updateVariant($this->context, $variantUuid, ['sku' => 'SHOULD-NOT-WRITE']);
+            self::fail('Expected a tombstoned product to reject variant mutation.');
+        } catch (NotFoundException) {
+            $variant = (new VariantRepository())->findByUuid($this->context, '', $variantUuid);
+            self::assertNotNull($variant);
+            self::assertSame('DELPRODT001', $variant['sku']);
+        }
+    }
+
     // --- Helpers -----------------------------------------------------------------
 
     /** @return array<string,mixed> */

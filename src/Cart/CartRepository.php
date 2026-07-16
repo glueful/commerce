@@ -44,6 +44,41 @@ final class CartRepository
             ->first();
     }
 
+    /**
+     * Serializes a cart mutation without changing its lifecycle state.
+     * The timestamp stamp acquires the cart row lock for the surrounding transaction.
+     */
+    public function claimActive(ApplicationContext $context, string $tenant, string $uuid): bool
+    {
+        $affected = db($context)->table('commerce_carts')->executeModification(
+            <<<'SQL'
+UPDATE commerce_carts
+SET updated_at = ?
+WHERE tenant_uuid = ? AND uuid = ? AND status = 'active'
+SQL,
+            [db($context)->getDriver()->formatDateTime(), $tenant, $uuid]
+        );
+
+        return $affected === 1;
+    }
+
+    /**
+     * Claims checkout ownership of an active cart. A rollback restores `active`.
+     */
+    public function convertIfActive(ApplicationContext $context, string $tenant, string $uuid): bool
+    {
+        $affected = db($context)->table('commerce_carts')->executeModification(
+            <<<'SQL'
+UPDATE commerce_carts
+SET status = 'converted', updated_at = ?
+WHERE tenant_uuid = ? AND uuid = ? AND status = 'active'
+SQL,
+            [db($context)->getDriver()->formatDateTime(), $tenant, $uuid]
+        );
+
+        return $affected === 1;
+    }
+
     /** @param array<string,mixed> $changes */
     public function update(ApplicationContext $context, string $tenant, string $uuid, array $changes): void
     {
