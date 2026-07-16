@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-07-16 — Concurrency Hardening
+
+**Theme: transactional-core hardening** — atomic checkout claims, checked order
+transitions, fail-closed catalog writes, tenant route middleware, and controlled
+422s where concurrent or duplicate input previously produced database errors.
+No new env vars, no migrations; error semantics tighten (409/422 where blind
+writes or 500s occurred before).
+
+- Hardened the transactional core against concurrent mutation: checkout claims the cart with an atomic active→converted flip (a losing duplicate checkout gets a controlled 422, and a failed checkout restores the cart); cart line/discount/merge mutations serialize through the same claim (merge orders cart claims by UUID to avoid deadlock); every order status transition (payment, cancellation, expiry, fulfillment, full refund) is an affected-row-checked `WHERE status = ?` update, so lifecycle events like `OrderPaid` can no longer double-fire.
+- Made product/variant/stock creation a single fail-closed transaction (a failed variant or stock insert no longer strands an orphan product row), and every product/variant patch now runs the guarded claim primitive — including single-field slug/sku patches — so no write can race a concurrent delete or land on a tombstoned parent.
+- Added tenant middleware to the public, account, and admin commerce route groups when tenancy is enabled, and rejected duplicate refund-line attribution with a controlled 422 (probe-checked before insert) instead of a database unique-constraint 500.
+- Fixed `POST /commerce/admin/orders/{uuid}/fulfill` returning a 500 for an unknown or
+  cross-tenant order; it now 404s exactly like `cancel()`.
+- Pinned `glueful/extension-contracts` to the released `^1.4.0` (was the `dev-dev`
+  path repository).
+
 ## [1.0.0] - 2026-07-16 — Initial Release
 
 **Theme: the complete commerce platform** — catalog breadth (categories, tags, attributes,
@@ -75,3 +91,4 @@ by two-connection PostgreSQL race tests; requires framework ≥ 1.70.0.
 - Hardened `HttpDocumentationTest` to build a fresh `Router` from `routes.php` and walk every registered commerce route action instead of a hand-maintained controller list, failing explicitly (named `class::method`) on any unannotated action or unsupported handler shape.
 - Added a pgsql-gated API-parity lane (`ApiParityPgsqlTest`) proving the storefront attribute-value filter's exact JSON containment on real PostgreSQL (`red` never matches `bred`), the discount delete-vs-checkout-redemption race in both orderings under true two-connection row-lock interleaving, the product soft-delete race (exactly one winner), and bulk-vs-single-write serialization against a real concurrent connection.
 - Applied an explicit field allowlist to the storefront product projection (`GET /commerce/products` and `GET /commerce/products/{slug}`): products now expose only `uuid,slug,name,description,type,options,created_at` plus derived enrichments, and variants only `uuid,sku,option_values,price,compare_at_price,currency,position,status,shipping_class_uuid,shipping_class` — the previously spread internal columns (`tenant_uuid`, `status`, raw `metadata`, `rating_sum`/`rating_count`, `catalog_revision`, `tax_class`, numeric ids, `updated_at`/`deleted_at`) no longer leave the public surface.
+

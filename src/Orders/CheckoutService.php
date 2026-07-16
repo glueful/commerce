@@ -93,50 +93,54 @@ final class CheckoutService
         }
 
         $tenant = $this->tenants->tenantUuid($context);
-        $lines = $this->carts->pricedLines($context, $cart);
-        if ($lines === []) {
-            throw ValidationException::forField('cart', 'Cart is empty.');
-        }
-        $lines = $this->withDownloadSnapshots($context, $tenant, $lines);
-
         $storeCurrency = (string) config($context, 'commerce.currency', 'USD');
-        foreach ($lines as $index => $line) {
-            if (($line['currency'] ?? $storeCurrency) !== $storeCurrency) {
-                throw ValidationException::forField(
-                    "lines.{$index}",
-                    'Variant currency no longer matches the store currency.'
-                );
-            }
-        }
-
-        $discount = $this->discountForCart($context, $tenant, $cart);
-        if ($discount !== null) {
-            $subtotal = $this->pricing->discountableBase($lines, null);
-            $this->discountService->validateForCart($context, $discount, $subtotal, $lines);
-        }
-
-        $shippingAddress = is_array($addresses['shipping'] ?? null) ? $addresses['shipping'] : [];
-        $shippingQuote = $this->resolveShipping($context, $lines, $shippingAddress, $shippingMethodId);
-        $preTax = $this->pricing->price($lines, $discount, $shippingQuote, null);
-        $taxQuote = $this->resolveTax($context, $lines, $discount, $preTax, $shippingAddress);
-        $totals = $this->pricing->price($lines, $discount, $shippingQuote, $taxQuote);
-        $buyerIdentity = DiscountService::buyerIdentity($buyer['user_uuid'] ?? null, (string) $buyer['email']);
         $guestToken = TokenHasher::generate();
 
         $order = db($context)->transaction(function () use (
             $context,
             $tenant,
             $cart,
-            $lines,
-            $discount,
-            $shippingQuote,
-            $totals,
             $buyer,
-            $buyerIdentity,
             $guestToken,
             $addresses,
-            $storeCurrency
+            $storeCurrency,
+            $shippingMethodId
         ): array {
+            // The lifecycle claim is the checkout idempotency point. Every cart mutation
+            // claims the same row before writing, so the lines below are a stable snapshot.
+            $cart = $this->carts->claimForCheckout($context, $cart);
+
+            $lines = $this->carts->pricedLines($context, $cart);
+            if ($lines === []) {
+                throw ValidationException::forField('cart', 'Cart is empty.');
+            }
+            $lines = $this->withDownloadSnapshots($context, $tenant, $lines);
+
+            foreach ($lines as $index => $line) {
+                if (($line['currency'] ?? $storeCurrency) !== $storeCurrency) {
+                    throw ValidationException::forField(
+                        "lines.{$index}",
+                        'Variant currency no longer matches the store currency.'
+                    );
+                }
+            }
+
+            $discount = $this->discountForCart($context, $tenant, $cart);
+            if ($discount !== null) {
+                $subtotal = $this->pricing->discountableBase($lines, null);
+                $this->discountService->validateForCart($context, $discount, $subtotal, $lines);
+            }
+
+            $shippingAddress = is_array($addresses['shipping'] ?? null) ? $addresses['shipping'] : [];
+            $shippingQuote = $this->resolveShipping($context, $lines, $shippingAddress, $shippingMethodId);
+            $preTax = $this->pricing->price($lines, $discount, $shippingQuote, null);
+            $taxQuote = $this->resolveTax($context, $lines, $discount, $preTax, $shippingAddress);
+            $totals = $this->pricing->price($lines, $discount, $shippingQuote, $taxQuote);
+            $buyerIdentity = DiscountService::buyerIdentity(
+                $buyer['user_uuid'] ?? null,
+                (string) $buyer['email']
+            );
+
             foreach ($lines as $line) {
                 if (!$this->stock->isTracked($context, $tenant, (string) $line['variant_uuid'])) {
                     continue;
@@ -191,9 +195,6 @@ final class CheckoutService
                 'placed_at' => gmdate('Y-m-d H:i:s'),
             ], $lines);
             $this->orders->recordEvent($context, $orderUuid, 'placed', ['number' => $number]);
-            db($context)->table('commerce_carts')
-                ->where('uuid', '=', $cart['uuid'])
-                ->update(['status' => 'converted']);
 
             $order = $this->orders->findByUuid($context, $tenant, $orderUuid);
             if ($order === null) {

@@ -49,6 +49,22 @@ final class CheckoutTest extends CommerceTestCase
         self::assertSame($quote['totals']->grandTotal, (int) $placed['order']['grand_total']);
     }
 
+    public function testSameCartCannotCreateASecondOrder(): void
+    {
+        [$token, $variantUuid] = $this->seedCartWithLine('SKU-IDEMPOTENT', 5, 2, 1000);
+        $checkout = $this->checkout();
+
+        $checkout->placeOrder($this->context, $token, $this->buyer(), $this->addresses(), 'std');
+
+        try {
+            $checkout->placeOrder($this->context, $token, $this->buyer(), $this->addresses(), 'std');
+            self::fail('A converted cart must not create another order.');
+        } catch (ValidationException) {
+            self::assertSame(1, $this->connection->table('commerce_orders')->count());
+            self::assertSame(3, (new StockRepository())->quantity($this->context, '', $variantUuid));
+        }
+    }
+
     public function testOversellRollsBackEverything(): void
     {
         [$token, $variantUuid] = $this->seedCartWithLine('SKU-O', 1, 1, 1000);

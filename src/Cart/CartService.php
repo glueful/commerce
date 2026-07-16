@@ -83,6 +83,17 @@ final class CartService
         );
     }
 
+    /** @param array<string,mixed> $cart @return array<string,mixed> */
+    public function claimForCheckout(ApplicationContext $context, array $cart): array
+    {
+        $tenant = $this->tenants->tenantUuid($context);
+        if (!$this->carts->convertIfActive($context, $tenant, (string) $cart['uuid'])) {
+            throw ValidationException::forField('cart', 'Cart not found or no longer active.');
+        }
+
+        return $this->reloadCart($context, $tenant, (string) $cart['uuid']);
+    }
+
     /**
      * @param array<string,mixed> $cart
      * @param list<array{addon_uuid:string,choice_key?:string,value?:mixed}> $addons
@@ -100,80 +111,108 @@ final class CartService
         }
 
         $tenant = $this->tenants->tenantUuid($context);
-        $this->assertVariantCanSupply(
+
+        return db($context)->transaction(function () use (
             $context,
             $tenant,
+            $cart,
             $variantUuid,
-            $this->carts->totalQuantityForVariant($context, (string) $cart['uuid'], $variantUuid) + $quantity
-        );
-
-        $variant = $this->variants->findByUuid($context, $tenant, $variantUuid);
-        if ($variant === null) {
-            throw ValidationException::forField('variant_uuid', 'Variant not found.');
-        }
-
-        ['snapshot' => $snapshot, 'hash' => $hash] = $this->buildAddonSnapshot(
-            $context,
-            $tenant,
-            (string) $variant['product_uuid'],
-            (int) $variant['price'],
+            $quantity,
             $addons
-        );
+        ): array {
+            $this->claimActiveCart($context, $tenant, (string) $cart['uuid']);
+            $this->assertVariantCanSupply(
+                $context,
+                $tenant,
+                $variantUuid,
+                $this->carts->totalQuantityForVariant($context, (string) $cart['uuid'], $variantUuid) + $quantity
+            );
 
-        $line = $this->carts->findLineByVariantAndHash($context, (string) $cart['uuid'], $variantUuid, $hash);
-        if ($line === null) {
-            $this->carts->insertLine($context, (string) $cart['uuid'], $variantUuid, $quantity, $snapshot, $hash);
-        } else {
-            $this->carts->setLineQuantity($context, (string) $line['uuid'], (int) $line['quantity'] + $quantity);
-        }
+            $variant = $this->variants->findByUuid($context, $tenant, $variantUuid);
+            if ($variant === null) {
+                throw ValidationException::forField('variant_uuid', 'Variant not found.');
+            }
 
-        return $this->reloadCart($context, $tenant, (string) $cart['uuid']);
+            ['snapshot' => $snapshot, 'hash' => $hash] = $this->buildAddonSnapshot(
+                $context,
+                $tenant,
+                (string) $variant['product_uuid'],
+                (int) $variant['price'],
+                $addons
+            );
+
+            $line = $this->carts->findLineByVariantAndHash(
+                $context,
+                (string) $cart['uuid'],
+                $variantUuid,
+                $hash
+            );
+            if ($line === null) {
+                $this->carts->insertLine($context, (string) $cart['uuid'], $variantUuid, $quantity, $snapshot, $hash);
+            } else {
+                $this->carts->setLineQuantity($context, (string) $line['uuid'], (int) $line['quantity'] + $quantity);
+            }
+
+            return $this->reloadCart($context, $tenant, (string) $cart['uuid']);
+        });
     }
 
     /** @param array<string,mixed> $cart @return array<string,mixed> */
     public function setLineQuantity(ApplicationContext $context, array $cart, string $lineUuid, int $quantity): array
     {
-        $line = $this->carts->findLine($context, $lineUuid);
-        if ($line === null || $line['cart_uuid'] !== $cart['uuid']) {
-            throw ValidationException::forField('line_uuid', 'Cart line not found.');
-        }
-
         $tenant = $this->tenants->tenantUuid($context);
-        if ($quantity <= 0) {
-            $this->carts->deleteLine($context, $lineUuid);
-        } else {
-            $this->assertVariantCanSupply($context, $tenant, (string) $line['variant_uuid'], $quantity);
-            $this->carts->setLineQuantity($context, $lineUuid, $quantity);
-        }
 
-        return $this->reloadCart($context, $tenant, (string) $cart['uuid']);
+        return db($context)->transaction(function () use ($context, $tenant, $cart, $lineUuid, $quantity): array {
+            $this->claimActiveCart($context, $tenant, (string) $cart['uuid']);
+            $line = $this->carts->findLine($context, $lineUuid);
+            if ($line === null || $line['cart_uuid'] !== $cart['uuid']) {
+                throw ValidationException::forField('line_uuid', 'Cart line not found.');
+            }
+
+            if ($quantity <= 0) {
+                $this->carts->deleteLine($context, $lineUuid);
+            } else {
+                $this->assertVariantCanSupply($context, $tenant, (string) $line['variant_uuid'], $quantity);
+                $this->carts->setLineQuantity($context, $lineUuid, $quantity);
+            }
+
+            return $this->reloadCart($context, $tenant, (string) $cart['uuid']);
+        });
     }
 
     /** @param array<string,mixed> $cart @return array<string,mixed> */
     public function applyDiscount(ApplicationContext $context, array $cart, string $code): array
     {
         $tenant = $this->tenants->tenantUuid($context);
-        $discount = $this->discounts->findByCode($context, $tenant, $code);
-        if ($discount === null) {
-            throw ValidationException::forField('discount_code', 'Discount not found.');
-        }
 
-        $lines = $this->pricedLines($context, $cart);
-        $subtotal = (new PricingEngine())->discountableBase($lines, null);
-        (new DiscountService($this->discounts, $this->tenants))
-            ->validateForCart($context, $discount, $subtotal, $lines);
-        $this->carts->update($context, $tenant, (string) $cart['uuid'], ['discount_code' => $code]);
+        return db($context)->transaction(function () use ($context, $tenant, $cart, $code): array {
+            $this->claimActiveCart($context, $tenant, (string) $cart['uuid']);
+            $discount = $this->discounts->findByCode($context, $tenant, $code);
+            if ($discount === null) {
+                throw ValidationException::forField('discount_code', 'Discount not found.');
+            }
 
-        return $this->reloadCart($context, $tenant, (string) $cart['uuid']);
+            $lines = $this->pricedLines($context, $cart);
+            $subtotal = (new PricingEngine())->discountableBase($lines, null);
+            (new DiscountService($this->discounts, $this->tenants))
+                ->validateForCart($context, $discount, $subtotal, $lines);
+            $this->carts->update($context, $tenant, (string) $cart['uuid'], ['discount_code' => $code]);
+
+            return $this->reloadCart($context, $tenant, (string) $cart['uuid']);
+        });
     }
 
     /** @param array<string,mixed> $cart @return array<string,mixed> */
     public function removeDiscount(ApplicationContext $context, array $cart): array
     {
         $tenant = $this->tenants->tenantUuid($context);
-        $this->carts->update($context, $tenant, (string) $cart['uuid'], ['discount_code' => null]);
 
-        return $this->reloadCart($context, $tenant, (string) $cart['uuid']);
+        return db($context)->transaction(function () use ($context, $tenant, $cart): array {
+            $this->claimActiveCart($context, $tenant, (string) $cart['uuid']);
+            $this->carts->update($context, $tenant, (string) $cart['uuid'], ['discount_code' => null]);
+
+            return $this->reloadCart($context, $tenant, (string) $cart['uuid']);
+        });
     }
 
     /** @return array<string,mixed> */
@@ -186,18 +225,33 @@ final class CartService
         }
 
         $userCart = $this->carts->findActiveForUser($context, $tenant, $userUuid);
-        if ($userCart === null) {
-            $this->carts->update($context, $tenant, (string) $guest['uuid'], ['user_uuid' => $userUuid]);
+        if ($userCart !== null && $userCart['uuid'] === $guest['uuid']) {
             return $this->reloadCart($context, $tenant, (string) $guest['uuid']);
         }
 
-        foreach ($this->carts->lines($context, (string) $guest['uuid']) as $line) {
-            $this->mergeLine($context, $tenant, $userCart, $line);
-        }
+        return db($context)->transaction(function () use ($context, $tenant, $guest, $userCart, $userUuid): array {
+            $claimUuids = [(string) $guest['uuid']];
+            if ($userCart !== null) {
+                $claimUuids[] = (string) $userCart['uuid'];
+            }
+            sort($claimUuids);
+            foreach ($claimUuids as $claimUuid) {
+                $this->claimActiveCart($context, $tenant, $claimUuid);
+            }
 
-        $this->carts->update($context, $tenant, (string) $guest['uuid'], ['status' => 'abandoned']);
+            if ($userCart === null) {
+                $this->carts->update($context, $tenant, (string) $guest['uuid'], ['user_uuid' => $userUuid]);
+                return $this->reloadCart($context, $tenant, (string) $guest['uuid']);
+            }
 
-        return $this->reloadCart($context, $tenant, (string) $userCart['uuid']);
+            foreach ($this->carts->lines($context, (string) $guest['uuid']) as $line) {
+                $this->mergeLine($context, $tenant, $userCart, $line);
+            }
+
+            $this->carts->update($context, $tenant, (string) $guest['uuid'], ['status' => 'abandoned']);
+
+            return $this->reloadCart($context, $tenant, (string) $userCart['uuid']);
+        });
     }
 
     /** @param array<string,mixed> $cart @return array<string,mixed> */
@@ -424,6 +478,13 @@ final class CartService
         }
 
         $this->carts->setLineQuantity($context, (string) $existing['uuid'], $target);
+    }
+
+    private function claimActiveCart(ApplicationContext $context, string $tenant, string $cartUuid): void
+    {
+        if (!$this->carts->claimActive($context, $tenant, $cartUuid)) {
+            throw ValidationException::forField('cart', 'Cart not found or no longer active.');
+        }
     }
 
     /** @return array<string,mixed> */

@@ -19,8 +19,17 @@ final class StockRepository
                 'quantity' => 0,
                 'tracked' => $tracked ? 1 : 0,
             ]);
-        } catch (\Throwable) {
-            // The unique (tenant_uuid, variant_uuid) index is the idempotency guard.
+        } catch (\Throwable $e) {
+            // Suppress only a verified idempotent duplicate. Any unrelated database
+            // failure must abort catalog creation rather than turning the variant into
+            // an implicitly-untracked, unlimited-stock item.
+            $existing = $this->trackedState($context, $tenant, $variantUuid);
+            if ($existing === null) {
+                throw $e;
+            }
+            if ($existing !== $tracked) {
+                throw new \RuntimeException('Existing stock tracking mode does not match the variant.', 0, $e);
+            }
         }
     }
 

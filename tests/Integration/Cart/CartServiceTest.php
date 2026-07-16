@@ -104,6 +104,17 @@ final class CartServiceTest extends CommerceTestCase
         self::assertSame(2100, $view['totals']->grandTotal);
     }
 
+    public function testMutationRefusesACartClaimedByCheckout(): void
+    {
+        $service = $this->service();
+        $variantUuid = $this->seedVariant('SKU-CART-CLAIM', 5);
+        ['cart' => $cart] = $service->create($this->context);
+        $service->claimForCheckout($this->context, $cart);
+
+        $this->expectException(ValidationException::class);
+        $service->addLine($this->context, $cart, $variantUuid, 1);
+    }
+
     private function seedVariant(string $sku, int $quantity, int $price = 100): string
     {
         $catalog = new CatalogService(

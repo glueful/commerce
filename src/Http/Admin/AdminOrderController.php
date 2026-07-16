@@ -128,19 +128,16 @@ final class AdminOrderController
     {
         try {
             $tenant = $this->tenants->tenantUuid($this->context);
-            $order = $this->order($uuid);
-            OrderStateMachine::assertTransition((string) $order['status'], 'fulfilled');
-
-            db($this->context)->table('commerce_orders')
-                ->where('tenant_uuid', '=', $tenant)
-                ->where('uuid', '=', $uuid)
-                ->update([
-                    'status' => 'fulfilled',
+            db($this->context)->transaction(function () use ($tenant, $uuid, $input): void {
+                // Same unknown/cross-tenant 404 pre-check as cancel(): without it,
+                // transition()'s missing-order RuntimeException surfaces as a 500.
+                $this->order($uuid);
+                $this->orders->transition($this->context, $tenant, $uuid, 'fulfilled', [
                     'fulfillment_status' => 'fulfilled',
                     'tracking_ref' => $input->tracking_ref,
-                    'updated_at' => db($this->context)->getDriver()->formatDateTime(),
                 ]);
-            $this->orders->recordEvent($this->context, $uuid, 'status:fulfilled');
+            });
+
             $fulfilled = $this->order($uuid);
             $this->dispatch(new OrderFulfilled($fulfilled));
 

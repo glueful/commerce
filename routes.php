@@ -34,6 +34,7 @@ use Glueful\Routing\Router;
 
 $context = $router->getContext();
 $limits = (array) config($context, 'commerce.rate_limits', []);
+$tenantMiddleware = (bool) config($context, 'commerce.tenancy.enabled', false) ? ['tenant'] : [];
 
 $rate = static function (string $key, int $attempts, int $window = 60) use ($limits): string {
     $configured = $limits[$key] ?? null;
@@ -45,7 +46,9 @@ $rate = static function (string $key, int $attempts, int $window = 60) use ($lim
     return 'rate_limit:' . max(1, $attempts) . ',' . max(1, $window);
 };
 
-$router->group(['prefix' => '/commerce'], function (Router $router) use ($rate): void {
+$router->group(
+    ['prefix' => '/commerce', 'middleware' => $tenantMiddleware],
+    function (Router $router) use ($rate): void {
     // Products currently have NO rate middleware; `catalog` (Layer 6 Global
     // Constraints) is a new config key applied here for the first time, and
     // also covers the public category tree below.
@@ -99,16 +102,23 @@ $router->group(['prefix' => '/commerce'], function (Router $router) use ($rate):
         ->middleware($orderRate);
 
     $router->get('/downloads/{token}', [DownloadLinkController::class, 'show'])->middleware($rate('downloads', 60));
-});
+    }
+);
 
-$router->group(['prefix' => '/commerce/account', 'middleware' => ['auth']], function (Router $router): void {
+$router->group([
+    'prefix' => '/commerce/account',
+    'middleware' => array_merge(['auth'], $tenantMiddleware),
+], function (Router $router): void {
     $router->get('/addresses', [AccountAddressController::class, 'index']);
     $router->post('/addresses', [AccountAddressController::class, 'store']);
     $router->patch('/addresses/{uuid}', [AccountAddressController::class, 'update']);
     $router->delete('/addresses/{uuid}', [AccountAddressController::class, 'destroy']);
 });
 
-$router->group(['prefix' => '/commerce/admin', 'middleware' => ['auth']], function (Router $router): void {
+$router->group([
+    'prefix' => '/commerce/admin',
+    'middleware' => array_merge(['auth'], $tenantMiddleware),
+], function (Router $router): void {
     $read = 'require_scope:commerce:read';
     $write = 'require_scope:commerce:write';
 

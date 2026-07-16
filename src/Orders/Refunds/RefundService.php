@@ -449,9 +449,17 @@ final class RefundService
 
         $lines = [];
         $sum = 0;
+        $seenLineUuids = [];
 
         foreach ($input->lines as $index => $line) {
             $lineUuid = (string) $line['order_line_uuid'];
+            if (isset($seenLineUuids[$lineUuid])) {
+                throw new RefundValidationException(
+                    "lines.{$index}.order_line_uuid: must be unique within the refund request."
+                );
+            }
+            $seenLineUuids[$lineUuid] = true;
+
             $orderLine = db($c)->table('commerce_order_lines')
                 ->where('order_uuid', '=', $orderUuid)
                 ->where('uuid', '=', $lineUuid)

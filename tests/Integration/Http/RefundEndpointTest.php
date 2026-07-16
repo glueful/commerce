@@ -170,6 +170,33 @@ final class RefundEndpointTest extends CommerceTestCase
         self::assertArrayNotHasKey('refund', $body['error']['details']);
     }
 
+    public function testDuplicateOrderLineAttributionReturns422WithoutWritingARefund(): void
+    {
+        ['order' => $order] = $this->placeAndPayOrder('SKU-REF-DUPLINE', 5, 2, 1000);
+        $line = $this->connection->table('commerce_order_lines')
+            ->where('order_uuid', '=', $order['uuid'])
+            ->first();
+        self::assertNotNull($line);
+
+        $request = Request::create('/commerce/admin/orders/' . $order['uuid'] . '/refunds', 'POST');
+        $request->headers->set('Idempotency-Key', 'idem-duplicate-line-1');
+        $response = $this->refundController()->store(
+            new CreateRefundData(
+                amount: 1000,
+                lines: [
+                    ['order_line_uuid' => $line['uuid'], 'quantity' => 1, 'amount' => 500],
+                    ['order_line_uuid' => $line['uuid'], 'quantity' => 1, 'amount' => 500],
+                ],
+                restock: true
+            ),
+            $request,
+            (string) $order['uuid']
+        );
+
+        self::assertSame(422, $response->getStatusCode());
+        self::assertSame(0, $this->connection->table('commerce_refunds')->count());
+    }
+
     public function testIndexListsRefundsForOrder(): void
     {
         ['order' => $order] = $this->placeAndPayOrder('SKU-REF-INDEX', 5, 1, 1000);
