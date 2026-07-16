@@ -25,7 +25,7 @@ use Symfony\Component\HttpFoundation\Response as HttpResponse;
  */
 final class CustomersReportEndpointTest extends CommerceTestCase
 {
-    private const TENANT = 'tenantcust001';
+    private const TENANT = 'tenantcust01';
 
     public function testKeyIsNewInExactlyOneBucketAcrossAMultiDayWindow(): void
     {
@@ -228,10 +228,10 @@ final class CustomersReportEndpointTest extends CommerceTestCase
 
     public function testTenantIsolationReturnsDisjointResults(): void
     {
-        $this->seedOrder('custordG0001', 'paid', '2026-06-01 08:00:00', userUuid: 'usergolf0001', tenant: 'tenantcustA01');
-        $this->seedOrder('custordH0001', 'paid', '2026-06-01 08:00:00', userUuid: 'userhotel001', tenant: 'tenantcustB01');
+        $this->seedOrder('custordG0001', 'paid', '2026-06-01 08:00:00', userUuid: 'usergolf0001', tenant: 'tenantcustA1');
+        $this->seedOrder('custordH0001', 'paid', '2026-06-01 08:00:00', userUuid: 'userhotel001', tenant: 'tenantcustB1');
 
-        $body = $this->call('2026-06-01', '2026-06-01', tenant: 'tenantcustA01');
+        $body = $this->call('2026-06-01', '2026-06-01', tenant: 'tenantcustA1');
 
         self::assertSame(1, $body['data']['summary']['total_customers']);
     }

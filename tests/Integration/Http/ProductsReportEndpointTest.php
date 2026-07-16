@@ -28,7 +28,7 @@ use Symfony\Component\HttpFoundation\Response as HttpResponse;
  */
 final class ProductsReportEndpointTest extends CommerceTestCase
 {
-    private const TENANT = 'tenantproduct1';
+    private const TENANT = 'tenantprod01';
 
     public function testSalesBranchAggregatesQuantityAndRevenuePerVariant(): void
     {
@@ -242,13 +242,13 @@ final class ProductsReportEndpointTest extends CommerceTestCase
 
     public function testTenantIsolationReturnsDisjointResults(): void
     {
-        $this->seedOrder('prodordT0001', 'paid', '2026-06-01 08:00:00', tenant: 'tenantprodA01');
+        $this->seedOrder('prodordT0001', 'paid', '2026-06-01 08:00:00', tenant: 'tenantprodA1');
         $this->seedOrderLine('lineT00001', 'prodordT0001', 'variantT0001', 'Widget T', 'SKU-T', 1, 100);
 
-        $this->seedOrder('prodordU0001', 'paid', '2026-06-01 08:00:00', tenant: 'tenantprodB01');
+        $this->seedOrder('prodordU0001', 'paid', '2026-06-01 08:00:00', tenant: 'tenantprodB1');
         $this->seedOrderLine('lineU00001', 'prodordU0001', 'variantU0001', 'Widget U', 'SKU-U', 1, 999);
 
-        $body = $this->call('2026-06-01', '2026-06-30', tenant: 'tenantprodA01');
+        $body = $this->call('2026-06-01', '2026-06-30', tenant: 'tenantprodA1');
 
         self::assertSame(1, $body['total']);
         self::assertSame('variantT0001', $body['data'][0]['variant_uuid']);

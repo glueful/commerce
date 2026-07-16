@@ -8,8 +8,8 @@ use Glueful\Bootstrap\ApplicationContext;
 
 /**
  * Stock report's raw-SQL point-in-time list (design spec §4.4, decision 10):
- * `commerce_stock` (`tenant_uuid = ?`, `tracked = 1`, `quantity <= :threshold`)
- * JOIN `commerce_variants` (`status = 'active'`; variants have no
+ * `commerce_stock` (`tenant_uuid = ?`, `tracked = ?` bound `true`,
+ * `quantity <= :threshold`) JOIN `commerce_variants` (`status = 'active'`; variants have no
  * `deleted_at`) JOIN `commerce_products` (`deleted_at IS NULL` --
  * draft/inactive products remain visible to stock administrators until
  * trashed). `uuid` is globally unique on all three tables (each has its own
@@ -27,6 +27,19 @@ use Glueful\Bootstrap\ApplicationContext;
  * Order: `quantity ASC, variant_uuid ASC` -- the tie-break is unconditional
  * (not merely a value-tie fallback), so pagination across identical
  * quantities is deterministic.
+ *
+ * Portability note: `commerce_stock.tracked` is a genuine `boolean` column
+ * (`$table->boolean('tracked')`, migrations/002). A literal `tracked = 1`
+ * compiles fine on SQLite/MySQL (both give integers boolean affinity) but
+ * fails on PostgreSQL (`operator does not exist: boolean = integer` -- an
+ * integer *literal* has a fixed type PostgreSQL never implicitly casts to
+ * boolean). Binding the value as a parameter instead (`tracked = ?` / `true`)
+ * sidesteps this: native `PDO::ATTR_EMULATE_PREPARES = false` prepares (used
+ * for every driver, {@see \Glueful\Database\Connection}) let PostgreSQL infer
+ * the placeholder's type from the boolean column itself, and its `boolin()`
+ * parser accepts the `'1'` text `ParameterBinder::flattenBindings()` sends
+ * for PHP `true` -- the same mechanism the framework's own query builder
+ * already relies on for boolean bindings everywhere else.
  */
 final class StockReportRepository
 {
@@ -51,7 +64,7 @@ final class StockReportRepository
         int $perPage
     ): array {
         $whereSql = $this->whereSql($status);
-        $bindings = [$tenant, $threshold];
+        $bindings = [$tenant, true, $threshold];
 
         $totalRow = db($context)->table('commerce_stock')->executeRawFirst(
             'SELECT COUNT(*) AS total FROM ' . $this->joinSql() . ' WHERE ' . $whereSql,
@@ -82,15 +95,17 @@ final class StockReportRepository
     }
 
     /**
-     * Base predicate is always `tenant_uuid = ? AND tracked = 1 AND
+     * Base predicate is always `tenant_uuid = ? AND tracked = ? AND
      * quantity <= ? AND v.status = 'active' AND p.deleted_at IS NULL`
-     * (binding order `[tenant, threshold]`); `?status=` appends one more
-     * (parameter-free, since 0 is a fixed class boundary, not user input)
-     * predicate to narrow to exactly one class.
+     * (binding order `[tenant, true, threshold]` -- see the class docblock's
+     * portability note for why `tracked` is bound rather than a `= 1`
+     * literal); `?status=` appends one more (parameter-free, since 0 is a
+     * fixed class boundary, not user input) predicate to narrow to exactly
+     * one class.
      */
     private function whereSql(?string $status): string
     {
-        $sql = "s.tenant_uuid = ? AND s.tracked = 1 AND s.quantity <= ? "
+        $sql = "s.tenant_uuid = ? AND s.tracked = ? AND s.quantity <= ? "
             . "AND v.status = 'active' AND p.deleted_at IS NULL";
 
         return match ($status) {

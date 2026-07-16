@@ -22,7 +22,7 @@ use Symfony\Component\HttpFoundation\Response as HttpResponse;
  */
 final class SalesReportEndpointTest extends CommerceTestCase
 {
-    private const TENANT = 'tenantsales01';
+    private const TENANT = 'tenantsales1';
 
     public function testHandComputedTotalsAcrossDaysAndStatusExclusions(): void
     {
@@ -169,10 +169,10 @@ final class SalesReportEndpointTest extends CommerceTestCase
 
     public function testTenantIsolationReturnsDisjointResults(): void
     {
-        $this->seedOrder('salesordM001', 'paid', 100, '2026-06-01 08:00:00', tenant: 'tenantsalesA1');
-        $this->seedOrder('salesordN001', 'paid', 999, '2026-06-01 08:00:00', tenant: 'tenantsalesB1');
+        $this->seedOrder('salesordM001', 'paid', 100, '2026-06-01 08:00:00', tenant: 'tenantsalesA');
+        $this->seedOrder('salesordN001', 'paid', 999, '2026-06-01 08:00:00', tenant: 'tenantsalesB');
 
-        $body = $this->call('2026-06-01', '2026-06-01', tenant: 'tenantsalesA1');
+        $body = $this->call('2026-06-01', '2026-06-01', tenant: 'tenantsalesA');
 
         self::assertSame(100, $body['data']['summary']['gross_minor']);
         self::assertSame(1, $body['data']['summary']['orders_count']);
