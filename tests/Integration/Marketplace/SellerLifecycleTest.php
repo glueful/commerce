@@ -5,11 +5,20 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Commerce\Tests\Integration\Marketplace;
 
 use Glueful\Bootstrap\ApplicationContext;
+use Glueful\Extensions\Commerce\Catalog\CatalogService;
+use Glueful\Extensions\Commerce\Catalog\ProductChildrenRepository;
+use Glueful\Extensions\Commerce\Catalog\ProductRepository;
+use Glueful\Extensions\Commerce\Catalog\VariantRepository;
+use Glueful\Extensions\Commerce\Inventory\StockRepository;
+use Glueful\Extensions\Commerce\Marketplace\MarketplaceMode;
+use Glueful\Extensions\Commerce\Marketplace\MarketplaceWorkspaceLock;
 use Glueful\Extensions\Commerce\Marketplace\SellerLifecycleException;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerService;
+use Glueful\Extensions\Commerce\Shipping\ShippingClassRepository;
 use Glueful\Extensions\Commerce\Tests\Support\CommerceTestCase;
+use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Glueful\Http\Exceptions\Client\NotFoundException;
 use Glueful\Routing\Router;
 use Glueful\Validation\ValidationException;
@@ -225,17 +234,18 @@ final class SellerLifecycleTest extends CommerceTestCase
         $service = $this->service();
         $seller = $service->create($this->context, self::TENANT, 'has-products', 'Has Products', null, 'ownerUser13');
 
-        // Attribution wiring (the real seller-scoped catalog write path) lands in
-        // Task 3 -- seeded here via a direct DB insert per the Task 2 brief.
-        $this->connection->table('commerce_products')->insert([
-            'uuid' => 'productSEED01',
-            'tenant_uuid' => self::TENANT,
-            'seller_uuid' => $seller['uuid'],
-            'slug' => 'seeded-product',
-            'name' => 'Seeded Product',
-            'type' => 'physical',
-            'status' => 'draft',
-        ]);
+        // Attribution wiring is the REAL seller-scoped catalog write path
+        // (Task 3, design spec §2.2/§2.7): master switch on, workspace
+        // active, CatalogService::createProduct() claims + validates the
+        // seller and attributes the product inside the SAME transaction as
+        // the insert -- not a direct DB seed standing in for it.
+        $this->enableMarketplace();
+        $this->activateWorkspace(self::TENANT);
+        $this->marketplaceCatalog()->createProduct(
+            $this->context,
+            $this->productInput('seeded-product'),
+            $seller['uuid']
+        );
 
         $this->expectException(SellerLifecycleException::class);
         $service->close($this->context, self::TENANT, $seller['uuid']);
@@ -359,5 +369,69 @@ final class SellerLifecycleTest extends CommerceTestCase
         }
 
         return array_values(array_unique($paths));
+    }
+
+    // -----------------------------------------------------------------
+    // Real-path catalog attribution helpers (design spec §2.2/§2.7)
+    // -----------------------------------------------------------------
+
+    private function enableMarketplace(): void
+    {
+        $this->context->mergeConfigDefaults('commerce', ['marketplace' => ['enabled' => true]]);
+    }
+
+    private function activateWorkspace(string $tenant): void
+    {
+        $this->connection->table('commerce_marketplace_settings')->insert([
+            'uuid' => substr('actv' . md5($tenant), 0, 12),
+            'tenant_uuid' => $tenant,
+            'status' => 'active',
+        ]);
+    }
+
+    private function marketplaceCatalog(): CatalogService
+    {
+        return new CatalogService(
+            new ProductRepository(),
+            new VariantRepository(),
+            $this->fixedTenant(),
+            new StockRepository(),
+            new ProductChildrenRepository(),
+            new ShippingClassRepository(),
+            new MarketplaceMode(),
+            new MarketplaceWorkspaceLock(),
+            new SellerRepository()
+        );
+    }
+
+    private function fixedTenant(): CurrentTenantResolver
+    {
+        return new class (self::TENANT) implements CurrentTenantResolver {
+            public function __construct(private string $tenant)
+            {
+            }
+
+            public function tenantUuid(ApplicationContext $context): string
+            {
+                return $this->tenant;
+            }
+        };
+    }
+
+    /** @return array<string,mixed> */
+    private function productInput(string $slug): array
+    {
+        return [
+            'slug' => $slug,
+            'name' => $slug,
+            'type' => 'physical',
+            'status' => 'draft',
+            'variants' => [[
+                'sku' => strtoupper(str_replace('-', '', $slug)),
+                'option_values' => [],
+                'price' => 1000,
+                'currency' => 'USD',
+            ]],
+        ];
     }
 }

@@ -251,9 +251,17 @@ final class CatalogOwnershipTest extends CommerceTestCase
         ]);
     }
 
-    public function testAdminProductControllerUpdateRejectsASellerUuidKeyInTheRawBodyWith422(): void
+    /**
+     * AdminProductController silently drops a body-supplied `seller_uuid`
+     * (mirroring SellerCatalogController::update()) -- a full-object
+     * read-modify-write PATCH echoing the column back must succeed, not
+     * 422. The 422 CatalogService::updateProduct() still throws for the
+     * key is reached only when a caller bypasses this controller -- see
+     * {@see self::testUpdateProductRejectsASellerUuidKeyAnywhereInTheChangesArray()}.
+     */
+    public function testAdminProductControllerUpdateSilentlyDropsASellerUuidKeyInTheRawBody(): void
     {
-        $product = $this->legacyCatalog()->createProduct($this->context, $this->productInput('update-http-reject'));
+        $product = $this->legacyCatalog()->createProduct($this->context, $this->productInput('update-http-drop'));
 
         $request = Request::create('/x', 'PATCH', [], [], [], [], json_encode(
             ['name' => 'New Name', 'seller_uuid' => 'someSeller01'],
@@ -263,9 +271,10 @@ final class CatalogOwnershipTest extends CommerceTestCase
 
         $response = $this->adminController()->update($request, $product['uuid']);
 
-        self::assertSame(422, $response->getStatusCode());
+        self::assertSame(200, $response->getStatusCode());
         $row = $this->connection->table('commerce_products')->where('uuid', '=', $product['uuid'])->first();
-        self::assertSame($product['name'], $row['name'], 'no field may change when seller_uuid is rejected');
+        self::assertSame('New Name', $row['name'], 'every other field in the payload still applies normally');
+        self::assertNull($row['seller_uuid'], 'the dropped seller_uuid key must never reach attribution');
     }
 
     // -----------------------------------------------------------------

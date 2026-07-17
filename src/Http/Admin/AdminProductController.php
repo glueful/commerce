@@ -100,7 +100,18 @@ final class AdminProductController
     public function update(Request $request, string $uuid): Response
     {
         try {
-            $this->catalog->updateProduct($this->context, $uuid, $this->input($request));
+            // A body-supplied `seller_uuid` (e.g. echoed back from a prior GET --
+            // every admin product payload carries the column since migration 011,
+            // marketplace switch or not) is silently dropped, never rejected,
+            // mirroring {@see \Glueful\Extensions\Commerce\Http\Seller\SellerCatalogController::update()}.
+            // Attribution only ever moves via the dedicated platform
+            // adoption/transfer operation; CatalogService::updateProduct()'s
+            // unconditional 422 guard stays intact as the backstop for any
+            // caller that reaches it with the key still present.
+            $changes = $this->input($request);
+            unset($changes['seller_uuid']);
+
+            $this->catalog->updateProduct($this->context, $uuid, $changes);
 
             return Response::success($this->product($uuid), 'Product updated');
         } catch (ValidationException $e) {

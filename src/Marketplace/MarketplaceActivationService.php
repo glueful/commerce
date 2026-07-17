@@ -9,6 +9,7 @@ use Glueful\Events\EventService;
 use Glueful\Extensions\Commerce\Catalog\ProductRepository;
 use Glueful\Extensions\Commerce\Events\MarketplaceActivated;
 use Glueful\Extensions\Commerce\Events\MarketplaceDeactivated;
+use Glueful\Extensions\Commerce\Support\UtcNowSql;
 use Glueful\Validation\ValidationException;
 
 /**
@@ -83,16 +84,21 @@ final class MarketplaceActivationService
                 throw new MarketplaceActivationException($remaining);
             }
 
-            $now = db($c)->getDriver()->formatDateTime();
-            db($c)->table('commerce_marketplace_settings')
-                ->where('tenant_uuid', '=', $tenant)
-                ->update([
-                    'status' => 'active',
-                    'default_seller_uuid' => $resolvedDefault,
-                    'activated_by' => $actor,
-                    'activated_at' => $now,
-                    'updated_at' => $now,
-                ]);
+            // UtcNowSql, not formatDateTime() (PHP-process tz + clock skew) and not
+            // bare CURRENT_TIMESTAMP (non-UTC pgsql sessions) -- same rationale as
+            // ProductRepository::markDeleted()/SellerRepository::claimRevision().
+            // `activated_at` is a forensic audit stamp only; reused for
+            // `updated_at` on the same row/write, matching the house one-`$utcNow`-
+            // per-write idiom.
+            $utcNow = UtcNowSql::expression(db($c)->getDriverName());
+            db($c)->table('commerce_marketplace_settings')->executeModification(
+                <<<SQL
+UPDATE commerce_marketplace_settings
+SET status = 'active', default_seller_uuid = ?, activated_by = ?, activated_at = {$utcNow}, updated_at = {$utcNow}
+WHERE tenant_uuid = ?
+SQL,
+                [$resolvedDefault, $actor, $tenant]
+            );
 
             return $this->requireSettingsRow($c, $tenant);
         });

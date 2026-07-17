@@ -31,6 +31,11 @@ use Glueful\Extensions\Commerce\Http\DTOs\ReportWindowQuery;
 use Glueful\Extensions\Commerce\Http\Storefront\CartController;
 use Glueful\Extensions\Commerce\Http\Storefront\ProductController;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
+use Glueful\Extensions\Commerce\Marketplace\MarketplaceMode;
+use Glueful\Extensions\Commerce\Marketplace\MarketplaceWorkspaceLock;
+use Glueful\Extensions\Commerce\Marketplace\SellerMembershipRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerService;
 use Glueful\Extensions\Commerce\Orders\CheckoutService;
 use Glueful\Extensions\Commerce\Orders\OrderNumberGenerator;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
@@ -39,6 +44,7 @@ use Glueful\Extensions\Commerce\Pricing\PricingEngine;
 use Glueful\Extensions\Commerce\Pricing\ShippingQuote;
 use Glueful\Extensions\Commerce\Pricing\TaxQuote;
 use Glueful\Extensions\Commerce\Reports\SalesReportRepository;
+use Glueful\Extensions\Commerce\Shipping\ShippingClassRepository;
 use Glueful\Extensions\Commerce\Support\DiagnosticsReport;
 use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
 use Glueful\Extensions\Commerce\Tests\Support\CommerceTestCase;
@@ -439,6 +445,89 @@ final class MarketplaceRegressionTest extends CommerceTestCase
         }
     }
 
+    // =====================================================================
+    // 5. Admin read-modify-write round trip: `seller_uuid` never breaks a
+    //    GET -> mutate -> PATCH-the-whole-object cycle (final-review Important
+    //    finding). Every admin product payload carries `seller_uuid` since
+    //    migration 011, master switch or not -- AdminProductController::update()
+    //    must silently drop it, never 422 a client that only ever echoed back
+    //    what it was given.
+    // =====================================================================
+
+    public function testAdminReadModifyWriteRoundTripSucceedsWithTheSwitchOff(): void
+    {
+        $product = $this->seedLegacyProduct('regress-rmw-off');
+        $controller = $this->adminController();
+
+        $getResponse = $controller->show(Request::create('/x'), $product['uuid']);
+        self::assertSame(200, $getResponse->getStatusCode());
+        $payload = json_decode((string) $getResponse->getContent(), true)['data'];
+        self::assertArrayHasKey('seller_uuid', $payload, 'sanity: migration 011 always carries the column');
+        self::assertNull($payload['seller_uuid']);
+
+        $patchResponse = $controller->update(
+            $this->patchRequest($this->productEditableFields($payload)),
+            $product['uuid']
+        );
+
+        self::assertSame(200, $patchResponse->getStatusCode());
+        $row = $this->connection->table('commerce_products')->where('uuid', '=', $product['uuid'])->first();
+        self::assertSame($product['name'], $row['name']);
+        self::assertSame($product['slug'], $row['slug']);
+        self::assertNull($row['seller_uuid']);
+    }
+
+    public function testAdminReadModifyWriteRoundTripEchoingTheSameSellerUuidSucceedsWhenAttributed(): void
+    {
+        $this->enableMarketplace();
+        $this->activateWorkspace(self::TENANT);
+        $seller = $this->seedActiveSeller('regress-rmw-owner');
+        $product = $this->seedAttributedProduct('regress-rmw-on', $seller['uuid']);
+        $controller = $this->marketplaceAdminController();
+
+        $getResponse = $controller->show(Request::create('/x'), $product['uuid']);
+        self::assertSame(200, $getResponse->getStatusCode());
+        $payload = json_decode((string) $getResponse->getContent(), true)['data'];
+        self::assertSame($seller['uuid'], $payload['seller_uuid']);
+
+        $patchResponse = $controller->update(
+            $this->patchRequest($this->productEditableFields($payload)),
+            $product['uuid']
+        );
+
+        self::assertSame(200, $patchResponse->getStatusCode());
+        $row = $this->connection->table('commerce_products')->where('uuid', '=', $product['uuid'])->first();
+        self::assertSame($seller['uuid'], $row['seller_uuid'], 'attribution must survive echoing it back unchanged');
+        self::assertSame($product['name'], $row['name']);
+    }
+
+    public function testAdminUpdateAttemptingADifferentSellerUuidIsIgnoredAttributionUnchanged(): void
+    {
+        $this->enableMarketplace();
+        $this->activateWorkspace(self::TENANT);
+        $owner = $this->seedActiveSeller('regress-rmw-real-owner');
+        $intruder = $this->seedActiveSeller('regress-rmw-other-seller');
+        $product = $this->seedAttributedProduct('regress-rmw-hijack', $owner['uuid']);
+        $controller = $this->marketplaceAdminController();
+
+        $patchResponse = $controller->update(
+            $this->patchRequest([
+                'name' => 'Regress RMW Hijack Renamed',
+                'seller_uuid' => $intruder['uuid'],
+            ]),
+            $product['uuid']
+        );
+
+        self::assertSame(200, $patchResponse->getStatusCode());
+        $row = $this->connection->table('commerce_products')->where('uuid', '=', $product['uuid'])->first();
+        self::assertSame(
+            $owner['uuid'],
+            $row['seller_uuid'],
+            'a body-supplied seller_uuid must never move attribution, even when the update otherwise succeeds'
+        );
+        self::assertSame('Regress RMW Hijack Renamed', $row['name'], 'every other field in the payload still applies');
+    }
+
     // -----------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------
@@ -463,6 +552,51 @@ final class MarketplaceRegressionTest extends CommerceTestCase
         return $product;
     }
 
+    /** @return array<string,mixed> product row attributed to $sellerUuid via the real create path */
+    private function seedAttributedProduct(string $slug, string $sellerUuid): array
+    {
+        return $this->marketplaceCatalog()->createProduct($this->context, [
+            'slug' => $slug,
+            'name' => $slug,
+            'type' => 'physical',
+            'status' => 'active',
+            'variants' => [[
+                'sku' => strtoupper(str_replace('-', '', $slug)),
+                'option_values' => [],
+                'price' => 1000,
+                'currency' => 'USD',
+            ]],
+        ], $sellerUuid);
+    }
+
+    /**
+     * The subset of an admin product GET payload a well-behaved client
+     * echoes back on a full-object PATCH -- the documented
+     * {@see \Glueful\Extensions\Commerce\Http\DTOs\UpdateProductData} fields
+     * plus `seller_uuid` (present on every payload since migration 011).
+     * Deliberately excludes internal bookkeeping columns
+     * (`id`/`catalog_revision`/`rating_sum`/timestamps) and the nested
+     * `variants` list, which live behind their own endpoints.
+     *
+     * @param array<string,mixed> $payload
+     * @return array<string,mixed>
+     */
+    private function productEditableFields(array $payload): array
+    {
+        return array_intersect_key($payload, array_flip([
+            'slug', 'name', 'description', 'type', 'status', 'options', 'metadata', 'tax_class', 'seller_uuid',
+        ]));
+    }
+
+    /** @param array<string,mixed> $body */
+    private function patchRequest(array $body): Request
+    {
+        $request = Request::create('/x', 'PATCH', [], [], [], [], json_encode($body, JSON_THROW_ON_ERROR));
+        $request->headers->set('Content-Type', 'application/json');
+
+        return $request;
+    }
+
     private function legacyCatalog(): CatalogService
     {
         return new CatalogService(
@@ -472,6 +606,53 @@ final class MarketplaceRegressionTest extends CommerceTestCase
             new StockRepository(),
             new ProductChildrenRepository()
         );
+    }
+
+    private function marketplaceCatalog(): CatalogService
+    {
+        return new CatalogService(
+            new ProductRepository(),
+            new VariantRepository(),
+            $this->fixedTenant(),
+            new StockRepository(),
+            new ProductChildrenRepository(),
+            new ShippingClassRepository(),
+            new MarketplaceMode(),
+            new MarketplaceWorkspaceLock(),
+            new SellerRepository()
+        );
+    }
+
+    private function enableMarketplace(): void
+    {
+        $this->context->mergeConfigDefaults('commerce', ['marketplace' => ['enabled' => true]]);
+    }
+
+    private function activateWorkspace(string $tenant): void
+    {
+        $this->connection->table('commerce_marketplace_settings')->insert([
+            'uuid' => substr('actv' . md5($tenant), 0, 12),
+            'tenant_uuid' => $tenant,
+            'status' => 'active',
+        ]);
+    }
+
+    /** @return array<string,mixed> */
+    private function seedActiveSeller(string $slug, string $tenant = self::TENANT): array
+    {
+        return $this->sellerService()->create(
+            $this->context,
+            $tenant,
+            $slug,
+            ucfirst(str_replace('-', ' ', $slug)),
+            null,
+            'ownerUser' . substr(md5($slug), 0, 3)
+        );
+    }
+
+    private function sellerService(): SellerService
+    {
+        return new SellerService(new SellerRepository(), new SellerMembershipRepository());
     }
 
     private function productController(): ProductController
@@ -495,6 +676,17 @@ final class MarketplaceRegressionTest extends CommerceTestCase
         return new AdminProductController(
             $this->context,
             $this->legacyCatalog(),
+            new ProductRepository(),
+            new VariantRepository(),
+            $this->fixedTenant()
+        );
+    }
+
+    private function marketplaceAdminController(): AdminProductController
+    {
+        return new AdminProductController(
+            $this->context,
+            $this->marketplaceCatalog(),
             new ProductRepository(),
             new VariantRepository(),
             $this->fixedTenant()

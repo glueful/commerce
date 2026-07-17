@@ -406,11 +406,18 @@ final class CatalogService
      * status and type changes against the same row claim used by bulk operations.
      *
      * Ordinary update NEVER touches `seller_uuid` (design spec §2.7): a
-     * `seller_uuid` key present ANYWHERE in $changes is rejected with 422
-     * -- never silently dropped, mirroring
+     * `seller_uuid` key present ANYWHERE in $changes is rejected with 422 at
+     * THIS layer -- the backstop for any caller that reaches here with the
+     * key still set, mirroring
      * {@see \Glueful\Extensions\Commerce\Marketplace\SellerService::update()}'s
      * `slug`-immutability guard. This check runs before any claim/query, so
-     * it costs nothing extra on the master-off fast path. Attribution is
+     * it costs nothing extra on the master-off fast path. Both HTTP entry
+     * points ({@see \Glueful\Extensions\Commerce\Http\Admin\AdminProductController::update()}
+     * and {@see \Glueful\Extensions\Commerce\Http\Seller\SellerCatalogController::update()})
+     * silently drop a body-supplied `seller_uuid` BEFORE calling this method
+     * -- a full-object read-modify-write PATCH (GET echoing the column back
+     * unchanged) must round-trip cleanly, not 422 -- so this guard is only
+     * ever tripped by a caller that bypasses both controllers. Attribution is
      * reached only via the create policy or the dedicated
      * {@see \Glueful\Extensions\Commerce\Marketplace\SellerAttributionService}
      * adoption/transfer operation.
