@@ -401,6 +401,41 @@ SQL,
         return $affected === 1;
     }
 
+    /**
+     * The marketplace checkout ownership snapshot (design spec §2.7): ONE
+     * batched read of the CURRENT `seller_uuid` for every distinct product a
+     * cart's priced lines reference -- {@see \Glueful\Extensions\Commerce\Orders\CheckoutService}
+     * calls this TWICE inside its checkout transaction (the pre-claim
+     * snapshot and the post-claim re-read) to detect ownership drift. Uses
+     * the framework's default live-row filtering (a soft-deleted product
+     * silently drops out of the result, same as {@see self::findLiveByUuid()});
+     * every product reaching this call already resolved live via
+     * `CartService::pricedLines()`, so a missing key here signals a genuine
+     * concurrent tombstone, not the normal case.
+     *
+     * @param list<string> $uuids
+     * @return array<string,?string> product_uuid => seller_uuid; a key
+     *   absent from the result means the product no longer resolves live
+     */
+    public function sellerSnapshot(ApplicationContext $context, string $tenant, array $uuids): array
+    {
+        if ($uuids === []) {
+            return [];
+        }
+
+        $rows = db($context)->table('commerce_products')
+            ->where('tenant_uuid', '=', $tenant)
+            ->whereIn('uuid', $uuids)
+            ->get();
+
+        $result = [];
+        foreach ($rows as $row) {
+            $result[(string) $row['uuid']] = $row['seller_uuid'] !== null ? (string) $row['seller_uuid'] : null;
+        }
+
+        return $result;
+    }
+
     /** @param array<string,mixed> $changes */
     public function update(ApplicationContext $context, string $tenant, string $uuid, array $changes): void
     {

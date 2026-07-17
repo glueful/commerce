@@ -87,6 +87,8 @@ use Glueful\Extensions\Commerce\Marketplace\MarketplaceWorkspaceLock;
 use Glueful\Extensions\Commerce\Marketplace\SellerAttributionService;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipService;
+use Glueful\Extensions\Commerce\Marketplace\SellerOrderPaymentConfirmation;
+use Glueful\Extensions\Commerce\Marketplace\SellerOrderRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerService;
 use Glueful\Extensions\Commerce\Orders\OrderNumberGenerator;
@@ -345,6 +347,14 @@ final class CommerceServiceProvider extends ServiceProvider
             ],
             SellerMembershipRepository::class => [
                 'class' => SellerMembershipRepository::class,
+                'shared' => true,
+            ],
+            SellerOrderRepository::class => [
+                'class' => SellerOrderRepository::class,
+                'shared' => true,
+            ],
+            SellerOrderPaymentConfirmation::class => [
+                'class' => SellerOrderPaymentConfirmation::class,
                 'shared' => true,
             ],
             SellerRoleAuthority::class => [
@@ -742,7 +752,11 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(OrderRepository::class),
             $container->get(DownloadRepository::class),
             self::makePaymentCollector($container),
-            self::tenantResolver($container)
+            self::tenantResolver($container),
+            $container->get(MarketplaceMode::class),
+            $container->get(SellerRepository::class),
+            $container->get(ProductRepository::class),
+            $container->get(SellerOrderRepository::class)
         );
     }
 

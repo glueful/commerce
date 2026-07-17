@@ -266,6 +266,18 @@ SQL,
      * finds; NULL means "not applicable", `[]` means "digital, no active
      * downloads at checkout time" (design spec §2). Never re-derived here.
      *
+     * Marketplace attribution (design spec §2.11/§3.1, MV2): the order line's
+     * OWN `uuid` persists the incoming cart-line `line_uuid` when present
+     * (`CartService::pricedLines()` stamps it, and it threads unmodified
+     * through `CheckoutService::placeOrder()`) rather than minting a fresh
+     * one — so the `taxByLine`/discount-allocation maps built against that
+     * same `line_uuid` address the real, immutable order line. `seller_uuid`
+     * (immutable seller snapshot), `discount_amount` (allocated value-discount
+     * share), and `tax_amount` (per-line merchandise tax, `line_detailed`
+     * only) are additive keys `CheckoutService`'s partition branch attaches
+     * to each line before calling `insert()`; a non-partitioned checkout
+     * never sets them, so they default to null/0 exactly as the schema does.
+     *
      * @param array<string,mixed> $order
      * @param array<string,mixed> $line
      * @return array<string,mixed>
@@ -278,7 +290,7 @@ SQL,
         $downloads = $line['downloads'] ?? null;
 
         return [
-            'uuid' => Utils::generateNanoID(),
+            'uuid' => (string) ($line['line_uuid'] ?? Utils::generateNanoID()),
             'order_uuid' => (string) $order['uuid'],
             'variant_uuid' => (string) $line['variant_uuid'],
             'product_name' => (string) $line['product_name'],
@@ -287,6 +299,9 @@ SQL,
             'unit_price' => $unitPrice,
             'quantity' => $quantity,
             'line_total' => $unitPrice * $quantity,
+            'seller_uuid' => isset($line['seller_uuid']) ? (string) $line['seller_uuid'] : null,
+            'discount_amount' => (int) ($line['discount_amount'] ?? 0),
+            'tax_amount' => (int) ($line['tax_amount'] ?? 0),
             'addons' => $addons === [] ? null : json_encode($addons, JSON_THROW_ON_ERROR),
             'downloads' => is_array($downloads) ? json_encode($downloads, JSON_THROW_ON_ERROR) : null,
         ];
