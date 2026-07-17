@@ -50,8 +50,44 @@ final class HttpDocumentationTest extends CommerceTestCase
 
     public function testEveryRegisteredCommerceRouteActionDeclaresOpenApiOperationAndResponse(): void
     {
+        $this->assertEveryCommerceRouteActionIsDocumented($this->freshRouter());
+    }
+
+    /**
+     * Marketplace MV1 (plan Task 5): with `commerce.marketplace.enabled`
+     * off (the default the test above walks), `routes.php` never registers
+     * the `/commerce/admin/marketplace/*` or `/commerce/seller/*` groups at
+     * all -- so the walk above cannot enforce `#[ApiOperation]`/
+     * `#[ApiResponse]` on any of their actions; there is nothing to find.
+     * This second pass flips the master switch ON before building a fresh
+     * `Router`, so every marketplace/seller route action added in MV1 gets
+     * the SAME documentation-gate enforcement as every pre-existing route.
+     */
+    public function testEveryCommerceRouteActionIsDocumentedWithMarketplaceEnabled(): void
+    {
+        $this->context->overrideConfig('commerce.marketplace.enabled', true);
         $router = $this->freshRouter();
+
         $actions = $this->commerceRouteActions($router);
+        $paths = array_map(static fn (array $route): string => (string) $route['path'], $router->getAllRoutes());
+
+        self::assertContains('/commerce/admin/marketplace/sellers', $paths);
+        self::assertNotSame(
+            [],
+            array_filter($paths, static fn (string $path): bool => str_starts_with($path, '/commerce/seller')),
+            'Expected at least one seller-scoped route once the master switch is on.'
+        );
+
+        $this->assertEveryCommerceRouteActionIsDocumented($router, $actions);
+    }
+
+    /**
+     * @param list<array{0: class-string, 1: string}>|null $actions pass a
+     *     pre-collected manifest to avoid walking the router twice
+     */
+    private function assertEveryCommerceRouteActionIsDocumented(Router $router, ?array $actions = null): void
+    {
+        $actions ??= $this->commerceRouteActions($router);
 
         self::assertNotSame(
             [],

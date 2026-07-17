@@ -19,6 +19,12 @@ use Glueful\Extensions\Commerce\Catalog\ReviewService;
 use Glueful\Extensions\Commerce\Catalog\TagRepository;
 use Glueful\Extensions\Commerce\Catalog\TagService;
 use Glueful\Extensions\Commerce\Catalog\VariantRepository;
+use Glueful\Extensions\Commerce\Marketplace\MarketplaceActivationService;
+use Glueful\Extensions\Commerce\Marketplace\MarketplaceMode;
+use Glueful\Extensions\Commerce\Marketplace\MarketplaceWorkspaceLock;
+use Glueful\Extensions\Commerce\Marketplace\SellerMembershipRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerService;
 use Glueful\Extensions\Commerce\Support\DiagnosticsReport;
 use Glueful\Extensions\Commerce\Tenancy\TenantAdopter;
 use Glueful\Extensions\Commerce\Tests\Support\CommerceTestCase;
@@ -298,6 +304,86 @@ final class CatalogBreadthTenancyTest extends CommerceTestCase
             $this->connection->table('commerce_product_attributes')
                 ->where('product_uuid', '=', $productB['uuid'])->count()
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Marketplace MV1 (design spec §2.1/§2.4/§6 "Tenancy": two-tenant
+    // isolation incl. same seller slug both tenants): sellers, memberships,
+    // and per-workspace settings are fully isolated per tenant, mirroring
+    // the same `tenantAAAA01`/`tenantBBBB02` convention this file already
+    // uses for the six catalog-breadth tables. `TenantAdopterTest` already
+    // covers the adopt-CLI rekey side for these three tables with the
+    // master switch off -- not repeated here.
+    // -----------------------------------------------------------------
+
+    public function testSameSellerSlugCoexistsAcrossTenantsWithFullyIsolatedMembershipsAndSettings(): void
+    {
+        $sellerA = $this->sellers()->create(
+            $this->context,
+            self::TENANT_A,
+            'shared-seller',
+            'Seller A',
+            null,
+            'ownerUserA01'
+        );
+        $sellerB = $this->sellers()->create(
+            $this->context,
+            self::TENANT_B,
+            'shared-seller',
+            'Seller B',
+            null,
+            'ownerUserB01'
+        );
+
+        self::assertNotSame($sellerA['uuid'], $sellerB['uuid']);
+        self::assertSame('shared-seller', $sellerA['slug']);
+        self::assertSame('shared-seller', $sellerB['slug']);
+
+        // Seller rows are fully tenant-scoped: tenant B cannot see or reach
+        // tenant A's seller through its own tenant-scoped lookup.
+        self::assertNull((new SellerRepository())->findByUuid($this->context, self::TENANT_B, $sellerA['uuid']));
+        try {
+            $this->sellers()->show($this->context, self::TENANT_B, $sellerA['uuid']);
+            self::fail('expected NotFoundException: a seller surface must be non-revealing across tenants');
+        } catch (NotFoundException $e) {
+        }
+
+        // Membership isolation: each seller's first-owner membership is
+        // scoped to its own tenant; the "my sellers" read for A's owner in
+        // tenant B's scope is empty even though the SAME user_uuid strings
+        // are never actually reused here -- the real proof is the seller
+        // row itself never crosses tenant boundaries (checked above) and
+        // each membership row carries its OWN tenant_uuid.
+        $membershipA = $this->connection->table('commerce_seller_memberships')
+            ->where('seller_uuid', '=', $sellerA['uuid'])->first();
+        $membershipB = $this->connection->table('commerce_seller_memberships')
+            ->where('seller_uuid', '=', $sellerB['uuid'])->first();
+        self::assertSame(self::TENANT_A, $membershipA['tenant_uuid']);
+        self::assertSame(self::TENANT_B, $membershipB['tenant_uuid']);
+        self::assertNotSame($membershipA['uuid'], $membershipB['uuid']);
+
+        // Settings isolation: activating tenant A's workspace must leave
+        // tenant B's workspace completely untouched.
+        $activation = new MarketplaceActivationService(
+            new MarketplaceWorkspaceLock(),
+            new SellerRepository(),
+            new ProductRepository()
+        );
+        $activation->activate($this->context, self::TENANT_A);
+
+        $mode = new MarketplaceMode();
+        self::assertTrue($mode->activeFor($this->context, self::TENANT_A));
+        self::assertFalse($mode->activeFor($this->context, self::TENANT_B));
+        self::assertNull(
+            $this->connection->table('commerce_marketplace_settings')
+                ->where('tenant_uuid', '=', self::TENANT_B)->first(),
+            'tenant B must gain no settings row at all from tenant A activating'
+        );
+    }
+
+    private function sellers(): SellerService
+    {
+        return new SellerService(new SellerRepository(), new SellerMembershipRepository());
     }
 
     // -----------------------------------------------------------------

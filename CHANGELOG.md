@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+**Theme: optional marketplace foundation (MV1)** — a two-level opt-in multi-seller
+layer (install master switch + per-workspace activation) with zero behavior change
+while off: two new migrations, no changes to any existing table or route.
+
+- Added an optional Marketplace MV1 foundation behind a new install master switch, `commerce.marketplace.enabled` (env `COMMERCE_MARKETPLACE_ENABLED`, default `false`). While off, the marketplace/seller route groups are never registered and ordinary Commerce request paths execute zero marketplace-table queries — existing API behavior stays byte-identical.
+- Added per-workspace activation (`commerce_marketplace_settings`) on top of the master switch, guarded by a catalog adoption gate: a workspace cannot activate while any product still lacks a seller, with an optional `default_seller_uuid` to bulk-adopt them. Deactivation is fail-closed and non-destructive — seller/membership/attribution data is untouched, and re-activation re-runs the same gate.
+- Added seller identity and lifecycle (`onboarding|active|suspended|closed`) and seller memberships with a fixed, code-defined role vocabulary (`seller_owner|seller_admin|seller_staff|seller_analyst`) behind a `SellerRoleAuthority` seam, plus an anti-lockout last-owner guard on every seller.
+- Added catalog ownership: a nullable `commerce_products.seller_uuid`, a dedicated guarded adoption/transfer operation (never a raw patch), and a global per-workspace lock order (workspace → sorted sellers → sorted products) that makes activation-vs-create, close-vs-create, and transfer races deterministic rather than merely test-observed — proven under real two-connection PostgreSQL races.
+- Added seller-scoped catalog/inventory/membership APIs (`/commerce/seller/...`) and platform marketplace administration APIs (`/commerce/admin/marketplace/...`), both config-gated behind the master switch and requiring an active workspace for seller-member operational surfaces; operator foundation surfaces (seller/membership CRUD, adoption, transfer) remain available while a workspace is inactive.
+- Added migrations `010_CreateMarketplaceSellerTables` and `011_AddSellerToProducts`. `DiagnosticsReport` and `commerce:tenancy:adopt` stay marketplace-aware regardless of the master switch, so data created before a switch-off remains coherent.
+- No storefront changes: public product payloads never carry `seller_uuid` in MV1.
+
 ## [1.1.0] - 2026-07-16 — Concurrency Hardening
 
 **Theme: transactional-core hardening** — atomic checkout claims, checked order
