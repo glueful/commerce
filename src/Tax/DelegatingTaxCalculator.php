@@ -48,7 +48,7 @@ final class DelegatingTaxCalculator implements TaxCalculator, LineTaxCalculator
     }
 
     /**
-     * @param list<array{taxable_amount:int, tax_class:string, quantity:int}> $taxableLines
+     * @param list<array{taxable_amount:int, tax_class:string, quantity:int, line_uuid:string}> $taxableLines
      * @param array<string,mixed> $shippingAddress
      */
     public function quoteDetailed(

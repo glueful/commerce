@@ -19,6 +19,13 @@ final class CreateCommerceOrderTables implements MigrationInterface
                 $table->string('order_number', 64);
                 $table->string('status', 24)->default('pending_payment');
                 $table->string('fulfillment_status', 16)->default('unfulfilled');
+                // Marketplace shared checkout (MV2): the partition marker is set once at
+                // placement to MarketplaceMode::activeFor(tenant) and never mutated -- all
+                // historical behavior branches on the order's own flag, not current
+                // activation (design spec §2.6). fulfillment_revision is the parent-side
+                // claim counter for the parent-then-children fulfillment rollup (§2.8).
+                $table->boolean('marketplace_partitioned')->default(false);
+                $table->bigInteger('fulfillment_revision')->default(0);
                 $table->string('tracking_ref', 191)->nullable();
                 $table->string('email', 255);
                 $table->string('user_uuid', 12)->nullable();
@@ -65,11 +72,19 @@ final class CreateCommerceOrderTables implements MigrationInterface
                 $table->bigInteger('unit_price');
                 $table->integer('quantity');
                 $table->bigInteger('line_total');
+                // Marketplace shared checkout (MV2, design spec §3.1): immutable seller
+                // snapshot (null for non-partitioned orders) plus this line's allocated
+                // share of the order-level discount and its per-line merchandise tax
+                // (populated only on the line_detailed tax-attribution path; else 0).
+                $table->string('seller_uuid', 12)->nullable();
+                $table->bigInteger('discount_amount')->default(0);
+                $table->bigInteger('tax_amount')->default(0);
                 $table->json('addons')->nullable();
                 $table->json('downloads')->nullable();
 
                 $table->unique('uuid');
                 $table->index('order_uuid');
+                $table->index(['order_uuid', 'seller_uuid']);
             });
         }
 

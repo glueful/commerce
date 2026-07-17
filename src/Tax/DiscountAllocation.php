@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Glueful\Extensions\Commerce\Tax;
 
+use Glueful\Extensions\Commerce\Support\LargestRemainder;
+
 /**
  * Pure discount-allocation logic feeding {@see \Glueful\Extensions\Commerce\Contracts\LineTaxCalculator}'s
  * per-line taxable base (design spec §5, pinned). For a `percentage`/`fixed`
@@ -24,7 +26,7 @@ final class DiscountAllocation
      * @param list<array<string,mixed>> $lines pricedLines() rows (unit_price,
      *   quantity, product_uuid, line_uuid, tax_class)
      * @param array<string,mixed>|null $discount
-     * @return list<array{taxable_amount:int, tax_class:string, quantity:int}>
+     * @return list<array{taxable_amount:int, tax_class:string, quantity:int, line_uuid:string}>
      */
     public static function taxableLines(array $lines, ?array $discount, int $discountTotal): array
     {
@@ -32,13 +34,15 @@ final class DiscountAllocation
 
         $taxableLines = [];
         foreach ($lines as $line) {
+            $lineUuid = (string) $line['line_uuid'];
             $extended = (int) $line['unit_price'] * (int) $line['quantity'];
-            $allocated = $allocations[(string) $line['line_uuid']] ?? 0;
+            $allocated = $allocations[$lineUuid] ?? 0;
 
             $taxableLines[] = [
                 'taxable_amount' => max(0, $extended - $allocated),
                 'tax_class' => (string) ($line['tax_class'] ?? 'standard'),
                 'quantity' => (int) $line['quantity'],
+                'line_uuid' => $lineUuid,
             ];
         }
 
@@ -81,40 +85,14 @@ final class DiscountAllocation
             return [];
         }
 
-        // Largest-remainder method: each eligible line's exact share is
-        // discountTotal * extended / base; floor it, track the remainder, and
-        // hand the leftover units (discountTotal - sum(floors)) one each to
-        // the lines with the largest remainders, ties broken by ascending
-        // line_uuid for determinism.
-        $shares = [];
-        $flooredTotal = 0;
-        foreach ($eligible as $line) {
-            $numerator = $discountTotal * $line['extended'];
-            $floor = intdiv($numerator, $base);
-            $shares[] = [
-                'line_uuid' => $line['line_uuid'],
-                'floor' => $floor,
-                'remainder' => $numerator % $base,
-            ];
-            $flooredTotal += $floor;
-        }
+        // Largest-remainder method (extracted to the generic helper): each
+        // eligible line's exact share is discountTotal * extended / base;
+        // the leftover units are handed one each to the lines with the
+        // largest remainders, ties broken by ascending line_uuid for
+        // determinism. Only lines with a non-zero allocation are returned.
+        $weights = array_column($eligible, 'extended', 'line_uuid');
+        $allocations = LargestRemainder::distribute($weights, $discountTotal);
 
-        $remainderUnits = $discountTotal - $flooredTotal;
-
-        usort($shares, static function (array $a, array $b): int {
-            return $a['remainder'] !== $b['remainder']
-                ? $b['remainder'] <=> $a['remainder']
-                : $a['line_uuid'] <=> $b['line_uuid'];
-        });
-
-        $result = [];
-        foreach ($shares as $index => $share) {
-            $amount = $share['floor'] + ($index < $remainderUnits ? 1 : 0);
-            if ($amount > 0) {
-                $result[$share['line_uuid']] = $amount;
-            }
-        }
-
-        return $result;
+        return array_filter($allocations, static fn (int $amount): bool => $amount > 0);
     }
 }

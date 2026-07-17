@@ -7,6 +7,7 @@ namespace Glueful\Extensions\Commerce\Tax;
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Contracts\LineTaxCalculator;
 use Glueful\Extensions\Commerce\Contracts\TaxCalculator;
+use Glueful\Extensions\Commerce\Pricing\TaxBreakdown;
 use Glueful\Extensions\Commerce\Pricing\TaxQuote;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 
@@ -76,7 +77,7 @@ final class DbTaxCalculator implements TaxCalculator, LineTaxCalculator
     }
 
     /**
-     * @param list<array{taxable_amount:int, tax_class:string, quantity:int}> $taxableLines
+     * @param list<array{taxable_amount:int, tax_class:string, quantity:int, line_uuid:string}> $taxableLines
      * @param array<string,mixed> $shippingAddress
      */
     public function quoteDetailed(
@@ -91,7 +92,18 @@ final class DbTaxCalculator implements TaxCalculator, LineTaxCalculator
         $total = 0;
         $applied = [];
 
+        // Accumulated separately from $total (design spec §2.4) so a
+        // TaxBreakdown can be attached below: taxByLine keyed by each
+        // line's line_uuid (merchandise tax only) and shippingTaxTotal
+        // tracked as its own scalar, rather than folded together.
+        $taxByLine = [];
+        $knownLineUuids = [];
+        $shippingTaxTotal = 0;
+
         foreach ($taxableLines as $line) {
+            $lineUuid = (string) $line['line_uuid'];
+            $knownLineUuids[] = $lineUuid;
+
             $taxableAmount = (int) $line['taxable_amount'];
             if ($taxableAmount <= 0) {
                 continue;
@@ -103,21 +115,25 @@ final class DbTaxCalculator implements TaxCalculator, LineTaxCalculator
                 continue;
             }
 
-            $total += $this->applyRate($taxableAmount, (int) $rate['rate_bps']);
+            $lineTax = $this->applyRate($taxableAmount, (int) $rate['rate_bps']);
+            $taxByLine[$lineUuid] = ($taxByLine[$lineUuid] ?? 0) + $lineTax;
+            $total += $lineTax;
             $applied[(string) $rate['uuid']] = (string) $rate['label'];
         }
 
         if ($shippingAmount > 0) {
             $shippingRate = $this->firstMatching($candidates, 'standard', true);
             if ($shippingRate !== null) {
-                $total += $this->applyRate($shippingAmount, (int) $shippingRate['rate_bps']);
+                $shippingTaxTotal = $this->applyRate($shippingAmount, (int) $shippingRate['rate_bps']);
+                $total += $shippingTaxTotal;
                 $applied[(string) $shippingRate['uuid']] = (string) $shippingRate['label'];
             }
         }
 
         $label = count($applied) === 1 ? (string) array_values($applied)[0] : 'Tax';
+        $breakdown = new TaxBreakdown($taxByLine, $shippingTaxTotal, $knownLineUuids);
 
-        return new TaxQuote($total, $label);
+        return new TaxQuote($total, $label, $breakdown);
     }
 
     /**

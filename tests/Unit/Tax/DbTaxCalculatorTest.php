@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Glueful\Extensions\Commerce\Tests\Unit\Tax;
 
+use Glueful\Extensions\Commerce\Pricing\TaxBreakdown;
 use Glueful\Extensions\Commerce\Tax\DbTaxCalculator;
 use Glueful\Extensions\Commerce\Tax\TaxRateOverflowException;
 use Glueful\Extensions\Commerce\Tax\TaxRateRepository;
@@ -327,6 +328,88 @@ final class DbTaxCalculatorTest extends CommerceTestCase
     }
 
     // -----------------------------------------------------------------
+    // TaxBreakdown attachment (design spec §2.4): quoteDetailed() always
+    // attaches a breakdown keyed by each input line's line_uuid, plus a
+    // separate shipping-tax scalar, reconciling exactly to quote->amount.
+    // -----------------------------------------------------------------
+
+    public function testQuoteDetailedAttachesBreakdownKeyedByLineUuidReconcilingToAmount(): void
+    {
+        $this->insertRate(['country' => 'US', 'rate_bps' => 1000, 'label' => 'Standard', 'class' => 'standard']);
+        $this->insertRate([
+            'country' => 'US', 'rate_bps' => 1000, 'label' => 'Standard', 'shipping_taxable' => true,
+        ]);
+
+        $lineA = $this->taxableLine(1000, 'standard', 'line-a');
+        $lineB = $this->taxableLine(2000, 'standard', 'line-b');
+
+        $quote = $this->calculator()->quoteDetailed(
+            $this->context,
+            [$lineA, $lineB],
+            500,
+            ['country' => 'US']
+        );
+
+        self::assertInstanceOf(TaxBreakdown::class, $quote->breakdown);
+        self::assertSame(['line-a' => 100, 'line-b' => 200], $quote->breakdown->taxByLine());
+        self::assertSame(50, $quote->breakdown->shippingTaxTotal());
+        self::assertSame($quote->amount, $quote->breakdown->total());
+        self::assertSame(350, $quote->amount);
+    }
+
+    public function testQuoteDetailedBreakdownAcrossDifferentTaxClasses(): void
+    {
+        $this->insertRate(['country' => 'US', 'rate_bps' => 1000, 'label' => 'Standard', 'class' => 'standard']);
+        $this->insertRate(['country' => 'US', 'rate_bps' => 500, 'label' => 'Reduced', 'class' => 'reduced']);
+
+        $standardLine = $this->taxableLine(1000, 'standard', 'line-standard');
+        $reducedLine = $this->taxableLine(1000, 'reduced', 'line-reduced');
+
+        $quote = $this->calculator()->quoteDetailed(
+            $this->context,
+            [$standardLine, $reducedLine],
+            0,
+            ['country' => 'US']
+        );
+
+        self::assertSame(
+            ['line-standard' => 100, 'line-reduced' => 50],
+            $quote->breakdown->taxByLine()
+        );
+        self::assertSame(0, $quote->breakdown->shippingTaxTotal());
+        self::assertSame(150, $quote->amount);
+        self::assertSame($quote->amount, $quote->breakdown->total());
+    }
+
+    public function testQuoteDetailedCanonicalizesLineWithNoMatchingRateToZeroInBreakdown(): void
+    {
+        $this->insertRate(['country' => 'US', 'rate_bps' => 1000, 'label' => 'Standard', 'class' => 'standard']);
+
+        $taxedLine = $this->taxableLine(1000, 'standard', 'line-taxed');
+        $untaxedLine = $this->taxableLine(1000, 'giftcard', 'line-untaxed');
+
+        $quote = $this->calculator()->quoteDetailed(
+            $this->context,
+            [$taxedLine, $untaxedLine],
+            0,
+            ['country' => 'US']
+        );
+
+        self::assertSame(['line-taxed' => 100, 'line-untaxed' => 0], $quote->breakdown->taxByLine());
+        self::assertSame(100, $quote->amount);
+    }
+
+    public function testQuoteDetailedWithNoLinesStillAttachesABreakdown(): void
+    {
+        $quote = $this->calculator()->quoteDetailed($this->context, [], 0, ['country' => 'US']);
+
+        self::assertInstanceOf(TaxBreakdown::class, $quote->breakdown);
+        self::assertSame([], $quote->breakdown->taxByLine());
+        self::assertSame(0, $quote->breakdown->shippingTaxTotal());
+        self::assertSame(0, $quote->breakdown->total());
+    }
+
+    // -----------------------------------------------------------------
     // Aggregate quote(): opaque standard base
     // -----------------------------------------------------------------
 
@@ -383,10 +466,19 @@ final class DbTaxCalculatorTest extends CommerceTestCase
         return new DbTaxCalculator(new TaxRateRepository(), new SentinelTenantResolver());
     }
 
-    /** @return array{taxable_amount:int, tax_class:string, quantity:int} */
-    private function taxableLine(int $taxableAmount, string $taxClass): array
+    private static int $lineCounter = 0;
+
+    /**
+     * @return array{taxable_amount:int, tax_class:string, quantity:int, line_uuid:string}
+     */
+    private function taxableLine(int $taxableAmount, string $taxClass, ?string $lineUuid = null): array
     {
-        return ['taxable_amount' => $taxableAmount, 'tax_class' => $taxClass, 'quantity' => 1];
+        return [
+            'taxable_amount' => $taxableAmount,
+            'tax_class' => $taxClass,
+            'quantity' => 1,
+            'line_uuid' => $lineUuid ?? 'line-' . (++self::$lineCounter),
+        ];
     }
 
     /** @param array<string,mixed> $overrides */

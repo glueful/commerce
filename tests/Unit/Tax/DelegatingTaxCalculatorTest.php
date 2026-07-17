@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Glueful\Extensions\Commerce\Tests\Unit\Tax;
 
+use Glueful\Extensions\Commerce\Pricing\TaxBreakdown;
 use Glueful\Extensions\Commerce\Tax\DbTaxCalculator;
 use Glueful\Extensions\Commerce\Tax\DelegatingTaxCalculator;
 use Glueful\Extensions\Commerce\Tax\FlatRateTaxCalculator;
@@ -66,6 +67,25 @@ final class DelegatingTaxCalculatorTest extends CommerceTestCase
         self::assertEquals($expected, $actual);
     }
 
+    /**
+     * Attribution-method detection (design spec §2.4) is by breakdown
+     * PRESENCE -- the flat-rate fallback never attaches one, even though
+     * `DelegatingTaxCalculator` implements `LineTaxCalculator` throughout.
+     */
+    public function testNoRateRowsQuoteDetailedReturnsNullBreakdownOnFlatFallback(): void
+    {
+        $this->context->mergeConfigDefaults('commerce', ['tax' => ['flat_rate_bps' => 825]]);
+
+        $taxableLines = [
+            ['taxable_amount' => 1000, 'tax_class' => 'standard', 'quantity' => 1, 'line_uuid' => 'line-a'],
+            ['taxable_amount' => 2000, 'tax_class' => 'reduced', 'quantity' => 2, 'line_uuid' => 'line-b'],
+        ];
+
+        $actual = $this->delegator()->quoteDetailed($this->context, $taxableLines, 500, ['country' => 'US']);
+
+        self::assertNull($actual->breakdown);
+    }
+
     // -----------------------------------------------------------------
     // Rate rows present: delegates to Db even when flat config would also
     // produce a result
@@ -87,11 +107,31 @@ final class DelegatingTaxCalculatorTest extends CommerceTestCase
         $this->context->mergeConfigDefaults('commerce', ['tax' => ['flat_rate_bps' => 999]]);
         $this->insertRate(['country' => 'US', 'rate_bps' => 1000, 'label' => 'DB Standard']);
 
-        $taxableLines = [['taxable_amount' => 1000, 'tax_class' => 'standard', 'quantity' => 1]];
+        $taxableLines = [
+            ['taxable_amount' => 1000, 'tax_class' => 'standard', 'quantity' => 1, 'line_uuid' => 'line-a'],
+        ];
         $quote = $this->delegator()->quoteDetailed($this->context, $taxableLines, 0, ['country' => 'US']);
 
         self::assertSame(100, $quote->amount);
         self::assertSame('DB Standard', $quote->label);
+    }
+
+    /**
+     * The inverse of the flat-fallback case: once the tenant has rate rows,
+     * the delegator's DB path attaches a real breakdown.
+     */
+    public function testRateRowsPresentQuoteDetailedReturnsNonNullBreakdown(): void
+    {
+        $this->insertRate(['country' => 'US', 'rate_bps' => 1000, 'label' => 'DB Standard']);
+
+        $taxableLines = [
+            ['taxable_amount' => 1000, 'tax_class' => 'standard', 'quantity' => 1, 'line_uuid' => 'line-a'],
+        ];
+        $quote = $this->delegator()->quoteDetailed($this->context, $taxableLines, 0, ['country' => 'US']);
+
+        self::assertInstanceOf(TaxBreakdown::class, $quote->breakdown);
+        self::assertSame(['line-a' => 100], $quote->breakdown->taxByLine());
+        self::assertSame($quote->amount, $quote->breakdown->total());
     }
 
     /**
