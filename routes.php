@@ -29,6 +29,9 @@ use Glueful\Extensions\Commerce\Http\Admin\AdminStockController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminTagController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminTaxRateController;
 use Glueful\Extensions\Commerce\Http\Admin\MarketplaceAdminController;
+use Glueful\Extensions\Commerce\Http\Seller\SellerCatalogController;
+use Glueful\Extensions\Commerce\Http\Seller\SellerInventoryController;
+use Glueful\Extensions\Commerce\Http\Seller\SellerMembershipController;
 use Glueful\Routing\Router;
 
 /** @var Router $router */
@@ -306,5 +309,70 @@ if ($marketplaceEnabled) {
             '/marketplace/sellers/{uuid}/memberships/{userUuid}',
             [MarketplaceAdminController::class, 'destroyMembership']
         )->middleware($write);
+
+        // Activation + catalog attribution (Task 3, design spec §2.2/§2.7):
+        // also OPERATOR FOUNDATION surfaces -- activation config precedes
+        // activation itself, and adopt/transfer are the promised
+        // inactive-mode repair surface (design spec §2.3) -- so, like the
+        // seller/membership routes above, there is no additional
+        // `activeFor()` gate here either.
+        $router->post('/marketplace/activate', [MarketplaceAdminController::class, 'activate'])
+            ->middleware($write);
+        $router->post('/marketplace/deactivate', [MarketplaceAdminController::class, 'deactivate'])
+            ->middleware($write);
+        $router->post(
+            '/marketplace/products/{uuid}/assign',
+            [MarketplaceAdminController::class, 'assignSeller']
+        )->middleware($write);
+    });
+}
+
+// Seller-scoped surfaces (design spec §2.5/§2.8, MV1 Task 4): config-gated the
+// SAME way as the marketplace admin group above. `auth` [+ `tenant` when
+// tenancy is enabled] composes EXACTLY like the admin/account groups do --
+// `array_merge(['auth'], $tenantMiddleware)` -- with `commerce_seller:<capability>`
+// added per route (sentinel mode: `auth -> commerce_seller` only, no tenant
+// hop). `mine` carries NO `commerce_seller` middleware: it has no
+// `{sellerUuid}` route resource to authorize against, it lists the caller's
+// OWN active memberships.
+if ($marketplaceEnabled) {
+    $router->group([
+        'prefix' => '/commerce/seller',
+        'middleware' => array_merge(['auth'], $tenantMiddleware),
+    ], function (Router $router): void {
+        $catalogRead = 'commerce_seller:commerce.seller.catalog.read';
+        $catalogWrite = 'commerce_seller:commerce.seller.catalog.write';
+        $inventoryRead = 'commerce_seller:commerce.seller.inventory.read';
+        $inventoryWrite = 'commerce_seller:commerce.seller.inventory.write';
+        $membersManage = 'commerce_seller:commerce.seller.members.manage';
+
+        $router->get('/mine', [SellerMembershipController::class, 'mine']);
+
+        $router->get('/{sellerUuid}/products', [SellerCatalogController::class, 'index'])
+            ->middleware($catalogRead);
+        $router->post('/{sellerUuid}/products', [SellerCatalogController::class, 'store'])
+            ->middleware($catalogWrite);
+        $router->get('/{sellerUuid}/products/{uuid}', [SellerCatalogController::class, 'show'])
+            ->middleware($catalogRead);
+        $router->patch('/{sellerUuid}/products/{uuid}', [SellerCatalogController::class, 'update'])
+            ->middleware($catalogWrite);
+        $router->post('/{sellerUuid}/products/{uuid}/variants', [SellerCatalogController::class, 'storeVariant'])
+            ->middleware($catalogWrite);
+
+        $router->get('/{sellerUuid}/variants/{variantUuid}/stock', [SellerInventoryController::class, 'show'])
+            ->middleware($inventoryRead);
+        $router->post(
+            '/{sellerUuid}/variants/{variantUuid}/stock/adjust',
+            [SellerInventoryController::class, 'adjust']
+        )->middleware($inventoryWrite);
+
+        $router->get('/{sellerUuid}/members', [SellerMembershipController::class, 'index'])
+            ->middleware($membersManage);
+        $router->post('/{sellerUuid}/members', [SellerMembershipController::class, 'store'])
+            ->middleware($membersManage);
+        $router->patch('/{sellerUuid}/members/{userUuid}', [SellerMembershipController::class, 'update'])
+            ->middleware($membersManage);
+        $router->delete('/{sellerUuid}/members/{userUuid}', [SellerMembershipController::class, 'destroy'])
+            ->middleware($membersManage);
     });
 }

@@ -87,6 +87,42 @@ final class SellerMembershipRepository
     }
 
     /**
+     * The "my sellers" read (design spec §2.5, MV1 Task 4): every ACTIVE
+     * membership for $userUuid in $tenant, via the `(tenant_uuid, user_uuid)`
+     * index (migration 010) -- the one read in this repository predicated by
+     * the CALLER's own principal rather than a seller_uuid.
+     *
+     * @return array{items: list<array<string,mixed>>, total: int}
+     */
+    public function listActiveForUser(
+        ApplicationContext $context,
+        string $tenant,
+        string $userUuid,
+        int $page,
+        int $perPage
+    ): array {
+        $count = db($context)->table('commerce_seller_memberships')
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('user_uuid', '=', $userUuid)
+            ->where('status', '=', 'active');
+        $rows = db($context)->table('commerce_seller_memberships')
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('user_uuid', '=', $userUuid)
+            ->where('status', '=', 'active');
+
+        $items = $rows->orderBy('created_at', 'ASC')
+            ->orderBy('uuid', 'ASC')
+            ->limit($perPage)
+            ->offset(max(0, $page - 1) * $perPage)
+            ->get();
+
+        return [
+            'items' => $items,
+            'total' => $count->count(),
+        ];
+    }
+
+    /**
      * Bulk-revokes every currently-active membership for the seller (design
      * spec §2.4: close "atomically closes the seller AND deactivates all of
      * its memberships"). MUST run inside the SAME transaction as the

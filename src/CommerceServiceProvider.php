@@ -60,6 +60,10 @@ use Glueful\Extensions\Commerce\Http\Admin\AdminStockController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminTagController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminTaxRateController;
 use Glueful\Extensions\Commerce\Http\Admin\MarketplaceAdminController;
+use Glueful\Extensions\Commerce\Http\Middleware\SellerMemberMiddleware;
+use Glueful\Extensions\Commerce\Http\Seller\SellerCatalogController;
+use Glueful\Extensions\Commerce\Http\Seller\SellerInventoryController;
+use Glueful\Extensions\Commerce\Http\Seller\SellerMembershipController;
 use Glueful\Extensions\Commerce\Http\Storefront\AccountAddressController;
 use Glueful\Extensions\Commerce\Http\Storefront\CartController;
 use Glueful\Extensions\Commerce\Http\Storefront\CategoryController;
@@ -77,8 +81,10 @@ use Glueful\Extensions\Commerce\Mail\NotificationCommerceMailer;
 use Glueful\Extensions\Commerce\Mail\OrderMailListener;
 use Glueful\Extensions\Commerce\Marketplace\Contracts\SellerRoleAuthority;
 use Glueful\Extensions\Commerce\Marketplace\FixedSellerRoleAuthority;
+use Glueful\Extensions\Commerce\Marketplace\MarketplaceActivationService;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceMode;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceWorkspaceLock;
+use Glueful\Extensions\Commerce\Marketplace\SellerAttributionService;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipService;
 use Glueful\Extensions\Commerce\Marketplace\SellerRepository;
@@ -353,8 +359,36 @@ final class CommerceServiceProvider extends ServiceProvider
                 'factory' => [self::class, 'makeSellerMembershipService'],
                 'shared' => true,
             ],
+            SellerAttributionService::class => [
+                'factory' => [self::class, 'makeSellerAttributionService'],
+                'shared' => true,
+            ],
+            MarketplaceActivationService::class => [
+                'factory' => [self::class, 'makeMarketplaceActivationService'],
+                'shared' => true,
+            ],
             MarketplaceAdminController::class => [
                 'factory' => [self::class, 'makeMarketplaceAdminController'],
+                'shared' => true,
+            ],
+            'commerce_seller' => [
+                'factory' => [self::class, 'makeSellerMemberMiddleware'],
+                'shared' => true,
+            ],
+            SellerMemberMiddleware::class => [
+                'factory' => [self::class, 'makeSellerMemberMiddleware'],
+                'shared' => true,
+            ],
+            SellerCatalogController::class => [
+                'factory' => [self::class, 'makeSellerCatalogController'],
+                'shared' => true,
+            ],
+            SellerInventoryController::class => [
+                'factory' => [self::class, 'makeSellerInventoryController'],
+                'shared' => true,
+            ],
+            SellerMembershipController::class => [
+                'factory' => [self::class, 'makeSellerMembershipController'],
                 'shared' => true,
             ],
             ExpiryService::class => [
@@ -533,7 +567,10 @@ final class CommerceServiceProvider extends ServiceProvider
             self::tenantResolver($container),
             $container->get(StockRepository::class),
             $container->get(ProductChildrenRepository::class),
-            $container->get(ShippingClassRepository::class)
+            $container->get(ShippingClassRepository::class),
+            $container->get(MarketplaceMode::class),
+            $container->get(MarketplaceWorkspaceLock::class),
+            $container->get(SellerRepository::class)
         );
     }
 
@@ -616,7 +653,9 @@ final class CommerceServiceProvider extends ServiceProvider
     {
         return new InventoryService(
             $container->get(StockRepository::class),
-            self::tenantResolver($container)
+            self::tenantResolver($container),
+            $container->get(VariantRepository::class),
+            $container->get(ProductRepository::class)
         );
     }
 
@@ -1125,12 +1164,71 @@ final class CommerceServiceProvider extends ServiceProvider
         );
     }
 
+    public static function makeSellerAttributionService(ContainerInterface $container): SellerAttributionService
+    {
+        return new SellerAttributionService(
+            $container->get(MarketplaceWorkspaceLock::class),
+            $container->get(SellerRepository::class),
+            $container->get(ProductRepository::class)
+        );
+    }
+
+    public static function makeMarketplaceActivationService(
+        ContainerInterface $container
+    ): MarketplaceActivationService {
+        return new MarketplaceActivationService(
+            $container->get(MarketplaceWorkspaceLock::class),
+            $container->get(SellerRepository::class),
+            $container->get(ProductRepository::class)
+        );
+    }
+
     public static function makeMarketplaceAdminController(ContainerInterface $container): MarketplaceAdminController
     {
         return new MarketplaceAdminController(
             $container->get(ApplicationContext::class),
             $container->get(SellerService::class),
             $container->get(SellerMembershipService::class),
+            self::tenantResolver($container),
+            $container->get(MarketplaceActivationService::class),
+            $container->get(SellerAttributionService::class)
+        );
+    }
+
+    public static function makeSellerMemberMiddleware(ContainerInterface $container): SellerMemberMiddleware
+    {
+        return new SellerMemberMiddleware(
+            $container->get(ApplicationContext::class),
+            $container->get(SellerRepository::class),
+            $container->get(SellerMembershipRepository::class),
+            $container->get(SellerRoleAuthority::class),
+            $container->get(MarketplaceMode::class),
+            self::tenantResolver($container)
+        );
+    }
+
+    public static function makeSellerCatalogController(ContainerInterface $container): SellerCatalogController
+    {
+        return new SellerCatalogController(
+            $container->get(ApplicationContext::class),
+            $container->get(CatalogService::class)
+        );
+    }
+
+    public static function makeSellerInventoryController(ContainerInterface $container): SellerInventoryController
+    {
+        return new SellerInventoryController(
+            $container->get(ApplicationContext::class),
+            $container->get(InventoryService::class)
+        );
+    }
+
+    public static function makeSellerMembershipController(ContainerInterface $container): SellerMembershipController
+    {
+        return new SellerMembershipController(
+            $container->get(ApplicationContext::class),
+            $container->get(SellerMembershipService::class),
+            $container->get(SellerMembershipRepository::class),
             self::tenantResolver($container)
         );
     }

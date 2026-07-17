@@ -294,6 +294,61 @@ SQL,
     }
 
     /**
+     * Seller-scoped admin-shaped list projection (design spec §2.8, MV1 Task
+     * 4): the SAME status/type/q filter set {@see self::paginatedForAdmin()}
+     * supports, plus a mandatory `seller_uuid` predicate baked into BOTH the
+     * count and row queries -- a seller can never see another seller's
+     * products through this read, regardless of filters. Ordered
+     * `created_at DESC, uuid ASC`, same tie-break as the admin projection.
+     *
+     * @param array<string,mixed> $filters 'status'/'type' (exact) and/or 'q' (literal substring on name)
+     * @return array{items: list<array<string,mixed>>, total: int}
+     */
+    public function paginatedForSeller(
+        ApplicationContext $context,
+        string $tenant,
+        string $sellerUuid,
+        array $filters,
+        int $page,
+        int $perPage
+    ): array {
+        $count = db($context)->table('commerce_products')
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('seller_uuid', '=', $sellerUuid)
+            ->whereRaw('deleted_at IS NULL');
+        $rows = db($context)->table('commerce_products')
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('seller_uuid', '=', $sellerUuid)
+            ->whereRaw('deleted_at IS NULL');
+
+        if (isset($filters['status']) && (string) $filters['status'] !== '') {
+            $count->where('status', '=', (string) $filters['status']);
+            $rows->where('status', '=', (string) $filters['status']);
+        }
+        if (isset($filters['type']) && (string) $filters['type'] !== '') {
+            $count->where('type', '=', (string) $filters['type']);
+            $rows->where('type', '=', (string) $filters['type']);
+        }
+        $q = isset($filters['q']) ? trim((string) $filters['q']) : '';
+        if ($q !== '') {
+            $pattern = LiteralLike::pattern($q);
+            $count->whereRaw("LOWER(name) LIKE ? ESCAPE '!'", [$pattern]);
+            $rows->whereRaw("LOWER(name) LIKE ? ESCAPE '!'", [$pattern]);
+        }
+
+        $items = $rows->orderBy('created_at', 'DESC')
+            ->orderBy('uuid', 'ASC')
+            ->limit($perPage)
+            ->offset(max(0, $page - 1) * $perPage)
+            ->get();
+
+        return [
+            'items' => array_map(fn (array $row): array => $this->decodeJson($row), $items),
+            'total' => $count->count(),
+        ];
+    }
+
+    /**
      * Affected-row-checked serialization primitive shared by every product-scoped
      * relationship/set-list mutation (media, categories, tags, attributes, children):
      * claim first via this `catalog_revision` bump, then re-read state and enforce
@@ -355,6 +410,67 @@ SQL,
             ->where('tenant_uuid', '=', $tenant)
             ->where('uuid', '=', $uuid)
             ->update($this->encodeJson($changes));
+    }
+
+    /**
+     * The activation adoption gate read (design spec §2.2): count of live
+     * (non-deleted) products for the tenant that carry no `seller_uuid`.
+     * {@see \Glueful\Extensions\Commerce\Marketplace\MarketplaceActivationService::activate()}
+     * calls this AFTER any optional default-seller bulk-adopt -- a non-zero
+     * result blocks activation.
+     */
+    public function unassignedCount(ApplicationContext $context, string $tenant): int
+    {
+        return db($context)->table('commerce_products')
+            ->where('tenant_uuid', '=', $tenant)
+            ->whereRaw('deleted_at IS NULL')
+            ->whereRaw('seller_uuid IS NULL')
+            ->count();
+    }
+
+    /**
+     * Sorted uuid list of every live, unassigned product for the tenant --
+     * design spec §4 lock order ("product catalog_revision claims sorted by
+     * product UUID"): {@see \Glueful\Extensions\Commerce\Marketplace\MarketplaceActivationService::activate()}
+     * claims each of these, in this exact order, before running
+     * {@see self::bulkAdoptUnassigned()}.
+     *
+     * @return list<string>
+     */
+    public function liveUnassignedUuids(ApplicationContext $context, string $tenant): array
+    {
+        $rows = db($context)->table('commerce_products')
+            ->where('tenant_uuid', '=', $tenant)
+            ->whereRaw('deleted_at IS NULL')
+            ->whereRaw('seller_uuid IS NULL')
+            ->orderBy('uuid', 'ASC')
+            ->get();
+
+        return array_map(static fn (array $row): string => (string) $row['uuid'], $rows);
+    }
+
+    /**
+     * The activation bulk-adopt write (design spec §2.2): assigns EVERY
+     * currently-unassigned, live product for the tenant to $sellerUuid in
+     * ONE statement. MUST run inside the SAME transaction as -- and after --
+     * the per-product `catalog_revision` claims {@see self::liveUnassignedUuids()}
+     * enumerated; those claims are what serialize this write against any
+     * other product-scoped mutation racing the same rows (design spec §4
+     * lock order). This write does not bump `catalog_revision` again -- the
+     * claim already did that exactly once per product.
+     */
+    public function bulkAdoptUnassigned(ApplicationContext $context, string $tenant, string $sellerUuid): int
+    {
+        $utcNow = UtcNowSql::expression(db($context)->getDriverName());
+
+        return db($context)->table('commerce_products')->executeModification(
+            <<<SQL
+UPDATE commerce_products
+SET seller_uuid = ?, updated_at = {$utcNow}
+WHERE tenant_uuid = ? AND seller_uuid IS NULL AND deleted_at IS NULL
+SQL,
+            [$sellerUuid, $tenant]
+        );
     }
 
     /**

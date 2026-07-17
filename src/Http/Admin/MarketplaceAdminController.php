@@ -5,12 +5,18 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Commerce\Http\Admin;
 
 use Glueful\Bootstrap\ApplicationContext;
+use Glueful\Extensions\Commerce\Http\DTOs\ActivateMarketplaceData;
+use Glueful\Extensions\Commerce\Http\DTOs\AssignSellerData;
 use Glueful\Extensions\Commerce\Http\DTOs\ChangeSellerMembershipRoleData;
 use Glueful\Extensions\Commerce\Http\DTOs\CreateSellerData;
 use Glueful\Extensions\Commerce\Http\DTOs\GrantSellerMembershipData;
 use Glueful\Extensions\Commerce\Http\DTOs\SellerListQuery;
 use Glueful\Extensions\Commerce\Http\DTOs\SellerMembershipListQuery;
 use Glueful\Extensions\Commerce\Http\DTOs\UpdateSellerData;
+use Glueful\Extensions\Commerce\Marketplace\MarketplaceActivationException;
+use Glueful\Extensions\Commerce\Marketplace\MarketplaceActivationService;
+use Glueful\Extensions\Commerce\Marketplace\SellerAttributionException;
+use Glueful\Extensions\Commerce\Marketplace\SellerAttributionService;
 use Glueful\Extensions\Commerce\Marketplace\SellerLifecycleException;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipException;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipService;
@@ -32,8 +38,13 @@ use Symfony\Component\HttpFoundation\Request;
  * spec §2.3: "configuration precedes activation, which is what makes first
  * activation possible") -- so nothing here checks
  * `MarketplaceMode::activeFor()`; only the route group's registration is
- * gated on the install master switch (see routes.php). Activation/adoption/
- * transfer endpoints land in Task 3.
+ * gated on the install master switch (see routes.php).
+ *
+ * Activation/deactivation/adoption/transfer (Task 3) delegate to
+ * {@see MarketplaceActivationService}/{@see SellerAttributionService} --
+ * both ALSO operator-foundation surfaces (activation config precedes
+ * activation itself; adoption/transfer are the promised inactive-mode
+ * repair surface, design spec §2.3).
  */
 final class MarketplaceAdminController
 {
@@ -45,12 +56,16 @@ final class MarketplaceAdminController
         private ?SellerService $sellers = null,
         private ?SellerMembershipService $memberships = null,
         private ?CurrentTenantResolver $tenants = null,
+        private ?MarketplaceActivationService $activation = null,
+        private ?SellerAttributionService $attribution = null,
     ) {
         $this->sellers ??= app($context, SellerService::class);
         $this->memberships ??= app($context, SellerMembershipService::class);
         $this->tenants ??= container($context)->has(CurrentTenantResolver::class)
             ? container($context)->get(CurrentTenantResolver::class)
             : new SentinelTenantResolver();
+        $this->activation ??= app($context, MarketplaceActivationService::class);
+        $this->attribution ??= app($context, SellerAttributionService::class);
     }
 
     #[ApiOperation(summary: 'List marketplace sellers', tags: ['Commerce Admin', 'Marketplace'])]
@@ -268,6 +283,69 @@ final class MarketplaceAdminController
 
             return Response::noContent();
         } catch (SellerMembershipException $e) {
+            return Response::error($e->getMessage(), 409);
+        }
+    }
+
+    #[ApiOperation(summary: 'Activate marketplace mode for this workspace', tags: ['Commerce Admin', 'Marketplace'])]
+    #[ApiResponse(200, description: 'Marketplace activated')]
+    #[ApiResponse(409, description: 'Unassigned products remain, or default_seller_uuid is not active')]
+    #[ApiResponse(422, description: 'default_seller_uuid does not reference an existing seller')]
+    public function activate(ActivateMarketplaceData $input, Request $request): Response
+    {
+        try {
+            $tenant = $this->tenants->tenantUuid($this->context);
+            $settings = $this->activation->activate(
+                $this->context,
+                $tenant,
+                $input->default_seller_uuid,
+                $this->actorUuid($request)
+            );
+
+            return Response::success($settings, 'Marketplace activated');
+        } catch (ValidationException $e) {
+            return Response::validation($e->firstErrors());
+        } catch (MarketplaceActivationException $e) {
+            return Response::error($e->getMessage(), 409, ['unassigned_count' => $e->unassignedCount]);
+        } catch (SellerAttributionException $e) {
+            return Response::error($e->getMessage(), 409);
+        }
+    }
+
+    #[ApiOperation(
+        summary: 'Deactivate marketplace mode for this workspace',
+        tags: ['Commerce Admin', 'Marketplace']
+    )]
+    #[ApiResponse(200, description: 'Marketplace deactivated (non-destructive)')]
+    public function deactivate(Request $request): Response
+    {
+        $tenant = $this->tenants->tenantUuid($this->context);
+        $settings = $this->activation->deactivate($this->context, $tenant, $this->actorUuid($request));
+
+        return Response::success($settings, 'Marketplace deactivated');
+    }
+
+    #[ApiOperation(summary: 'Adopt or transfer a product to a seller', tags: ['Commerce Admin', 'Marketplace'])]
+    #[ApiResponse(200, description: 'Product attributed (adoption or transfer)')]
+    #[ApiResponse(404, description: 'Product not found')]
+    #[ApiResponse(409, description: 'Target seller not active, or ownership changed since it was read')]
+    #[ApiResponse(422, description: 'seller_uuid does not reference an existing seller in this tenant')]
+    public function assignSeller(AssignSellerData $input, Request $request, string $uuid): Response
+    {
+        try {
+            $tenant = $this->tenants->tenantUuid($this->context);
+            $product = $this->attribution->assign(
+                $this->context,
+                $tenant,
+                $uuid,
+                $input->seller_uuid,
+                $this->actorUuid($request)
+            );
+
+            return Response::success($product, 'Product attributed');
+        } catch (ValidationException $e) {
+            return Response::validation($e->firstErrors());
+        } catch (SellerAttributionException $e) {
             return Response::error($e->getMessage(), 409);
         }
     }

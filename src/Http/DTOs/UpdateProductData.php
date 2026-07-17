@@ -14,6 +14,14 @@ use Glueful\Validation\Contracts\RequestData;
  * typed DTO cannot express, only the raw-body path
  * {@see \Glueful\Extensions\Commerce\Catalog\CatalogService::updateProduct()}
  * actually implements.
+ *
+ * `seller_uuid` is deliberately ABSENT here for the same reason: the raw-body
+ * path is what actually enforces the rule (design spec §2.7) --
+ * {@see \Glueful\Extensions\Commerce\Catalog\CatalogService::updateProduct()}
+ * rejects a `seller_uuid` key present ANYWHERE in the raw payload with 422,
+ * mirroring {@see \Glueful\Extensions\Commerce\Marketplace\SellerService::update()}'s
+ * `slug`-immutability guard. Ordinary update never touches catalog
+ * attribution.
  */
 final class UpdateProductData implements RequestData
 {

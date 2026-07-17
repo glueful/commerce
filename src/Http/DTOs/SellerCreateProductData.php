@@ -7,18 +7,21 @@ namespace Glueful\Extensions\Commerce\Http\DTOs;
 use Glueful\Validation\Attributes\ArrayOf;
 use Glueful\Validation\Attributes\Rule;
 use Glueful\Validation\Contracts\RequestData;
-use Glueful\Validation\Contracts\ValidatesSelf;
 
 /**
- * `seller_uuid` (design spec §2.7): NEVER accepted on the ordinary admin
- * create endpoint -- catalog attribution comes only via the marketplace
- * create policy (`CatalogService::createProduct()`'s own $sellerUuid
- * parameter, never derived from this body) or the dedicated adoption/
- * transfer operation. The property below exists ONLY so a client-supplied
- * `seller_uuid` is rejected with 422 (see {@see self::validate()}) instead
- * of being silently ignored.
+ * `POST /commerce/seller/{sellerUuid}/products` request body (design spec
+ * §2.7/§2.8, MV1 Task 4): the SAME shape as {@see CreateProductData} minus
+ * `seller_uuid` -- there is deliberately no such property here at all.
+ * Attribution is derived entirely from the ROUTE resource
+ * (`SellerCatalogController::store()` passes the route's `sellerUuid` to
+ * {@see \Glueful\Extensions\Commerce\Catalog\CatalogService::createProduct()}
+ * directly); the request-data hydrator only ever reads constructor-declared
+ * parameter names (see {@see \Glueful\Validation\RequestDataHydrator}), so a
+ * client that smuggles a `seller_uuid` key in the body has it silently
+ * IGNORED rather than rejected -- the product always lands on the route's
+ * seller, never a body-supplied one.
  */
-final class CreateProductData implements RequestData, ValidatesSelf
+final class SellerCreateProductData implements RequestData
 {
     /**
      * @param array<string,mixed>|null $options
@@ -45,21 +48,6 @@ final class CreateProductData implements RequestData, ValidatesSelf
         #[ArrayOf(ProductVariantData::class)]
         #[Rule('required|array')]
         public readonly array $variants = [],
-        public readonly ?string $seller_uuid = null,
     ) {
-    }
-
-    /** @return array<string,list<string>> */
-    public function validate(): array
-    {
-        if ($this->seller_uuid !== null) {
-            return [
-                'seller_uuid' => [
-                    'seller_uuid cannot be set directly; use the marketplace adoption/transfer operation instead.',
-                ],
-            ];
-        }
-
-        return [];
     }
 }
