@@ -16,6 +16,11 @@ final class CreateCommerceCatalogTables implements MigrationInterface
                 $table->bigInteger('id')->primary()->autoIncrement();
                 $table->string('uuid', 12);
                 $table->string('tenant_uuid', 12)->default('');
+                // Marketplace catalog ownership (MV1): nullable because ordinary
+                // (non-marketplace) products never carry a seller, and products created
+                // before a workspace activates marketplace mode start unowned until the
+                // activation adoption gate assigns one.
+                $table->string('seller_uuid', 12)->nullable();
                 $table->string('slug', 191);
                 $table->string('name', 255);
                 $table->text('description')->nullable();
@@ -35,6 +40,7 @@ final class CreateCommerceCatalogTables implements MigrationInterface
                 $table->unique(['tenant_uuid', 'slug']);
                 $table->index('tenant_uuid');
                 $table->index('status');
+                $table->index(['tenant_uuid', 'seller_uuid']);
             });
         }
 

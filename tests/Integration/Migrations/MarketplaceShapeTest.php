@@ -7,8 +7,9 @@ namespace Glueful\Extensions\Commerce\Tests\Integration\Migrations;
 use Glueful\Extensions\Commerce\Tests\Support\CommerceTestCase;
 
 /**
- * Freezes the migration-010/011 table shapes (marketplace settings, sellers,
- * seller memberships, and the folded `commerce_products.seller_uuid` column)
+ * Freezes the marketplace table shapes (migration-010 settings, sellers, and
+ * seller memberships, plus the `commerce_products.seller_uuid` column folded
+ * into the catalog create migration)
  * before any Marketplace repository/service code consumes them (design spec
  * §3). Exercises the database-level invariants directly against the schema:
  * the settings `tenant_uuid` GLOBAL unique (one activation row per tenant),
