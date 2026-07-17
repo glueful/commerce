@@ -189,6 +189,13 @@ final class DiagnosticsReport
             'commerce_shipping_methods',
             'commerce_shipping_classes',
             'commerce_tax_rates',
+            // Marketplace MV1 foundation (design spec §3). Marketplace-aware
+            // REGARDLESS of `commerce.marketplace.enabled`: data created before
+            // a switch-off must stay coherent for diagnostics and tenant
+            // adoption (design spec §2.1 explicit exceptions).
+            'commerce_marketplace_settings',
+            'commerce_sellers',
+            'commerce_seller_memberships',
         ];
     }
 

@@ -49,6 +49,16 @@ return [
         'enabled' => (bool) env('COMMERCE_TENANCY_ENABLED', false),
     ],
 
+    // Marketplace MV1 install master switch (design spec §2.1). OFF by default:
+    // marketplace route groups stay unregistered, marketplace services stay
+    // inert, and ordinary Commerce request paths never read a marketplace
+    // table. Per-workspace activation (a `commerce_marketplace_settings` row)
+    // layers on top of this once installed -- see
+    // Glueful\Extensions\Commerce\Marketplace\MarketplaceMode.
+    'marketplace' => [
+        'enabled' => (bool) env('COMMERCE_MARKETPLACE_ENABLED', false),
+    ],
+
     // Null-tolerant: invoice-data serializes each key as null, never omitted, when unset.
     'seller' => [
         'name' => env('COMMERCE_SELLER_NAME'),

@@ -59,6 +59,7 @@ use Glueful\Extensions\Commerce\Http\Admin\AdminShippingZoneController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminStockController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminTagController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminTaxRateController;
+use Glueful\Extensions\Commerce\Http\Admin\MarketplaceAdminController;
 use Glueful\Extensions\Commerce\Http\Storefront\AccountAddressController;
 use Glueful\Extensions\Commerce\Http\Storefront\CartController;
 use Glueful\Extensions\Commerce\Http\Storefront\CategoryController;
@@ -74,6 +75,14 @@ use Glueful\Extensions\Commerce\Inventory\StockRepository;
 use Glueful\Extensions\Commerce\Mail\CommerceMailer;
 use Glueful\Extensions\Commerce\Mail\NotificationCommerceMailer;
 use Glueful\Extensions\Commerce\Mail\OrderMailListener;
+use Glueful\Extensions\Commerce\Marketplace\Contracts\SellerRoleAuthority;
+use Glueful\Extensions\Commerce\Marketplace\FixedSellerRoleAuthority;
+use Glueful\Extensions\Commerce\Marketplace\MarketplaceMode;
+use Glueful\Extensions\Commerce\Marketplace\MarketplaceWorkspaceLock;
+use Glueful\Extensions\Commerce\Marketplace\SellerMembershipRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerMembershipService;
+use Glueful\Extensions\Commerce\Marketplace\SellerRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerService;
 use Glueful\Extensions\Commerce\Orders\OrderNumberGenerator;
 use Glueful\Extensions\Commerce\Orders\CheckoutService;
 use Glueful\Extensions\Commerce\Orders\Downloads\CommerceDownloadBlobPolicy;
@@ -314,6 +323,38 @@ final class CommerceServiceProvider extends ServiceProvider
             ],
             TenantAdopter::class => [
                 'class' => TenantAdopter::class,
+                'shared' => true,
+            ],
+            MarketplaceMode::class => [
+                'class' => MarketplaceMode::class,
+                'shared' => true,
+            ],
+            MarketplaceWorkspaceLock::class => [
+                'class' => MarketplaceWorkspaceLock::class,
+                'shared' => true,
+            ],
+            SellerRepository::class => [
+                'class' => SellerRepository::class,
+                'shared' => true,
+            ],
+            SellerMembershipRepository::class => [
+                'class' => SellerMembershipRepository::class,
+                'shared' => true,
+            ],
+            SellerRoleAuthority::class => [
+                'class' => FixedSellerRoleAuthority::class,
+                'shared' => true,
+            ],
+            SellerService::class => [
+                'factory' => [self::class, 'makeSellerService'],
+                'shared' => true,
+            ],
+            SellerMembershipService::class => [
+                'factory' => [self::class, 'makeSellerMembershipService'],
+                'shared' => true,
+            ],
+            MarketplaceAdminController::class => [
+                'factory' => [self::class, 'makeMarketplaceAdminController'],
                 'shared' => true,
             ],
             ExpiryService::class => [
@@ -1064,6 +1105,33 @@ final class CommerceServiceProvider extends ServiceProvider
         return new AdminTaxRateController(
             $container->get(ApplicationContext::class),
             $container->get(TaxRateService::class)
+        );
+    }
+
+    public static function makeSellerService(ContainerInterface $container): SellerService
+    {
+        return new SellerService(
+            $container->get(SellerRepository::class),
+            $container->get(SellerMembershipRepository::class)
+        );
+    }
+
+    public static function makeSellerMembershipService(ContainerInterface $container): SellerMembershipService
+    {
+        return new SellerMembershipService(
+            $container->get(SellerRepository::class),
+            $container->get(SellerMembershipRepository::class),
+            $container->get(SellerRoleAuthority::class)
+        );
+    }
+
+    public static function makeMarketplaceAdminController(ContainerInterface $container): MarketplaceAdminController
+    {
+        return new MarketplaceAdminController(
+            $container->get(ApplicationContext::class),
+            $container->get(SellerService::class),
+            $container->get(SellerMembershipService::class),
+            self::tenantResolver($container)
         );
     }
 

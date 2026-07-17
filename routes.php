@@ -28,6 +28,7 @@ use Glueful\Extensions\Commerce\Http\Admin\AdminShippingZoneController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminStockController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminTagController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminTaxRateController;
+use Glueful\Extensions\Commerce\Http\Admin\MarketplaceAdminController;
 use Glueful\Routing\Router;
 
 /** @var Router $router */
@@ -250,3 +251,60 @@ $router->group([
     $router->get('/reports/customers', [AdminReportController::class, 'customers'])->middleware($read);
     $router->get('/reports/stock', [AdminReportController::class, 'stock'])->middleware($read);
 });
+
+// Marketplace MV1 (design spec §2.1/§2.8): the WHOLE group registers ONLY when
+// the install master switch is on -- mirrors the `$tenantMiddleware` config
+// read above, never `MarketplaceMode::installEnabled()` (routes.php has no
+// container-resolved instance to call it on, and the semantics are identical:
+// `commerce.marketplace.enabled` only, zero database reads). These are
+// OPERATOR FOUNDATION surfaces (seller/membership CRUD) -- usable while a
+// workspace is INACTIVE (design spec §2.3) -- so, unlike future seller-member
+// surfaces, there is no additional `activeFor()`/per-workspace gate here.
+// Nested under the SAME `/commerce/admin` stack, preserving the identical
+// `auth -> optional tenant -> require_scope:commerce:read|write` composition
+// order the group above uses.
+$marketplaceEnabled = (bool) config($context, 'commerce.marketplace.enabled', false);
+
+if ($marketplaceEnabled) {
+    $router->group([
+        'prefix' => '/commerce/admin',
+        'middleware' => array_merge(['auth'], $tenantMiddleware),
+    ], function (Router $router): void {
+        $read = 'require_scope:commerce:read';
+        $write = 'require_scope:commerce:write';
+
+        $router->get('/marketplace/sellers', [MarketplaceAdminController::class, 'indexSellers'])
+            ->middleware($read);
+        $router->post('/marketplace/sellers', [MarketplaceAdminController::class, 'storeSeller'])
+            ->middleware($write);
+        $router->get('/marketplace/sellers/{uuid}', [MarketplaceAdminController::class, 'showSeller'])
+            ->middleware($read);
+        $router->patch('/marketplace/sellers/{uuid}', [MarketplaceAdminController::class, 'updateSeller'])
+            ->middleware($write);
+        $router->post('/marketplace/sellers/{uuid}/suspend', [MarketplaceAdminController::class, 'suspendSeller'])
+            ->middleware($write);
+        $router->post(
+            '/marketplace/sellers/{uuid}/reactivate',
+            [MarketplaceAdminController::class, 'reactivateSeller']
+        )->middleware($write);
+        $router->post('/marketplace/sellers/{uuid}/close', [MarketplaceAdminController::class, 'closeSeller'])
+            ->middleware($write);
+
+        $router->get(
+            '/marketplace/sellers/{uuid}/memberships',
+            [MarketplaceAdminController::class, 'indexMemberships']
+        )->middleware($read);
+        $router->post(
+            '/marketplace/sellers/{uuid}/memberships',
+            [MarketplaceAdminController::class, 'storeMembership']
+        )->middleware($write);
+        $router->patch(
+            '/marketplace/sellers/{uuid}/memberships/{userUuid}',
+            [MarketplaceAdminController::class, 'updateMembership']
+        )->middleware($write);
+        $router->delete(
+            '/marketplace/sellers/{uuid}/memberships/{userUuid}',
+            [MarketplaceAdminController::class, 'destroyMembership']
+        )->middleware($write);
+    });
+}

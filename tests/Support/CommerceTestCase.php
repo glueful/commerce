@@ -28,6 +28,8 @@ abstract class CommerceTestCase extends TestCase
         \Glueful\Extensions\Commerce\Database\Migrations\CreateCommerceCatalogBreadthTables::class,
         \Glueful\Extensions\Commerce\Database\Migrations\CreateCommerceCustomerDeliveryTables::class,
         \Glueful\Extensions\Commerce\Database\Migrations\CreateCommerceShippingTaxTables::class,
+        \Glueful\Extensions\Commerce\Database\Migrations\CreateMarketplaceSellerTables::class,
+        \Glueful\Extensions\Commerce\Database\Migrations\AddSellerToProducts::class,
     ];
 
     protected function setUp(): void

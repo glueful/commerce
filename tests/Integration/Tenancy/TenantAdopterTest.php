@@ -30,6 +30,61 @@ final class TenantAdopterTest extends CommerceTestCase
         (new TenantAdopter())->adopt($this->context, 'tenantCCCC03');
     }
 
+    /**
+     * Design spec §2.1 explicit exception: `commerce:tenancy:adopt` stays
+     * marketplace-aware REGARDLESS of `commerce.marketplace.enabled`, so a
+     * workspace's marketplace foundation data (created before, or while, the
+     * install switch is off) is never stranded when the switch flips on later.
+     * The master switch is left at its default (off, unset) for this whole
+     * test -- {@see \Glueful\Extensions\Commerce\Support\DiagnosticsReport::tenantTables()}
+     * feeds `TenantAdopter` unconditionally.
+     */
+    public function testAdoptRekeysMarketplaceTablesEvenWhenTheMasterSwitchIsOff(): void
+    {
+        self::assertFalse(
+            (bool) config($this->context, 'commerce.marketplace.enabled', false),
+            'this test relies on the master switch being off (the default)'
+        );
+
+        $this->connection->table('commerce_marketplace_settings')->insert([
+            'uuid' => 'mktadoptset1',
+            'tenant_uuid' => '',
+            'status' => 'disabled',
+        ]);
+        $this->connection->table('commerce_sellers')->insert([
+            'uuid' => 'mktadoptsel1',
+            'tenant_uuid' => '',
+            'slug' => 'sentinel-seller',
+            'name' => 'Sentinel Seller',
+        ]);
+        $this->connection->table('commerce_seller_memberships')->insert([
+            'uuid' => 'mktadoptmem1',
+            'tenant_uuid' => '',
+            'seller_uuid' => 'mktadoptsel1',
+            'user_uuid' => 'user000000001',
+            'role' => 'seller_owner',
+        ]);
+
+        $result = (new TenantAdopter())->adopt($this->context, 'tenantMKT0001');
+
+        self::assertSame(1, $result['tables']['commerce_marketplace_settings']);
+        self::assertSame(1, $result['tables']['commerce_sellers']);
+        self::assertSame(1, $result['tables']['commerce_seller_memberships']);
+
+        foreach (['commerce_marketplace_settings', 'commerce_sellers', 'commerce_seller_memberships'] as $table) {
+            self::assertSame(
+                0,
+                $this->connection->table($table)->where('tenant_uuid', '=', '')->count(),
+                "{$table} must have no sentinel rows left behind"
+            );
+            self::assertSame(
+                1,
+                $this->connection->table($table)->where('tenant_uuid', '=', 'tenantMKT0001')->count(),
+                "{$table} row must be rekeyed to the adopted tenant"
+            );
+        }
+    }
+
     private function seedSentinelCatalog(): void
     {
         (new CatalogService(

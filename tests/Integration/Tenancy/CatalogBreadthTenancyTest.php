@@ -307,7 +307,8 @@ final class CatalogBreadthTenancyTest extends CommerceTestCase
     public function testDiagnosticsReportAndAdopterCoverAllSixCatalogBreadthTables(): void
     {
         // Exact list, not a subset check -- pins every tenant table this layer
-        // knows about (the pre-existing ten plus the six added in Layer 2), so a
+        // knows about (the pre-existing ten plus the six added in Layer 2, plus the
+        // three Marketplace MV1 foundation tables added in migration 010), so a
         // future accidental removal/addition is caught here as well as locally.
         self::assertSame([
             'commerce_products',
@@ -333,6 +334,9 @@ final class CatalogBreadthTenancyTest extends CommerceTestCase
             'commerce_shipping_zones',
             'commerce_shipping_classes',
             'commerce_tax_rates',
+            'commerce_marketplace_settings',
+            'commerce_sellers',
+            'commerce_seller_memberships',
         ], DiagnosticsReport::tenantTables());
 
         // The join/child tables added alongside the six must never be treated as
