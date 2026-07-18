@@ -7,6 +7,7 @@ namespace Glueful\Extensions\Commerce\Http\Storefront;
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Cart\AddonSnapshot;
 use Glueful\Extensions\Commerce\Http\DTOs\OrderListQuery;
+use Glueful\Extensions\Commerce\Marketplace\SellerOrderRepository;
 use Glueful\Extensions\Commerce\Orders\CheckoutService;
 use Glueful\Extensions\Commerce\Orders\Downloads\DownloadAccessService;
 use Glueful\Extensions\Commerce\Orders\Downloads\DownloadGrantRepository;
@@ -40,6 +41,7 @@ final class OrderController
         private ?DownloadGrantService $downloadGrantService = null,
         private ?DownloadGrantRepository $downloadGrantRepository = null,
         private ?DownloadAccessService $downloadAccess = null,
+        private ?SellerOrderRepository $sellerOrders = null,
     ) {
         $this->orders ??= app($context, OrderRepository::class);
         $this->checkout ??= app($context, CheckoutService::class);
@@ -47,6 +49,11 @@ final class OrderController
             ? container($context)->get(CurrentTenantResolver::class)
             : new SentinelTenantResolver();
         $this->refunds ??= app($context, RefundRepository::class);
+        // Plain `new`, not `app()`: SellerOrderRepository takes no collaborators
+        // of its own, so there is nothing a container resolves that a direct
+        // construction wouldn't -- mirrors AdminOrderController's identical
+        // reasoning for the same collaborator (design spec §6.3, MV2 Task 9).
+        $this->sellerOrders ??= new SellerOrderRepository();
     }
 
     private function downloadGrantService(): DownloadGrantService
@@ -215,6 +222,16 @@ final class OrderController
         $order['notes'] = $this->notesProjection($tenant, $orderUuid);
         $order['lines'] = $this->linesProjection($tenant, $orderUuid);
 
+        // Marketplace MV2 customer projection (design spec §6.3): keyed off
+        // the ORDER's OWN marketplace_partitioned snapshot (§2.6), never
+        // current activation -- a non-partitioned order never touches
+        // `commerce_seller_orders` at all. No `confirmed_at` gate here
+        // (unlike the seller-facing surface, §2.12): this is the customer's
+        // OWN order, and `lines` above has never had a payment gate either.
+        if ((bool) ($order['marketplace_partitioned'] ?? false)) {
+            $order['seller_groups'] = $this->sellerGroupsProjection($tenant, $orderUuid);
+        }
+
         return $order;
     }
 
@@ -309,17 +326,78 @@ final class OrderController
      */
     private function linesProjection(string $tenant, string $orderUuid): array
     {
-        return array_map(static function (array $line): array {
-            return [
-                'product_name' => (string) ($line['product_name'] ?? ''),
-                'sku' => (string) ($line['sku'] ?? ''),
-                'quantity' => (int) ($line['quantity'] ?? 0),
-                'unit_price' => (int) ($line['unit_price'] ?? 0),
-                'line_total' => (int) ($line['line_total'] ?? 0),
-                'option_values' => is_array($line['option_values'] ?? null) ? $line['option_values'] : [],
-                'addons' => AddonSnapshot::sanitize(is_array($line['addons'] ?? null) ? $line['addons'] : []),
-            ];
-        }, $this->orders->linesForOrder($this->context, $tenant, $orderUuid));
+        return array_map(
+            fn (array $line): array => $this->lineRow($line),
+            $this->orders->linesForOrder($this->context, $tenant, $orderUuid)
+        );
+    }
+
+    /**
+     * The per-line allowlist {@see linesProjection()} maps over -- extracted
+     * so {@see sellerGroupsProjection()} can reuse the EXACT same shape for
+     * each seller's line subset (design spec §6.3: "allowlisted line fields
+     * like the existing linesProjection").
+     *
+     * @param array<string,mixed> $line
+     * @return array<string,mixed>
+     */
+    private function lineRow(array $line): array
+    {
+        return [
+            'product_name' => (string) ($line['product_name'] ?? ''),
+            'sku' => (string) ($line['sku'] ?? ''),
+            'quantity' => (int) ($line['quantity'] ?? 0),
+            'unit_price' => (int) ($line['unit_price'] ?? 0),
+            'line_total' => (int) ($line['line_total'] ?? 0),
+            'option_values' => is_array($line['option_values'] ?? null) ? $line['option_values'] : [],
+            'addons' => AddonSnapshot::sanitize(is_array($line['addons'] ?? null) ? $line['addons'] : []),
+        ];
+    }
+
+    /**
+     * Marketplace MV2 `seller_groups[]` (design spec §6.3): one entry per
+     * `commerce_seller_orders` child, built field by field -- NEVER a row
+     * spread. Excluded by construction: `seller_uuid`, `revision`, the
+     * internal (`open`|`canceled`) `status`, `tenant_uuid`,
+     * `tax_attribution_method`, and every MV3 settlement field (none exist
+     * yet, and none is ever read here). `tracking_url` is untrusted stored
+     * text (not length-bounded upstream) -- emitted as a plain JSON string
+     * like every other field, never interpolated into markup.
+     *
+     * @return list<array<string,mixed>>
+     */
+    private function sellerGroupsProjection(string $tenant, string $orderUuid): array
+    {
+        $lines = $this->orders->linesForOrder($this->context, $tenant, $orderUuid);
+
+        return array_map(
+            function (array $child) use ($lines): array {
+                $sellerUuid = (string) $child['seller_uuid'];
+                $sellerLines = array_values(array_filter(
+                    $lines,
+                    static fn (array $line): bool => (string) ($line['seller_uuid'] ?? '') === $sellerUuid
+                ));
+
+                return [
+                    'seller_reference' => (string) $child['seller_reference'],
+                    'seller_name' => (string) $child['seller_name_snapshot'],
+                    'lines' => array_map(fn (array $line): array => $this->lineRow($line), $sellerLines),
+                    'allocated_subtotal' => (int) $child['subtotal'],
+                    'allocated_discount' => (int) $child['allocated_discount'],
+                    'allocated_shipping_discount' => (int) $child['allocated_shipping_discount'],
+                    'allocated_shipping' => (int) $child['allocated_shipping'],
+                    'allocated_tax' => (int) $child['allocated_tax'],
+                    'attributed_total' => (int) $child['attributed_total'],
+                    'fulfillment' => [
+                        'fulfillment_status' => (string) $child['fulfillment_status'],
+                        'carrier' => $child['carrier'],
+                        'tracking_number' => $child['tracking_number'],
+                        'tracking_url' => $child['tracking_url'],
+                    ],
+                ];
+            },
+            $this->sellerOrders->forOrder($this->context, $tenant, $orderUuid)
+        );
     }
 
     /** @param array<string,mixed> $order */

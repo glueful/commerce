@@ -64,6 +64,7 @@ use Glueful\Extensions\Commerce\Http\Middleware\SellerMemberMiddleware;
 use Glueful\Extensions\Commerce\Http\Seller\SellerCatalogController;
 use Glueful\Extensions\Commerce\Http\Seller\SellerInventoryController;
 use Glueful\Extensions\Commerce\Http\Seller\SellerMembershipController;
+use Glueful\Extensions\Commerce\Http\Seller\SellerOrderController;
 use Glueful\Extensions\Commerce\Http\Storefront\AccountAddressController;
 use Glueful\Extensions\Commerce\Http\Storefront\CartController;
 use Glueful\Extensions\Commerce\Http\Storefront\CategoryController;
@@ -87,8 +88,10 @@ use Glueful\Extensions\Commerce\Marketplace\MarketplaceWorkspaceLock;
 use Glueful\Extensions\Commerce\Marketplace\SellerAttributionService;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipService;
+use Glueful\Extensions\Commerce\Marketplace\SellerOrderFulfillmentService;
 use Glueful\Extensions\Commerce\Marketplace\SellerOrderPaymentConfirmation;
 use Glueful\Extensions\Commerce\Marketplace\SellerOrderRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerOrderService;
 use Glueful\Extensions\Commerce\Marketplace\SellerRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerService;
 use Glueful\Extensions\Commerce\Orders\OrderNumberGenerator;
@@ -357,6 +360,14 @@ final class CommerceServiceProvider extends ServiceProvider
                 'class' => SellerOrderPaymentConfirmation::class,
                 'shared' => true,
             ],
+            SellerOrderFulfillmentService::class => [
+                'factory' => [self::class, 'makeSellerOrderFulfillmentService'],
+                'shared' => true,
+            ],
+            SellerOrderService::class => [
+                'factory' => [self::class, 'makeSellerOrderService'],
+                'shared' => true,
+            ],
             SellerRoleAuthority::class => [
                 'class' => FixedSellerRoleAuthority::class,
                 'shared' => true,
@@ -399,6 +410,10 @@ final class CommerceServiceProvider extends ServiceProvider
             ],
             SellerMembershipController::class => [
                 'factory' => [self::class, 'makeSellerMembershipController'],
+                'shared' => true,
+            ],
+            SellerOrderController::class => [
+                'factory' => [self::class, 'makeSellerOrderController'],
                 'shared' => true,
             ],
             ExpiryService::class => [
@@ -1243,6 +1258,34 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(ApplicationContext::class),
             $container->get(SellerMembershipService::class),
             $container->get(SellerMembershipRepository::class),
+            self::tenantResolver($container)
+        );
+    }
+
+    public static function makeSellerOrderFulfillmentService(
+        ContainerInterface $container
+    ): SellerOrderFulfillmentService {
+        return new SellerOrderFulfillmentService(
+            $container->get(OrderRepository::class),
+            $container->get(SellerOrderRepository::class)
+        );
+    }
+
+    public static function makeSellerOrderService(ContainerInterface $container): SellerOrderService
+    {
+        return new SellerOrderService(
+            $container->get(SellerOrderRepository::class),
+            $container->get(OrderRepository::class),
+            self::tenantResolver($container)
+        );
+    }
+
+    public static function makeSellerOrderController(ContainerInterface $container): SellerOrderController
+    {
+        return new SellerOrderController(
+            $container->get(ApplicationContext::class),
+            $container->get(SellerOrderService::class),
+            $container->get(SellerOrderFulfillmentService::class),
             self::tenantResolver($container)
         );
     }

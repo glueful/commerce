@@ -32,6 +32,7 @@ use Glueful\Extensions\Commerce\Http\Admin\MarketplaceAdminController;
 use Glueful\Extensions\Commerce\Http\Seller\SellerCatalogController;
 use Glueful\Extensions\Commerce\Http\Seller\SellerInventoryController;
 use Glueful\Extensions\Commerce\Http\Seller\SellerMembershipController;
+use Glueful\Extensions\Commerce\Http\Seller\SellerOrderController;
 use Glueful\Routing\Router;
 
 /** @var Router $router */
@@ -324,6 +325,19 @@ if ($marketplaceEnabled) {
             '/marketplace/products/{uuid}/assign',
             [MarketplaceAdminController::class, 'assignSeller']
         )->middleware($write);
+
+        // Marketplace MV2 (design spec §6.2, Task 9): operator fulfills ANY
+        // seller order directly. Gated the SAME way as every other route in
+        // this group -- with the install master switch off, a
+        // `marketplace_partitioned` order can never exist (nothing ever wrote
+        // one), so this endpoint has nothing to do; keeping it out of the
+        // manifest preserves `MarketplaceRegressionTest`'s pre-MV1
+        // byte-identical route-manifest proof exactly like the sibling
+        // `/marketplace/*` routes above already do.
+        $router->post(
+            '/orders/{uuid}/seller-orders/{sellerOrderUuid}/fulfill',
+            [AdminOrderController::class, 'fulfillSellerOrder']
+        )->middleware($write);
     });
 }
 
@@ -345,6 +359,8 @@ if ($marketplaceEnabled) {
         $inventoryRead = 'commerce_seller:commerce.seller.inventory.read';
         $inventoryWrite = 'commerce_seller:commerce.seller.inventory.write';
         $membersManage = 'commerce_seller:commerce.seller.members.manage';
+        $ordersRead = 'commerce_seller:commerce.seller.orders.read';
+        $ordersFulfill = 'commerce_seller:commerce.seller.orders.fulfill';
 
         $router->get('/mine', [SellerMembershipController::class, 'mine']);
 
@@ -374,5 +390,17 @@ if ($marketplaceEnabled) {
             ->middleware($membersManage);
         $router->delete('/{sellerUuid}/members/{userUuid}', [SellerMembershipController::class, 'destroy'])
             ->middleware($membersManage);
+
+        // Seller order surfaces (design spec §6.1/§2.12, MV2 Task 8): the
+        // confirmed_at payment-confirmation gate lives at the
+        // SellerOrderService/SellerOrderFulfillmentService layer, never here --
+        // this middleware only authorizes the caller against the route
+        // {sellerUuid}, exactly like every other seller-scoped route above.
+        $router->get('/{sellerUuid}/orders', [SellerOrderController::class, 'index'])
+            ->middleware($ordersRead);
+        $router->get('/{sellerUuid}/orders/{sellerOrderUuid}', [SellerOrderController::class, 'show'])
+            ->middleware($ordersRead);
+        $router->post('/{sellerUuid}/orders/{sellerOrderUuid}/fulfill', [SellerOrderController::class, 'fulfill'])
+            ->middleware($ordersFulfill);
     });
 }

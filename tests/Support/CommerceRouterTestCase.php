@@ -13,6 +13,7 @@ use Glueful\Extensions\Commerce\Http\Middleware\SellerMemberMiddleware;
 use Glueful\Extensions\Commerce\Http\Seller\SellerCatalogController;
 use Glueful\Extensions\Commerce\Http\Seller\SellerInventoryController;
 use Glueful\Extensions\Commerce\Http\Seller\SellerMembershipController;
+use Glueful\Extensions\Commerce\Http\Seller\SellerOrderController;
 use Glueful\Extensions\Commerce\Inventory\InventoryService;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
 use Glueful\Extensions\Commerce\Marketplace\FixedSellerRoleAuthority;
@@ -20,8 +21,12 @@ use Glueful\Extensions\Commerce\Marketplace\MarketplaceMode;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceWorkspaceLock;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipService;
+use Glueful\Extensions\Commerce\Marketplace\SellerOrderFulfillmentService;
+use Glueful\Extensions\Commerce\Marketplace\SellerOrderRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerOrderService;
 use Glueful\Extensions\Commerce\Marketplace\SellerRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerService;
+use Glueful\Extensions\Commerce\Orders\OrderRepository;
 use Glueful\Extensions\Commerce\Shipping\ShippingClassRepository;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Glueful\Http\Exceptions\Handler as ExceptionHandler;
@@ -73,6 +78,7 @@ abstract class CommerceRouterTestCase extends CommerceTestCase
         $this->bind(SellerCatalogController::class, $this->buildCatalogController());
         $this->bind(SellerInventoryController::class, $this->buildInventoryController());
         $this->bind(SellerMembershipController::class, $this->buildMembershipController());
+        $this->bind(SellerOrderController::class, $this->buildSellerOrderController());
 
         $router = new Router($this->contextContainer());
 
@@ -252,6 +258,26 @@ abstract class CommerceRouterTestCase extends CommerceTestCase
             $this->context,
             $this->membershipService(),
             new SellerMembershipRepository(),
+            $this->fixedTenant()
+        );
+    }
+
+    /**
+     * Seller order surface (design spec §6.1/§2.12, MV2 Task 8): a REAL
+     * {@see SellerOrderController} wired against a REAL
+     * {@see SellerOrderService}/{@see SellerOrderFulfillmentService} stack,
+     * both sharing the SAME {@see OrderRepository}/{@see SellerOrderRepository}
+     * instances -- mirroring every other `build*Controller()` helper above.
+     */
+    protected function buildSellerOrderController(): SellerOrderController
+    {
+        $orders = new OrderRepository();
+        $sellerOrders = new SellerOrderRepository();
+
+        return new SellerOrderController(
+            $this->context,
+            new SellerOrderService($sellerOrders, $orders, $this->fixedTenant()),
+            new SellerOrderFulfillmentService($orders, $sellerOrders),
             $this->fixedTenant()
         );
     }

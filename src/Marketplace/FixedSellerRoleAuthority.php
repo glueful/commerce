@@ -19,9 +19,15 @@ use Glueful\Extensions\Commerce\Marketplace\Contracts\SellerRoleAuthority;
  * | commerce.seller.inventory.read     |   x   |   x   |   x   |    x    |
  * | commerce.seller.inventory.write    |   x   |   x   |   x   |         |
  * | commerce.seller.members.manage     |   x   |       |       |         |
+ * | commerce.seller.orders.read        |   x   |   x   |   x   |    x    |
+ * | commerce.seller.orders.fulfill     |   x   |   x   |   x   |         |
  *
- * Orders/refunds/reports/payouts capabilities arrive with their own slices --
+ * Refunds/reports/payouts capabilities arrive with their own slices --
  * deliberately absent here. No per-seller overrides or custom roles in v1.
+ * `commerce.seller.orders.{read,fulfill}` (design spec §6.1/§2.6, MV2 Task 8)
+ * gate the seller order surfaces -- `fulfill` deliberately mirrors
+ * `inventory.write`'s owner/admin/staff-not-analyst shape, since fulfillment
+ * is an operational write an analyst role must never perform.
  */
 final class FixedSellerRoleAuthority implements SellerRoleAuthority
 {
@@ -30,6 +36,8 @@ final class FixedSellerRoleAuthority implements SellerRoleAuthority
     private const INVENTORY_READ = 'commerce.seller.inventory.read';
     private const INVENTORY_WRITE = 'commerce.seller.inventory.write';
     private const MEMBERS_MANAGE = 'commerce.seller.members.manage';
+    private const ORDERS_READ = 'commerce.seller.orders.read';
+    private const ORDERS_FULFILL = 'commerce.seller.orders.fulfill';
 
     /** @var array<string,list<string>> */
     private const CAPABILITY_MATRIX = [
@@ -39,21 +47,28 @@ final class FixedSellerRoleAuthority implements SellerRoleAuthority
             self::INVENTORY_READ,
             self::INVENTORY_WRITE,
             self::MEMBERS_MANAGE,
+            self::ORDERS_READ,
+            self::ORDERS_FULFILL,
         ],
         'seller_admin' => [
             self::CATALOG_READ,
             self::CATALOG_WRITE,
             self::INVENTORY_READ,
             self::INVENTORY_WRITE,
+            self::ORDERS_READ,
+            self::ORDERS_FULFILL,
         ],
         'seller_staff' => [
             self::CATALOG_READ,
             self::INVENTORY_READ,
             self::INVENTORY_WRITE,
+            self::ORDERS_READ,
+            self::ORDERS_FULFILL,
         ],
         'seller_analyst' => [
             self::CATALOG_READ,
             self::INVENTORY_READ,
+            self::ORDERS_READ,
         ],
     ];
 

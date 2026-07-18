@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Commerce\Marketplace;
 
 use Glueful\Bootstrap\ApplicationContext;
+use Glueful\Extensions\Commerce\Support\UtcNowSql;
 use Glueful\Helpers\Utils;
 
 /**
@@ -138,5 +139,111 @@ final class SellerOrderRepository
             ->where('uuid', '=', $sellerOrderUuid)
             ->whereNotNull('confirmed_at')
             ->first();
+    }
+
+    /**
+     * Unscoped-by-seller lookup (design spec §2.8): the fulfillment claim
+     * chain re-reads the child by ITS OWN uuid before the caller yet knows
+     * which seller owns it (an operator fan-out never scopes by seller at
+     * all) or whether it is even confirmed -- {@see confirmedForSellerByUuid()}
+     * cannot serve that read since it demands both up front. Tenant+uuid
+     * scoped only; callers apply the order/seller/confirmation checks
+     * themselves and turn a mismatch into their own non-revealing 404.
+     *
+     * @return array<string,mixed>|null
+     */
+    public function findByUuid(ApplicationContext $context, string $tenant, string $sellerOrderUuid): ?array
+    {
+        return db($context)->table('commerce_seller_orders')
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('uuid', '=', $sellerOrderUuid)
+            ->first();
+    }
+
+    /**
+     * Affected-row-checked serialization primitive for a single child
+     * (design spec §2.8, §4 lock order): claimed AFTER the parent
+     * `fulfillment_revision` ({@see \Glueful\Extensions\Commerce\Orders\OrderRepository::claimFulfillmentMutation()}),
+     * mirroring {@see SellerRepository::claimRevision()}'s own claim
+     * discipline and its `UtcNowSql` convention. Returns false for an
+     * unknown or cross-tenant seller order -- the caller (
+     * {@see \Glueful\Extensions\Commerce\Marketplace\SellerOrderFulfillmentService})
+     * turns that into a non-revealing 404.
+     */
+    public function claimRevision(ApplicationContext $context, string $tenant, string $sellerOrderUuid): bool
+    {
+        $utcNow = UtcNowSql::expression(db($context)->getDriverName());
+
+        $affected = db($context)->table('commerce_seller_orders')->executeModification(
+            <<<SQL
+UPDATE commerce_seller_orders SET revision = revision + 1, updated_at = {$utcNow}
+WHERE tenant_uuid = ? AND uuid = ?
+SQL,
+            [$tenant, $sellerOrderUuid]
+        );
+
+        return $affected === 1;
+    }
+
+    /**
+     * The child transition write (design spec §2.8, step 3): sets a single
+     * seller order `fulfillment_status = 'fulfilled'`, stamps `fulfilled_at`
+     * (`UtcNowSql`, mirroring {@see SellerOrderPaymentConfirmation::confirm()}'s
+     * driver-correct-UTC convention), and applies the carrier/tracking
+     * triple. Callers ({@see \Glueful\Extensions\Commerce\Marketplace\SellerOrderFulfillmentService})
+     * always call this only after successfully claiming the row's own
+     * `revision` ({@see claimRevision()}), so no further affected-row check
+     * is needed here.
+     *
+     * @param array{carrier?:?string, tracking_number?:?string, tracking_url?:?string} $tracking
+     */
+    public function markFulfilled(
+        ApplicationContext $context,
+        string $tenant,
+        string $sellerOrderUuid,
+        array $tracking
+    ): void {
+        $utcNow = UtcNowSql::expression(db($context)->getDriverName());
+
+        db($context)->table('commerce_seller_orders')->executeModification(
+            <<<SQL
+UPDATE commerce_seller_orders
+SET fulfillment_status = 'fulfilled', fulfilled_at = {$utcNow}, carrier = ?, tracking_number = ?,
+    tracking_url = ?, updated_at = {$utcNow}
+WHERE tenant_uuid = ? AND uuid = ?
+SQL,
+            [
+                $tracking['carrier'] ?? null,
+                $tracking['tracking_number'] ?? null,
+                $tracking['tracking_url'] ?? null,
+                $tenant,
+                $sellerOrderUuid,
+            ]
+        );
+    }
+
+    /**
+     * Whole-order cancellation fan-out (design spec §2.9): sets EVERY
+     * still-open child of `$orderUuid` to `status = 'canceled'`, called by
+     * {@see \Glueful\Extensions\Commerce\Http\Admin\AdminOrderController::cancel()}
+     * inside the SAME transaction as the parent order's own
+     * `pending_payment|paid -> canceled` CAS, for a `marketplace_partitioned`
+     * order only. The `status != 'canceled'` guard makes a re-entry a silent
+     * no-op (defensive; MV2 has no path that calls this twice for one
+     * order). Never touches `fulfillment_status` -- operational status and
+     * fulfillment are separate fields (§2.10).
+     */
+    public function cancelAllForOrder(ApplicationContext $context, string $tenant, string $orderUuid): void
+    {
+        $utcNow = UtcNowSql::expression(db($context)->getDriverName());
+
+        db($context)->table('commerce_seller_orders')->executeModification(
+            <<<SQL
+UPDATE commerce_seller_orders
+SET status = 'canceled', updated_at = {$utcNow}
+WHERE tenant_uuid = ? AND order_uuid = ? AND status != 'canceled'
+SQL,
+            [$tenant, $orderUuid]
+        );
     }
 }
