@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Glueful\Extensions\Commerce\Tests\Integration\Migrations;
 
+use Glueful\Database\Connection;
 use Glueful\Extensions\Commerce\Database\Migrations\CreateSellerOrderTables;
 use Glueful\Extensions\Commerce\Tests\Support\CommerceTestCase;
 
@@ -307,7 +308,7 @@ final class MarketplaceOrderShapeTest extends CommerceTestCase
     {
         $this->assertIndexExists(
             'commerce_seller_orders',
-            'commerce_seller_orders_tenant_uuid_seller_uuid_confirmed_at_fulfillment_status_index',
+            'commerce_seller_orders_confirmed_listing_index',
             ['tenant_uuid', 'seller_uuid', 'confirmed_at', 'fulfillment_status']
         );
     }
@@ -354,5 +355,161 @@ final class MarketplaceOrderShapeTest extends CommerceTestCase
         $actualColumns = array_column($columns, 'name');
 
         self::assertSame($expectedColumns, $actualColumns, "unexpected column set/order for {$indexName}");
+    }
+
+    // =====================================================================
+    // Real-PostgreSQL convergence lanes (design spec §3.4/§10, MV2 plan
+    // Task 10): the SQLite tests above prove the SHAPE; these prove the same
+    // migrations converge on a genuinely different engine -- a fresh install
+    // produces the folded `commerce_order_lines`/`commerce_orders` columns
+    // and the `commerce_seller_orders` table, every index is asserted via
+    // `pg_indexes` (the schema builder exposes no `hasIndex`, and index names
+    // are generated identically across drivers -- {@see TableBuilder::generateIndexName()}
+    // in the framework -- so the SAME pinned names from the SQLite tests
+    // above apply here unchanged), and re-running `011` is a no-op. Gating,
+    // fixture-width discipline, and the throwaway `Connection`/
+    // `ApplicationContext` construction all mirror
+    // `Marketplace\MarketplacePgsqlTest`/`Reports\ReportPgsqlTest` exactly.
+    // =====================================================================
+
+    public function testFreshInstallConvergesOnRealPostgresWithFoldedColumnsAndTheNewTable(): void
+    {
+        $this->skipUnlessPgsql();
+
+        $connection = $this->migratedConnection($this->pgConfig());
+        $schema = $connection->getSchemaBuilder();
+
+        foreach (['seller_uuid', 'discount_amount', 'tax_amount'] as $column) {
+            self::assertTrue(
+                $schema->hasColumn('commerce_order_lines', $column),
+                "commerce_order_lines missing folded column {$column} on PostgreSQL"
+            );
+        }
+        foreach (['marketplace_partitioned', 'fulfillment_revision'] as $column) {
+            self::assertTrue(
+                $schema->hasColumn('commerce_orders', $column),
+                "commerce_orders missing folded column {$column} on PostgreSQL"
+            );
+        }
+
+        self::assertTrue($schema->hasTable('commerce_seller_orders'), 'missing commerce_seller_orders on PostgreSQL');
+        foreach (
+            [
+                'id', 'uuid', 'tenant_uuid', 'order_uuid', 'seller_uuid', 'seller_name_snapshot',
+                'partition_number', 'seller_reference', 'currency', 'subtotal', 'allocated_discount',
+                'allocated_shipping_discount', 'allocated_shipping', 'allocated_tax', 'attributed_total',
+                'tax_attribution_method', 'confirmed_at', 'fulfillment_status', 'fulfilled_at', 'carrier',
+                'tracking_number', 'tracking_url', 'status', 'revision', 'created_at', 'updated_at',
+            ] as $column
+        ) {
+            self::assertTrue(
+                $schema->hasColumn('commerce_seller_orders', $column),
+                "commerce_seller_orders missing column {$column} on PostgreSQL"
+            );
+        }
+    }
+
+    public function testFoldedAndNewTableIndexesExistOnRealPostgresViaPgIndexes(): void
+    {
+        $this->skipUnlessPgsql();
+
+        $connection = $this->migratedConnection($this->pgConfig());
+
+        $this->assertPgIndexExists(
+            $connection,
+            'commerce_order_lines',
+            'commerce_order_lines_order_uuid_seller_uuid_index',
+            ['order_uuid', 'seller_uuid']
+        );
+        $this->assertPgIndexExists(
+            $connection,
+            'commerce_seller_orders',
+            'commerce_seller_orders_confirmed_listing_index',
+            ['tenant_uuid', 'seller_uuid', 'confirmed_at', 'fulfillment_status']
+        );
+        $this->assertPgIndexExists(
+            $connection,
+            'commerce_seller_orders',
+            'commerce_seller_orders_order_uuid_index',
+            ['order_uuid']
+        );
+    }
+
+    public function testRerunningSellerOrderMigrationIsANoOpOnRealPostgres(): void
+    {
+        $this->skipUnlessPgsql();
+
+        $connection = $this->migratedConnection($this->pgConfig());
+        $schema = $connection->getSchemaBuilder();
+        $migration = new CreateSellerOrderTables();
+
+        // migratedConnection() already ran every migration (including 011)
+        // once; re-running up() again must be a no-op guarded by hasTable().
+        $migration->up($schema);
+        $migration->up($schema);
+
+        self::assertTrue($schema->hasTable('commerce_seller_orders'));
+    }
+
+    private function skipUnlessPgsql(): void
+    {
+        if (getenv('COMMERCE_TEST_DB_DRIVER') !== 'pgsql') {
+            self::markTestSkipped('Requires a PostgreSQL test lane to prove migration convergence is portable.');
+        }
+    }
+
+    /**
+     * `pg_indexes.indexdef` looks like `CREATE INDEX name ON public.table
+     * USING btree (col_a, col_b)` -- the column list (in order) is the
+     * content of the LAST parenthesized group.
+     *
+     * @param list<string> $expectedColumns ordered, leading column first
+     */
+    private function assertPgIndexExists(
+        Connection $connection,
+        string $table,
+        string $indexName,
+        array $expectedColumns
+    ): void {
+        $pdo = $connection->getPDO();
+        $stmt = $pdo->prepare('SELECT indexdef FROM pg_indexes WHERE tablename = ? AND indexname = ?');
+        $stmt->execute([$table, $indexName]);
+        $indexDef = $stmt->fetchColumn();
+
+        self::assertIsString($indexDef, "missing index {$indexName} on {$table} (pg_indexes)");
+        self::assertMatchesRegularExpression('/\(([^()]+)\)\s*$/', $indexDef, "unparseable indexdef: {$indexDef}");
+        preg_match('/\(([^()]+)\)\s*$/', $indexDef, $matches);
+        $actualColumns = array_map('trim', explode(',', $matches[1]));
+
+        self::assertSame($expectedColumns, $actualColumns, "unexpected column set/order for {$indexName}");
+    }
+
+    /** @return array<string,mixed> */
+    private function pgConfig(): array
+    {
+        return [
+            'engine' => 'pgsql',
+            'pgsql' => [
+                'host' => getenv('DB_PGSQL_HOST') ?: '127.0.0.1',
+                'port' => (int) (getenv('DB_PGSQL_PORT') ?: 5432),
+                'db' => getenv('DB_PGSQL_DATABASE') ?: 'glueful_test',
+                'user' => getenv('DB_PGSQL_USERNAME') ?: 'postgres',
+                'pass' => getenv('DB_PGSQL_PASSWORD') ?: '',
+                'schema' => getenv('DB_PGSQL_SCHEMA') ?: 'public',
+            ],
+            'pooling' => ['enabled' => false],
+        ];
+    }
+
+    /** @param array<string,mixed> $pgConfig */
+    private function migratedConnection(array $pgConfig): Connection
+    {
+        $connection = new Connection($pgConfig);
+        $schema = $connection->getSchemaBuilder();
+        foreach (static::MIGRATIONS as $migration) {
+            (new $migration())->up($schema);
+        }
+
+        return $connection;
     }
 }

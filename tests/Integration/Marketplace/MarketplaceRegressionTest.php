@@ -21,24 +21,32 @@ use Glueful\Extensions\Commerce\Contracts\ShippingRateProvider;
 use Glueful\Extensions\Commerce\Contracts\TaxCalculator;
 use Glueful\Extensions\Commerce\Discounts\DiscountRepository;
 use Glueful\Extensions\Commerce\Discounts\DiscountService;
+use Glueful\Extensions\Commerce\Http\Admin\AdminOrderController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminProductController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminReportController;
 use Glueful\Extensions\Commerce\Http\DTOs\AddCartLineData;
 use Glueful\Extensions\Commerce\Http\DTOs\CreateProductData;
+use Glueful\Extensions\Commerce\Http\DTOs\FulfillOrderData;
 use Glueful\Extensions\Commerce\Http\DTOs\ProductListQuery;
 use Glueful\Extensions\Commerce\Http\DTOs\ProductVariantData;
 use Glueful\Extensions\Commerce\Http\DTOs\ReportWindowQuery;
 use Glueful\Extensions\Commerce\Http\Storefront\CartController;
+use Glueful\Extensions\Commerce\Http\Storefront\OrderController;
 use Glueful\Extensions\Commerce\Http\Storefront\ProductController;
+use Glueful\Extensions\Commerce\Invoices\ConfigSellerIdentityProvider;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceMode;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceWorkspaceLock;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerOrderPaymentConfirmation;
+use Glueful\Extensions\Commerce\Marketplace\SellerOrderRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerService;
 use Glueful\Extensions\Commerce\Orders\CheckoutService;
 use Glueful\Extensions\Commerce\Orders\OrderNumberGenerator;
+use Glueful\Extensions\Commerce\Orders\OrderPaymentService;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
+use Glueful\Extensions\Commerce\Orders\Refunds\RefundRepository;
 use Glueful\Extensions\Commerce\Payments\ManualPaymentCollector;
 use Glueful\Extensions\Commerce\Pricing\PricingEngine;
 use Glueful\Extensions\Commerce\Pricing\ShippingQuote;
@@ -54,34 +62,49 @@ use Glueful\Routing\Router;
 use Symfony\Component\HttpFoundation\Request;
 
 /**
- * The marketplace MV1 "optional" proof (design spec §6 "Regression gate";
- * plan Task 5): with the install master switch ABSENT/false -- the default,
- * see `config/commerce.php` -- Commerce must be byte-identical to a pre-MV1
- * install. Four independent proofs, mirroring the spec's own breakdown:
+ * The marketplace "optional" proof (design spec §6/§7 "Regression gate";
+ * MV1 plan Task 5, extended by MV2 plan Task 10): with the install master
+ * switch ABSENT/false -- the default, see `config/commerce.php` -- Commerce
+ * must be byte-identical to a pre-MV1 install. Independent proofs, mirroring
+ * the spec's own breakdown:
  *
- * 1. Route manifest: `routes.php`'s marketplace/seller groups are gated
- *    behind `if ($marketplaceEnabled)` blocks that are PURELY ADDITIVE (see
- *    `git diff` against the pre-MV1 commit) -- with the flag off, the
- *    compiled manifest must be the exact 122-route pre-MV1 set, byte for
- *    byte, and contain zero `/commerce/admin/marketplace` or
+ * 1. Route manifest: `routes.php`'s marketplace/seller groups (MV1 AND MV2 --
+ *    every seller-order/admin-seller-order route lives in the SAME
+ *    `if ($marketplaceEnabled)` gate) are gated behind blocks that are PURELY
+ *    ADDITIVE (see `git diff` against the pre-MV1 commit) -- with the flag
+ *    off, the compiled manifest must be the exact 122-route pre-MV1 set,
+ *    byte for byte, and contain zero `/commerce/admin/marketplace` or
  *    `/commerce/seller` routes.
  * 2. Zero marketplace-table queries on ordinary request paths, instrumented
  *    with the `QueryLoggingPdoStatement` idiom `CatalogOwnershipTest`
  *    already established for admin product create -- extended here to
  *    storefront browse, cart add, checkout quote, admin product create AND
- *    update, and a reports endpoint.
+ *    update, a reports endpoint, and (MV2 Task 10) a full non-partitioned
+ *    checkout/payment/fulfill/cancel/projection sweep, matched against ALL
+ *    FOUR marketplace tables (`commerce_marketplace_settings`,
+ *    `commerce_sellers`, `commerce_seller_memberships`,
+ *    `commerce_seller_orders`) -- the MV2 table joins the zero-query proof
+ *    exactly like the MV1 trio.
  * 3. Public payload allowlist: `seller_uuid` never appears in a storefront
  *    product projection, even for a product a prior activation (since
  *    switched back off -- design spec §2.1's explicit exception, data stays
  *    coherent) already attributed to a seller. `StorefrontProductProjectionTest`
  *    pins the full allowlist including `seller_uuid` in its internal-fields
  *    list; this file adds one end-to-end confirmation seeded with a real
- *    non-null `seller_uuid`.
+ *    non-null `seller_uuid`. A non-partitioned CUSTOMER order projection is
+ *    proven byte-identical the same way (MV2 Task 10): no `seller_groups` key.
  * 4. Maintenance exceptions stay marketplace-aware regardless of the switch:
- *    `DiagnosticsReport` lists all three tables as present. The
- *    `commerce:tenancy:adopt` rekey side of this is already covered by
+ *    `DiagnosticsReport` lists all four tables (MV1 trio + MV2
+ *    `commerce_seller_orders`) as present. The `commerce:tenancy:adopt`
+ *    rekey side of this is already covered by
  *    `Tenancy\TenantAdopterTest::testAdoptRekeysMarketplaceTablesEvenWhenTheMasterSwitchIsOff()`
- *    -- not duplicated here.
+ *    and its MV2 `commerce_seller_orders` sibling -- not duplicated here.
+ * 5. Partition invariance (design spec §7, MV2 Task 10): behavior follows the
+ *    ORDER's own immutable `marketplace_partitioned` snapshot, never the
+ *    workspace's CURRENT `activeFor()` state -- a partitioned order stays
+ *    child-aware and keeps exposing `seller_groups` after the workspace
+ *    later deactivates; a non-partitioned order stays byte-identical
+ *    regardless of any LATER activation.
  */
 final class MarketplaceRegressionTest extends CommerceTestCase
 {
@@ -369,7 +392,14 @@ final class MarketplaceRegressionTest extends CommerceTestCase
 
         self::assertNotEmpty(QueryLoggingPdoStatement::$queries, 'sanity: the call itself must run some queries');
 
-        $marketplaceTables = ['commerce_marketplace_settings', 'commerce_sellers', 'commerce_seller_memberships'];
+        // MV2 Task 10: the expanded 4-table zero-query proof -- the MV1 trio
+        // plus commerce_seller_orders.
+        $marketplaceTables = [
+            'commerce_marketplace_settings',
+            'commerce_sellers',
+            'commerce_seller_memberships',
+            'commerce_seller_orders',
+        ];
         foreach (QueryLoggingPdoStatement::$queries as $sql) {
             foreach ($marketplaceTables as $table) {
                 self::assertStringNotContainsString(
@@ -380,6 +410,103 @@ final class MarketplaceRegressionTest extends CommerceTestCase
                 );
             }
         }
+    }
+
+    // =====================================================================
+    // 2b. MV2 Task 10: the full non-partitioned checkout/payment/fulfill/
+    //     cancel/projection sweep, each independently wrapped in the SAME
+    //     4-table zero-query instrumentation as above.
+    // =====================================================================
+
+    public function testCheckoutPlaceOrderIssuesZeroMarketplaceTableQueries(): void
+    {
+        $product = $this->seedLegacyProduct('regress-place-order');
+        $variantUuid = (string) $product['variants'][0]['uuid'];
+
+        ['cart' => $cart, 'token' => $token] = $this->cartService()->create($this->context);
+        $this->cartService()->addLine($this->context, $cart, $variantUuid, 1);
+
+        $this->assertNoMarketplaceQueries(function () use ($token): void {
+            $placed = $this->checkoutService()->placeOrder(
+                $this->context,
+                $token,
+                $this->buyer(),
+                $this->addresses(),
+                'std'
+            );
+            self::assertFalse((bool) $placed['order']['marketplace_partitioned']);
+        });
+    }
+
+    public function testMarkPaidIssuesZeroMarketplaceTableQueries(): void
+    {
+        $order = $this->placeNonPartitionedOrder()['order'];
+
+        $this->assertNoMarketplaceQueries(function () use ($order): void {
+            $this->paymentService()->markPaid($this->context, self::TENANT, (string) $order['uuid']);
+        });
+
+        self::assertSame('paid', $this->orderRow((string) $order['uuid'])['status']);
+    }
+
+    public function testAdminFulfillIssuesZeroMarketplaceTableQueries(): void
+    {
+        $order = $this->placeNonPartitionedOrder()['order'];
+        $this->paymentService()->markPaid($this->context, self::TENANT, (string) $order['uuid']);
+
+        $this->assertNoMarketplaceQueries(function () use ($order): void {
+            $response = $this->marketplaceAdminOrderController()->fulfill(
+                new FulfillOrderData(tracking_ref: 'TRACK-REGRESS-1'),
+                Request::create('/x', 'POST'),
+                (string) $order['uuid']
+            );
+            self::assertSame(200, $response->getStatusCode());
+        });
+
+        self::assertSame('fulfilled', $this->orderRow((string) $order['uuid'])['status']);
+    }
+
+    public function testAdminCancelIssuesZeroMarketplaceTableQueries(): void
+    {
+        $order = $this->placeNonPartitionedOrder()['order'];
+
+        $this->assertNoMarketplaceQueries(function () use ($order): void {
+            $response = $this->marketplaceAdminOrderController()->cancel(
+                Request::create('/x', 'POST'),
+                (string) $order['uuid']
+            );
+            self::assertSame(200, $response->getStatusCode());
+        });
+
+        self::assertSame('canceled', $this->orderRow((string) $order['uuid'])['status']);
+    }
+
+    /**
+     * Closes the loop on `StorefrontSellerGroupsProjectionTest`'s own
+     * byte-identical assertion (no `seller_groups` key) by proving it under
+     * the SAME query-instrumented harness as every other path above: the
+     * customer order projection for a non-partitioned order never touches a
+     * marketplace table, and never carries `seller_groups`.
+     */
+    public function testCustomerOrderProjectionIssuesZeroMarketplaceTableQueriesAndIsByteIdentical(): void
+    {
+        $placed = $this->placeNonPartitionedOrder();
+        $this->paymentService()->markPaid($this->context, self::TENANT, (string) $placed['order']['uuid']);
+        $order = $placed['order'];
+        $number = (string) $order['order_number'];
+
+        $request = Request::create("/commerce/orders/{$number}", 'GET');
+        $request->headers->set('X-Order-Token', (string) $placed['guest_token']);
+
+        $body = null;
+        $this->assertNoMarketplaceQueries(function () use ($request, $number, &$body): void {
+            $response = $this->orderController()->show($request, $number);
+            self::assertSame(200, $response->getStatusCode());
+            $body = json_decode((string) $response->getContent(), true);
+        });
+
+        self::assertArrayNotHasKey('seller_groups', $body['data']);
+        self::assertSame(0, $this->connection->table('commerce_seller_orders')->count());
     }
 
     // =====================================================================
@@ -430,13 +557,21 @@ final class MarketplaceRegressionTest extends CommerceTestCase
     // 4. Maintenance exceptions stay marketplace-aware with the switch off.
     // =====================================================================
 
-    public function testDiagnosticsReportListsAllThreeMarketplaceTablesAsPresentWithTheSwitchOff(): void
+    public function testDiagnosticsReportListsAllFourMarketplaceTablesAsPresentWithTheSwitchOff(): void
     {
         self::assertFalse((bool) config($this->context, 'commerce.marketplace.enabled', false));
 
         $present = DiagnosticsReport::build($this->context)['database']['commerce_tables_present'];
 
-        foreach (['commerce_marketplace_settings', 'commerce_sellers', 'commerce_seller_memberships'] as $table) {
+        // MV1 trio + the MV2 commerce_seller_orders table (design spec §7):
+        // maintenance surfaces stay marketplace-aware regardless of the switch.
+        $marketplaceTables = [
+            'commerce_marketplace_settings',
+            'commerce_sellers',
+            'commerce_seller_memberships',
+            'commerce_seller_orders',
+        ];
+        foreach ($marketplaceTables as $table) {
             self::assertArrayHasKey($table, $present);
             self::assertTrue(
                 $present[$table],
@@ -526,6 +661,122 @@ final class MarketplaceRegressionTest extends CommerceTestCase
             'a body-supplied seller_uuid must never move attribution, even when the update otherwise succeeds'
         );
         self::assertSame('Regress RMW Hijack Renamed', $row['name'], 'every other field in the payload still applies');
+    }
+
+    // =====================================================================
+    // 6. Partition invariance (design spec §7, MV2 Task 10): behavior
+    //    follows the ORDER's own immutable marketplace_partitioned snapshot,
+    //    never the workspace's current activeFor() state.
+    // =====================================================================
+
+    /**
+     * An order placed while the workspace was ACTIVE keeps child-aware
+     * fulfillment and keeps exposing `seller_groups` even AFTER the
+     * workspace is later deactivated (deactivation is non-destructive,
+     * design spec §2.3) -- the order's own `marketplace_partitioned` flag,
+     * set once at placement, is what governs, not the workspace's current
+     * `activeFor()`.
+     */
+    public function testPartitionedOrderStaysChildAwareAndKeepsSellerGroupsAfterTheWorkspaceDeactivates(): void
+    {
+        $this->enableMarketplace();
+        $this->activateWorkspace(self::TENANT);
+        $sellerA = $this->seedActiveSeller('regress-inv-seller-a');
+        $sellerB = $this->seedActiveSeller('regress-inv-seller-b');
+        $productA = $this->seedAttributedProduct('regress-inv-prod-a', $sellerA['uuid']);
+        $productB = $this->seedAttributedProduct('regress-inv-prod-b', $sellerB['uuid']);
+        $stock = new StockRepository();
+        $stock->increment($this->context, self::TENANT, (string) $productA['variants'][0]['uuid'], 10);
+        $stock->increment($this->context, self::TENANT, (string) $productB['variants'][0]['uuid'], 10);
+
+        $cartService = $this->cartService();
+        ['cart' => $cart, 'token' => $token] = $cartService->create($this->context);
+        $cart = $cartService->addLine($this->context, $cart, (string) $productA['variants'][0]['uuid'], 1);
+        $cartService->addLine($this->context, $cart, (string) $productB['variants'][0]['uuid'], 1);
+
+        $placed = $this->marketplaceCheckoutService()
+            ->placeOrder($this->context, $token, $this->buyer(), $this->addresses(), 'std');
+        $order = $placed['order'];
+        self::assertTrue((bool) $order['marketplace_partitioned']);
+
+        $this->paymentService()->markPaid($this->context, self::TENANT, (string) $order['uuid']);
+
+        // Deactivate the workspace -- non-destructive, so history stays intact.
+        $this->connection->table('commerce_marketplace_settings')
+            ->where('tenant_uuid', '=', self::TENANT)
+            ->update(['status' => 'disabled']);
+        self::assertFalse((new MarketplaceMode())->activeFor($this->context, self::TENANT));
+
+        self::assertCount(
+            2,
+            $this->connection->table('commerce_seller_orders')
+                ->where('order_uuid', '=', (string) $order['uuid'])
+                ->get()
+        );
+
+        // Fulfillment stays child-aware: the operator fan-out still transitions
+        // every child and rolls the parent up to fulfilled.
+        $response = $this->marketplaceAdminOrderController()->fulfill(
+            new FulfillOrderData(tracking_ref: 'TRACK-INVARIANCE-1'),
+            Request::create('/x', 'POST'),
+            (string) $order['uuid']
+        );
+        self::assertSame(200, $response->getStatusCode());
+        self::assertSame('fulfilled', $this->orderRow((string) $order['uuid'])['status']);
+        foreach (
+            $this->connection->table('commerce_seller_orders')
+                ->where('order_uuid', '=', (string) $order['uuid'])
+                ->get() as $child
+        ) {
+            self::assertSame('fulfilled', $child['fulfillment_status']);
+        }
+
+        // The customer projection still exposes seller_groups.
+        $request = Request::create('/commerce/orders/' . $order['order_number'], 'GET');
+        $request->headers->set('X-Order-Token', (string) $placed['guest_token']);
+        $body = json_decode(
+            (string) $this->orderController()->show($request, (string) $order['order_number'])->getContent(),
+            true
+        );
+        self::assertArrayHasKey('seller_groups', $body['data']);
+        self::assertCount(2, $body['data']['seller_groups']);
+    }
+
+    /**
+     * The mirror image: a NON-partitioned order (placed while the master
+     * switch was off) stays byte-identical -- zero seller-table queries, no
+     * `seller_groups`, direct (non-fan-out) parent fulfill -- even after the
+     * workspace is LATER installed and activated. Later activation must
+     * never retroactively re-partition an already-placed order.
+     */
+    public function testNonPartitionedOrderStaysByteIdenticalRegardlessOfLaterActivation(): void
+    {
+        $placed = $this->placeNonPartitionedOrder();
+        $order = $placed['order'];
+        $this->paymentService()->markPaid($this->context, self::TENANT, (string) $order['uuid']);
+
+        $this->enableMarketplace();
+        $this->activateWorkspace(self::TENANT);
+        self::assertTrue((new MarketplaceMode())->activeFor($this->context, self::TENANT));
+
+        $this->assertNoMarketplaceQueries(function () use ($order): void {
+            $response = $this->marketplaceAdminOrderController()->fulfill(
+                new FulfillOrderData(tracking_ref: 'TRACK-INVARIANCE-2'),
+                Request::create('/x', 'POST'),
+                (string) $order['uuid']
+            );
+            self::assertSame(200, $response->getStatusCode());
+        });
+        self::assertSame('fulfilled', $this->orderRow((string) $order['uuid'])['status']);
+
+        $request = Request::create('/commerce/orders/' . $order['order_number'], 'GET');
+        $request->headers->set('X-Order-Token', (string) $placed['guest_token']);
+        $body = json_decode(
+            (string) $this->orderController()->show($request, (string) $order['order_number'])->getContent(),
+            true
+        );
+        self::assertArrayNotHasKey('seller_groups', $body['data']);
+        self::assertSame(0, $this->connection->table('commerce_seller_orders')->count());
     }
 
     // -----------------------------------------------------------------
@@ -723,6 +974,102 @@ final class MarketplaceRegressionTest extends CommerceTestCase
             new ManualPaymentCollector(),
             $this->fixedTenant()
         );
+    }
+
+    /**
+     * MV2 Task 10: wired WITH the marketplace collaborators (unlike
+     * `checkoutService()` above, which is byte-identical to the pre-MV2
+     * constructor arity) -- used only by the partition-invariance test that
+     * needs a genuinely partitioned checkout.
+     */
+    private function marketplaceCheckoutService(): CheckoutService
+    {
+        return new CheckoutService(
+            $this->cartService(),
+            new DiscountRepository(),
+            new DiscountService(new DiscountRepository(), $this->fixedTenant()),
+            new StockRepository(),
+            new PricingEngine(),
+            $this->fakeShipping(),
+            $this->fakeTax(),
+            new OrderNumberGenerator(),
+            new OrderRepository(),
+            new DownloadRepository(),
+            new ManualPaymentCollector(),
+            $this->fixedTenant(),
+            new MarketplaceMode(),
+            new SellerRepository(),
+            new ProductRepository(),
+            new SellerOrderRepository()
+        );
+    }
+
+    /**
+     * Wired WITH the `SellerOrderPaymentConfirmation` collaborator so the
+     * MV2 Task 10 zero-query proofs exercise the REAL branch condition
+     * (the order's own `marketplace_partitioned` flag) rather than merely a
+     * missing collaborator.
+     */
+    private function paymentService(): OrderPaymentService
+    {
+        return new OrderPaymentService(new OrderRepository(), new SellerOrderPaymentConfirmation());
+    }
+
+    private function marketplaceAdminOrderController(): AdminOrderController
+    {
+        return new AdminOrderController(
+            $this->context,
+            new OrderRepository(),
+            new StockRepository(),
+            $this->paymentService(),
+            $this->fixedTenant(),
+            new RefundRepository(),
+            new ConfigSellerIdentityProvider(),
+            new SellerOrderRepository()
+        );
+    }
+
+    private function orderController(): OrderController
+    {
+        return new OrderController(
+            $this->context,
+            new OrderRepository(),
+            $this->checkoutService(),
+            $this->fixedTenant(),
+            new RefundRepository()
+        );
+    }
+
+    /** @return array{order: array<string,mixed>, guest_token: string, payment: array<string,mixed>} */
+    private function placeNonPartitionedOrder(): array
+    {
+        $product = $this->seedLegacyProduct('regress-nonpart-order');
+        $cartService = $this->cartService();
+        ['cart' => $cart, 'token' => $token] = $cartService->create($this->context);
+        $cartService->addLine($this->context, $cart, (string) $product['variants'][0]['uuid'], 1);
+
+        return $this->checkoutService()->placeOrder($this->context, $token, $this->buyer(), $this->addresses(), 'std');
+    }
+
+    /** @return array<string,mixed> */
+    private function orderRow(string $uuid): array
+    {
+        $row = $this->connection->table('commerce_orders')->where('uuid', '=', $uuid)->first();
+        self::assertNotNull($row);
+
+        return $row;
+    }
+
+    /** @return array{email: string, user_uuid: null} */
+    private function buyer(): array
+    {
+        return ['email' => 'buyer@example.com', 'user_uuid' => null];
+    }
+
+    /** @return array{shipping: array{country: string}, billing: array{country: string}} */
+    private function addresses(): array
+    {
+        return ['shipping' => ['country' => 'US'], 'billing' => ['country' => 'US']];
     }
 
     private function fakeShipping(): ShippingRateProvider

@@ -196,6 +196,11 @@ final class DiagnosticsReport
             'commerce_marketplace_settings',
             'commerce_sellers',
             'commerce_seller_memberships',
+            // Marketplace MV2 shared checkout (design spec §3.3, §7). Marketplace-aware
+            // REGARDLESS of `commerce.marketplace.enabled` for the same reason as the MV1
+            // trio immediately above: a partitioned order's seller partitions must stay
+            // coherent for diagnostics and tenant adoption even after the switch flips off.
+            'commerce_seller_orders',
         ];
     }
 

@@ -85,6 +85,51 @@ final class TenantAdopterTest extends CommerceTestCase
         }
     }
 
+    /**
+     * Design spec §7/§3.3, MV2 Task 10: `commerce_seller_orders` is
+     * marketplace-aware regardless of the master switch, exactly like the
+     * MV1 trio above -- {@see \Glueful\Extensions\Commerce\Support\DiagnosticsReport::tenantTables()}
+     * lists it unconditionally, so `TenantAdopter` rekeys it too, switch off
+     * or on.
+     */
+    public function testAdoptRekeysSellerOrdersTableEvenWhenTheMasterSwitchIsOff(): void
+    {
+        self::assertFalse(
+            (bool) config($this->context, 'commerce.marketplace.enabled', false),
+            'this test relies on the master switch being off (the default)'
+        );
+
+        $this->connection->table('commerce_seller_orders')->insert([
+            'uuid' => 'mktadoptso01',
+            'tenant_uuid' => '',
+            'order_uuid' => 'mktadoptord1',
+            'seller_uuid' => 'mktadoptsel1',
+            'seller_name_snapshot' => 'Sentinel Seller',
+            'partition_number' => 1,
+            'seller_reference' => 'MKTADOPT-1',
+            'currency' => 'USD',
+            'subtotal' => 1000,
+            'attributed_total' => 1000,
+            'tax_attribution_method' => 'aggregate_allocated',
+        ]);
+
+        $result = (new TenantAdopter())->adopt($this->context, 'tenantMKT0002');
+
+        self::assertSame(1, $result['tables']['commerce_seller_orders']);
+        self::assertSame(
+            0,
+            $this->connection->table('commerce_seller_orders')->where('tenant_uuid', '=', '')->count(),
+            'commerce_seller_orders must have no sentinel rows left behind'
+        );
+        self::assertSame(
+            1,
+            $this->connection->table('commerce_seller_orders')
+                ->where('tenant_uuid', '=', 'tenantMKT0002')
+                ->count(),
+            'commerce_seller_orders row must be rekeyed to the adopted tenant'
+        );
+    }
+
     private function seedSentinelCatalog(): void
     {
         (new CatalogService(

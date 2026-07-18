@@ -3,18 +3,18 @@
 declare(strict_types=1);
 
 /**
- * Standalone subprocess for MarketplacePgsqlTest's real-pgsql race lanes:
- * runs ONE real marketplace service call in a genuinely separate OS process
- * (and therefore a genuinely separate database connection), so its lock
- * claims really block on PostgreSQL row-lock contention held by the parent
- * test process's own connection A. Mirrors
+ * Standalone subprocess for MarketplacePgsqlTest/CheckoutClaimPgsqlTest's
+ * real-pgsql race lanes: runs ONE real marketplace service call in a
+ * genuinely separate OS process (and therefore a genuinely separate database
+ * connection), so its lock claims really block on PostgreSQL row-lock
+ * contention held by the parent test process's own connection A. Mirrors
  * `tests/Integration/Http/fixtures/product_delete_race_child.php`'s shape
  * exactly; a single multiplexed script (rather than one file per action)
  * because every action here shares the identical bootstrap and only differs
  * in which service method it calls and how it reports the outcome.
  *
  * argv: 1=pgConfig JSON, 2=action, 3=args JSON
- * actions: create | activate | assign | close | changeRole
+ * actions: create | activate | assign | close | changeRole | checkout
  * stdout: JSON, shape depends on action (see each branch below)
  */
 
@@ -22,10 +22,17 @@ require __DIR__ . '/../../../../vendor/autoload.php';
 
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Database\Connection;
+use Glueful\Extensions\Commerce\Cart\CartRepository;
+use Glueful\Extensions\Commerce\Cart\CartService;
 use Glueful\Extensions\Commerce\Catalog\CatalogService;
+use Glueful\Extensions\Commerce\Catalog\DownloadRepository;
 use Glueful\Extensions\Commerce\Catalog\ProductChildrenRepository;
 use Glueful\Extensions\Commerce\Catalog\ProductRepository;
 use Glueful\Extensions\Commerce\Catalog\VariantRepository;
+use Glueful\Extensions\Commerce\Contracts\ShippingRateProvider;
+use Glueful\Extensions\Commerce\Contracts\TaxCalculator;
+use Glueful\Extensions\Commerce\Discounts\DiscountRepository;
+use Glueful\Extensions\Commerce\Discounts\DiscountService;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
 use Glueful\Extensions\Commerce\Marketplace\FixedSellerRoleAuthority;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceActivationException;
@@ -35,7 +42,15 @@ use Glueful\Extensions\Commerce\Marketplace\MarketplaceWorkspaceLock;
 use Glueful\Extensions\Commerce\Marketplace\SellerAttributionService;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipService;
+use Glueful\Extensions\Commerce\Marketplace\SellerOrderRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerRepository;
+use Glueful\Extensions\Commerce\Orders\CheckoutService;
+use Glueful\Extensions\Commerce\Orders\OrderNumberGenerator;
+use Glueful\Extensions\Commerce\Orders\OrderRepository;
+use Glueful\Extensions\Commerce\Payments\ManualPaymentCollector;
+use Glueful\Extensions\Commerce\Pricing\PricingEngine;
+use Glueful\Extensions\Commerce\Pricing\ShippingQuote;
+use Glueful\Extensions\Commerce\Pricing\TaxQuote;
 use Glueful\Extensions\Commerce\Shipping\ShippingClassRepository;
 use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
@@ -163,6 +178,69 @@ try {
             );
             $seller = $sellers->close($context, $tenant, (string) $args['sellerUuid'], $args['actor'] ?? null);
             $out = ['ok' => true, 'closed' => true, 'status' => $seller['status'], 'exceptionClass' => null];
+            break;
+
+        case 'checkout':
+            $cartService = new CartService(
+                new CartRepository(),
+                new VariantRepository(),
+                new ProductRepository(),
+                new StockRepository(),
+                new DiscountRepository(),
+                new PricingEngine(),
+                $fixedTenant($tenant)
+            );
+            $created = $cartService->create($context);
+            $cartService->addLine($context, $created['cart'], (string) $args['variantUuid'], 1);
+
+            $checkout = new CheckoutService(
+                $cartService,
+                new DiscountRepository(),
+                new DiscountService(new DiscountRepository(), $fixedTenant($tenant)),
+                new StockRepository(),
+                new PricingEngine(),
+                new class implements ShippingRateProvider {
+                    public function quote(ApplicationContext $context, array $lines, array $shippingAddress): array
+                    {
+                        return [new ShippingQuote('std', 'Standard', 0)];
+                    }
+                },
+                new class implements TaxCalculator {
+                    public function quote(
+                        ApplicationContext $context,
+                        int $grandTotal,
+                        array $shippingAddress
+                    ): TaxQuote {
+                        return new TaxQuote(0);
+                    }
+                },
+                new OrderNumberGenerator(),
+                new OrderRepository(),
+                new DownloadRepository(),
+                new ManualPaymentCollector(),
+                $fixedTenant($tenant),
+                new MarketplaceMode(),
+                new SellerRepository(),
+                new ProductRepository(),
+                new SellerOrderRepository()
+            );
+
+            $placed = $checkout->placeOrder(
+                $context,
+                $created['token'],
+                ['email' => 'racebuyer@example.com', 'user_uuid' => null],
+                ['shipping' => ['country' => 'US'], 'billing' => ['country' => 'US']],
+                null
+            );
+            $orderUuid = (string) $placed['order']['uuid'];
+            $line = $connection->table('commerce_order_lines')->where('order_uuid', '=', $orderUuid)->first();
+            $out = [
+                'ok' => true,
+                'orderUuid' => $orderUuid,
+                'partitioned' => (bool) $placed['order']['marketplace_partitioned'],
+                'sellerUuid' => $line['seller_uuid'] ?? null,
+                'exceptionClass' => null,
+            ];
             break;
 
         case 'changeRole':

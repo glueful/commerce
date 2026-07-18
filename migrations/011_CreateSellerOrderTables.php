@@ -54,7 +54,14 @@ final class CreateSellerOrderTables implements MigrationInterface
                 $table->unique(['order_uuid', 'partition_number']);
                 $table->unique(['tenant_uuid', 'seller_reference']);
                 $table->unique(['tenant_uuid', 'uuid']);
-                $table->index(['tenant_uuid', 'seller_uuid', 'confirmed_at', 'fulfillment_status']);
+                // Explicit short name: the auto-generated 4-column name (84 bytes) silently
+                // truncates on PostgreSQL's 63-byte NAMEDATALEN limit -- SQLite stores it
+                // verbatim, so the divergence is invisible without a real pgsql run (see
+                // MarketplaceOrderShapeTest's PostgreSQL convergence lane).
+                $table->index(
+                    ['tenant_uuid', 'seller_uuid', 'confirmed_at', 'fulfillment_status'],
+                    'commerce_seller_orders_confirmed_listing_index'
+                );
                 $table->index('order_uuid');
             });
         }

@@ -54,14 +54,22 @@ final class HttpDocumentationTest extends CommerceTestCase
     }
 
     /**
-     * Marketplace MV1 (plan Task 5): with `commerce.marketplace.enabled`
-     * off (the default the test above walks), `routes.php` never registers
-     * the `/commerce/admin/marketplace/*` or `/commerce/seller/*` groups at
-     * all -- so the walk above cannot enforce `#[ApiOperation]`/
-     * `#[ApiResponse]` on any of their actions; there is nothing to find.
-     * This second pass flips the master switch ON before building a fresh
-     * `Router`, so every marketplace/seller route action added in MV1 gets
-     * the SAME documentation-gate enforcement as every pre-existing route.
+     * Marketplace MV1 (plan Task 5), extended by MV2 (plan Task 10): with
+     * `commerce.marketplace.enabled` off (the default the test above
+     * walks), `routes.php` never registers the `/commerce/admin/marketplace/*`
+     * or `/commerce/seller/*` groups at all -- so the walk above cannot
+     * enforce `#[ApiOperation]`/`#[ApiResponse]` on any of their actions;
+     * there is nothing to find. This second pass flips the master switch ON
+     * before building a fresh `Router`, so every marketplace/seller route
+     * action -- MV1's AND MV2's, since every new seller-order/
+     * admin-seller-order route lives in the SAME `if ($marketplaceEnabled)`
+     * gate (`routes.php`) -- gets the SAME documentation-gate enforcement as
+     * every pre-existing route. `commerceRouteActions()`'s walk is fully
+     * generic (every `[class, method]` handler under the commerce HTTP
+     * namespace, no hand-maintained list), so it automatically picks up new
+     * MV2 actions with zero changes; the explicit path assertions below only
+     * pin that the NEW routes are genuinely present in this pass (never
+     * silently absent), not that they're individually documented.
      */
     public function testEveryCommerceRouteActionIsDocumentedWithMarketplaceEnabled(): void
     {
@@ -77,6 +85,14 @@ final class HttpDocumentationTest extends CommerceTestCase
             array_filter($paths, static fn (string $path): bool => str_starts_with($path, '/commerce/seller')),
             'Expected at least one seller-scoped route once the master switch is on.'
         );
+
+        // MV2 Task 10: the new seller-order/admin-seller-order routes
+        // specifically (§6.1/§6.2) -- proves they're genuinely walked by
+        // this pass, not merely covered "in principle" by the generic scan.
+        self::assertContains('/commerce/admin/orders/{uuid}/seller-orders/{sellerOrderUuid}/fulfill', $paths);
+        self::assertContains('/commerce/seller/{sellerUuid}/orders', $paths);
+        self::assertContains('/commerce/seller/{sellerUuid}/orders/{sellerOrderUuid}', $paths);
+        self::assertContains('/commerce/seller/{sellerUuid}/orders/{sellerOrderUuid}/fulfill', $paths);
 
         $this->assertEveryCommerceRouteActionIsDocumented($router, $actions);
     }
