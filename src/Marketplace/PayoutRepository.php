@@ -30,4 +30,34 @@ final class PayoutRepository
             ->where('idempotency_key', '=', $idempotencyKey)
             ->first();
     }
+
+    /**
+     * Every payout for a seller, newest first (design spec §6.2, MV3 Task 11)
+     * -- the seller/operator financial surfaces
+     * ({@see \Glueful\Extensions\Commerce\Http\Seller\SellerFinancialController},
+     * {@see \Glueful\Extensions\Commerce\Http\Admin\AdminMarketplaceFinancialController})
+     * expose. Optionally currency-scoped, mirroring the ledger's own
+     * currency-separated balances (§2.9). House pagination (array_slice) is
+     * applied by the caller, the same convention
+     * {@see SellerOrderRepository::confirmedForSeller()} + `SellerOrderService::list()`
+     * already establish.
+     *
+     * @return list<array<string,mixed>>
+     */
+    public function forSeller(
+        ApplicationContext $context,
+        string $tenant,
+        string $sellerUuid,
+        ?string $currency = null
+    ): array {
+        $query = db($context)->table('commerce_payouts')
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('seller_uuid', '=', $sellerUuid);
+
+        if ($currency !== null && $currency !== '') {
+            $query->where('currency', '=', $currency);
+        }
+
+        return $query->orderBy('id', 'DESC')->get();
+    }
 }

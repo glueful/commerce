@@ -48,6 +48,7 @@ use Glueful\Extensions\Commerce\Http\Admin\AdminCustomerController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminDiscountController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminDownloadController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminGrantController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminMarketplaceFinancialController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminMediaController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminOrderController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminPayoutController;
@@ -63,6 +64,7 @@ use Glueful\Extensions\Commerce\Http\Admin\AdminTaxRateController;
 use Glueful\Extensions\Commerce\Http\Admin\MarketplaceAdminController;
 use Glueful\Extensions\Commerce\Http\Middleware\SellerMemberMiddleware;
 use Glueful\Extensions\Commerce\Http\Seller\SellerCatalogController;
+use Glueful\Extensions\Commerce\Http\Seller\SellerFinancialController;
 use Glueful\Extensions\Commerce\Http\Seller\SellerInventoryController;
 use Glueful\Extensions\Commerce\Http\Seller\SellerMembershipController;
 use Glueful\Extensions\Commerce\Http\Seller\SellerOrderController;
@@ -95,6 +97,7 @@ use Glueful\Extensions\Commerce\Marketplace\MarketplaceRefundGuard;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceWorkspaceLock;
 use Glueful\Extensions\Commerce\Marketplace\PayoutRepository;
 use Glueful\Extensions\Commerce\Marketplace\PayoutService;
+use Glueful\Extensions\Commerce\Marketplace\ReconciliationService;
 use Glueful\Extensions\Commerce\Marketplace\SellerAttributionService;
 use Glueful\Extensions\Commerce\Marketplace\SellerBalanceService;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipRepository;
@@ -123,6 +126,7 @@ use Glueful\Extensions\Commerce\Pricing\PricingEngine;
 use Glueful\Extensions\Commerce\Reports\CustomerReportRepository;
 use Glueful\Extensions\Commerce\Reports\ProductSalesReportRepository;
 use Glueful\Extensions\Commerce\Reports\SalesReportRepository;
+use Glueful\Extensions\Commerce\Reports\SellerFinancialReportRepository;
 use Glueful\Extensions\Commerce\Reports\StockReportRepository;
 use Glueful\Extensions\Commerce\Shipping\ConfigShippingRateProvider;
 use Glueful\Extensions\Commerce\Shipping\DbShippingRateProvider;
@@ -402,6 +406,10 @@ final class CommerceServiceProvider extends ServiceProvider
                 'shared' => true,
                 'autowire' => true,
             ],
+            ReconciliationService::class => [
+                'class' => ReconciliationService::class,
+                'shared' => true,
+            ],
             AdminPayoutController::class => [
                 'factory' => [self::class, 'makeAdminPayoutController'],
                 'shared' => true,
@@ -590,6 +598,18 @@ final class CommerceServiceProvider extends ServiceProvider
             ],
             AdminReportController::class => [
                 'factory' => [self::class, 'makeAdminReportController'],
+                'shared' => true,
+            ],
+            SellerFinancialReportRepository::class => [
+                'class' => SellerFinancialReportRepository::class,
+                'shared' => true,
+            ],
+            SellerFinancialController::class => [
+                'factory' => [self::class, 'makeSellerFinancialController'],
+                'shared' => true,
+            ],
+            AdminMarketplaceFinancialController::class => [
+                'factory' => [self::class, 'makeAdminMarketplaceFinancialController'],
                 'shared' => true,
             ],
             AddressBookRepository::class => [
@@ -1201,6 +1221,19 @@ final class CommerceServiceProvider extends ServiceProvider
         );
     }
 
+    public static function makeAdminMarketplaceFinancialController(
+        ContainerInterface $container
+    ): AdminMarketplaceFinancialController {
+        return new AdminMarketplaceFinancialController(
+            $container->get(ApplicationContext::class),
+            $container->get(SellerBalanceService::class),
+            $container->get(LedgerRepository::class),
+            $container->get(SellerFinancialReportRepository::class),
+            $container->get(SellerRepository::class),
+            self::tenantResolver($container)
+        );
+    }
+
     public static function makeAddressBookService(ContainerInterface $container): AddressBookService
     {
         return new AddressBookService(
@@ -1382,6 +1415,18 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(ApplicationContext::class),
             $container->get(SellerOrderService::class),
             $container->get(SellerOrderFulfillmentService::class),
+            self::tenantResolver($container)
+        );
+    }
+
+    public static function makeSellerFinancialController(ContainerInterface $container): SellerFinancialController
+    {
+        return new SellerFinancialController(
+            $container->get(ApplicationContext::class),
+            $container->get(SellerFinancialReportRepository::class),
+            $container->get(SellerBalanceService::class),
+            $container->get(PayoutRepository::class),
+            $container->get(MarketplaceMode::class),
             self::tenantResolver($container)
         );
     }

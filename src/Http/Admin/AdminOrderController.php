@@ -369,11 +369,21 @@ final class AdminOrderController
      * columns are excluded on principle, matching every other projection in
      * this codebase.
      *
+     * `commission_amount`/`net` (design spec §6.1, MV3 Task 11): the child's
+     * own immutable checkout-time commission snapshot sum (§2.4) and the
+     * operator-facing net figure derived from it (`attributed_total -
+     * commission_amount`) -- never re-resolved from current policy, exactly
+     * like the ledger's own `commission_reversal` math (§2.8) always derives
+     * from these SAME snapshots, never live policy.
+     *
      * @param array<string,mixed> $row
      * @return array<string,mixed>
      */
     private function sellerOrderProjection(array $row): array
     {
+        $attributedTotal = (int) $row['attributed_total'];
+        $commissionAmount = (int) ($row['commission_amount'] ?? 0);
+
         return [
             'uuid' => (string) $row['uuid'],
             'seller_uuid' => (string) $row['seller_uuid'],
@@ -386,7 +396,9 @@ final class AdminOrderController
             'allocated_shipping_discount' => (int) $row['allocated_shipping_discount'],
             'allocated_shipping' => (int) $row['allocated_shipping'],
             'allocated_tax' => (int) $row['allocated_tax'],
-            'attributed_total' => (int) $row['attributed_total'],
+            'attributed_total' => $attributedTotal,
+            'commission_amount' => $commissionAmount,
+            'net' => $attributedTotal - $commissionAmount,
             'tax_attribution_method' => (string) $row['tax_attribution_method'],
             'confirmed_at' => $row['confirmed_at'],
             'fulfillment_status' => (string) $row['fulfillment_status'],

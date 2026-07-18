@@ -17,6 +17,7 @@ use Glueful\Extensions\Commerce\Http\Admin\AdminCustomerController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminDiscountController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminDownloadController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminGrantController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminMarketplaceFinancialController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminMediaController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminOrderController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminPayoutController;
@@ -31,6 +32,7 @@ use Glueful\Extensions\Commerce\Http\Admin\AdminTagController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminTaxRateController;
 use Glueful\Extensions\Commerce\Http\Admin\MarketplaceAdminController;
 use Glueful\Extensions\Commerce\Http\Seller\SellerCatalogController;
+use Glueful\Extensions\Commerce\Http\Seller\SellerFinancialController;
 use Glueful\Extensions\Commerce\Http\Seller\SellerInventoryController;
 use Glueful\Extensions\Commerce\Http\Seller\SellerMembershipController;
 use Glueful\Extensions\Commerce\Http\Seller\SellerOrderController;
@@ -347,6 +349,22 @@ if ($marketplaceEnabled) {
         $router->post('/marketplace/adjustments', [AdminPayoutController::class, 'storeAdjustment'])
             ->middleware($write);
 
+        // Operator financial surfaces (design spec §6.1, MV3 Task 11): the
+        // marketplace account's own summary plus any seller's balance/report --
+        // read-only, gated the SAME way as every other route in this group.
+        $router->get(
+            '/marketplace/financials/summary',
+            [AdminMarketplaceFinancialController::class, 'marketplaceSummary']
+        )->middleware($read);
+        $router->get(
+            '/marketplace/sellers/{uuid}/balance',
+            [AdminMarketplaceFinancialController::class, 'sellerBalance']
+        )->middleware($read);
+        $router->get(
+            '/marketplace/sellers/{uuid}/report',
+            [AdminMarketplaceFinancialController::class, 'sellerReport']
+        )->middleware($read);
+
         // Marketplace MV2 (design spec §6.2, Task 9): operator fulfills ANY
         // seller order directly. Gated the SAME way as every other route in
         // this group -- with the install master switch off, a
@@ -382,6 +400,8 @@ if ($marketplaceEnabled) {
         $membersManage = 'commerce_seller:commerce.seller.members.manage';
         $ordersRead = 'commerce_seller:commerce.seller.orders.read';
         $ordersFulfill = 'commerce_seller:commerce.seller.orders.fulfill';
+        $reportsRead = 'commerce_seller:commerce.seller.reports.read';
+        $payoutsRead = 'commerce_seller:commerce.seller.payouts.read';
 
         $router->get('/mine', [SellerMembershipController::class, 'mine']);
 
@@ -423,5 +443,19 @@ if ($marketplaceEnabled) {
             ->middleware($ordersRead);
         $router->post('/{sellerUuid}/orders/{sellerOrderUuid}/fulfill', [SellerOrderController::class, 'fulfill'])
             ->middleware($ordersFulfill);
+
+        // Seller financial surfaces (design spec §6.2, MV3 Task 11): windowed
+        // report, live balance + components, payouts, and the effective
+        // commission policy -- all read-only, own seller only. `reports.read`
+        // gates report/balance/commission-policy; `payouts.read` gates payouts
+        // (design spec §6.2 -- commission-policy read folds into `reports.read`).
+        $router->get('/{sellerUuid}/financials/report', [SellerFinancialController::class, 'report'])
+            ->middleware($reportsRead);
+        $router->get('/{sellerUuid}/financials/balance', [SellerFinancialController::class, 'balance'])
+            ->middleware($reportsRead);
+        $router->get('/{sellerUuid}/payouts', [SellerFinancialController::class, 'payouts'])
+            ->middleware($payoutsRead);
+        $router->get('/{sellerUuid}/commission-policy', [SellerFinancialController::class, 'commissionPolicy'])
+            ->middleware($reportsRead);
     });
 }

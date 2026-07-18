@@ -11,14 +11,18 @@ use Glueful\Extensions\Commerce\Catalog\ProductRepository;
 use Glueful\Extensions\Commerce\Catalog\VariantRepository;
 use Glueful\Extensions\Commerce\Http\Middleware\SellerMemberMiddleware;
 use Glueful\Extensions\Commerce\Http\Seller\SellerCatalogController;
+use Glueful\Extensions\Commerce\Http\Seller\SellerFinancialController;
 use Glueful\Extensions\Commerce\Http\Seller\SellerInventoryController;
 use Glueful\Extensions\Commerce\Http\Seller\SellerMembershipController;
 use Glueful\Extensions\Commerce\Http\Seller\SellerOrderController;
 use Glueful\Extensions\Commerce\Inventory\InventoryService;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
 use Glueful\Extensions\Commerce\Marketplace\FixedSellerRoleAuthority;
+use Glueful\Extensions\Commerce\Marketplace\LedgerRepository;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceMode;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceWorkspaceLock;
+use Glueful\Extensions\Commerce\Marketplace\PayoutRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerBalanceService;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipService;
 use Glueful\Extensions\Commerce\Marketplace\SellerOrderFulfillmentService;
@@ -27,6 +31,7 @@ use Glueful\Extensions\Commerce\Marketplace\SellerOrderService;
 use Glueful\Extensions\Commerce\Marketplace\SellerRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerService;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
+use Glueful\Extensions\Commerce\Reports\SellerFinancialReportRepository;
 use Glueful\Extensions\Commerce\Shipping\ShippingClassRepository;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Glueful\Http\Exceptions\Handler as ExceptionHandler;
@@ -79,6 +84,7 @@ abstract class CommerceRouterTestCase extends CommerceTestCase
         $this->bind(SellerInventoryController::class, $this->buildInventoryController());
         $this->bind(SellerMembershipController::class, $this->buildMembershipController());
         $this->bind(SellerOrderController::class, $this->buildSellerOrderController());
+        $this->bind(SellerFinancialController::class, $this->buildSellerFinancialController());
 
         $router = new Router($this->contextContainer());
 
@@ -278,6 +284,26 @@ abstract class CommerceRouterTestCase extends CommerceTestCase
             $this->context,
             new SellerOrderService($sellerOrders, $orders, $this->fixedTenant()),
             new SellerOrderFulfillmentService($orders, $sellerOrders),
+            $this->fixedTenant()
+        );
+    }
+
+    /**
+     * Seller financial surfaces (design spec §6.2, MV3 Task 11): a REAL
+     * {@see SellerFinancialController} wired against a REAL
+     * {@see SellerFinancialReportRepository}/{@see SellerBalanceService}/
+     * {@see PayoutRepository}/{@see MarketplaceMode} stack, sharing the SAME
+     * {@see LedgerRepository} instance {@see SellerBalanceService} wraps --
+     * mirroring every other `build*Controller()` helper above.
+     */
+    protected function buildSellerFinancialController(): SellerFinancialController
+    {
+        return new SellerFinancialController(
+            $this->context,
+            new SellerFinancialReportRepository(),
+            new SellerBalanceService(new LedgerRepository()),
+            new PayoutRepository(),
+            new MarketplaceMode(),
             $this->fixedTenant()
         );
     }
