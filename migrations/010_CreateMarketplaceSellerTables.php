@@ -24,6 +24,14 @@ final class CreateMarketplaceSellerTables implements MigrationInterface
                 $table->string('tenant_uuid', 12)->default('');
                 $table->string('status', 16);
                 $table->string('default_seller_uuid', 12)->nullable();
+                // Marketplace commission policy (MV3, design spec §2.2/§3.1): the
+                // workspace-wide fallback level in the product -> seller ->
+                // workspace-settings -> config precedence chain. All three nullable --
+                // null means "inherit config" (config/commerce.php marketplace.commission,
+                // the total, never-all-null tail).
+                $table->string('commission_kind', 16)->nullable();
+                $table->integer('commission_bps')->nullable();
+                $table->bigInteger('commission_fixed')->nullable();
                 $table->string('activated_by', 12)->nullable();
                 $table->timestamp('activated_at')->nullable();
                 $table->integer('revision')->default(0);
@@ -43,6 +51,12 @@ final class CreateMarketplaceSellerTables implements MigrationInterface
                 $table->string('slug', 64);
                 $table->string('name', 160);
                 $table->json('metadata')->nullable();
+                // Marketplace commission policy (MV3, design spec §2.2/§3.1): the
+                // per-seller override level. All three nullable -- null means "inherit
+                // workspace-settings" in the precedence chain above.
+                $table->string('commission_kind', 16)->nullable();
+                $table->integer('commission_bps')->nullable();
+                $table->bigInteger('commission_fixed')->nullable();
                 $table->string('status', 16)->default('active');
                 $table->integer('revision')->default(0);
                 $table->timestamp('created_at')->default('CURRENT_TIMESTAMP');

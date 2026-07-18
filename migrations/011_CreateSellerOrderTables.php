@@ -38,6 +38,10 @@ final class CreateSellerOrderTables implements MigrationInterface
                 $table->bigInteger('allocated_shipping')->default(0);
                 $table->bigInteger('allocated_tax')->default(0);
                 $table->bigInteger('attributed_total');
+                // Marketplace commission (MV3, design spec §2.1/§3.1): the exact sum of this
+                // seller's order lines' commission_amount snapshots -- an immutable checkout
+                // fact, never rewritten by later commission-policy edits.
+                $table->bigInteger('commission_amount')->default(0);
                 $table->string('tax_attribution_method', 20);
                 $table->timestamp('confirmed_at')->nullable();
                 $table->string('fulfillment_status', 16)->default('unfulfilled');

@@ -201,6 +201,15 @@ final class DiagnosticsReport
             // trio immediately above: a partitioned order's seller partitions must stay
             // coherent for diagnostics and tenant adoption even after the switch flips off.
             'commerce_seller_orders',
+            // Marketplace MV3 commission & settlement ledger (design spec §3.2-§3.5,
+            // §3.7). Marketplace-aware REGARDLESS of `commerce.marketplace.enabled` for
+            // the same reason as the MV1/MV2 tables above. All four carry `tenant_uuid`
+            // and are therefore swept by `tenantTables()` below by omission from its
+            // exclusion list -- no addition to that list needed.
+            'commerce_marketplace_ledger',
+            'commerce_ledger_account_locks',
+            'commerce_commission_policy_events',
+            'commerce_payouts',
         ];
     }
 

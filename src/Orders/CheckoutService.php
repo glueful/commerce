@@ -16,6 +16,8 @@ use Glueful\Extensions\Commerce\Discounts\DiscountService;
 use Glueful\Extensions\Commerce\Events\OrderPlaced;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
 use Glueful\Extensions\Commerce\Marketplace\CheckoutConflictException;
+use Glueful\Extensions\Commerce\Marketplace\CommissionCalculator;
+use Glueful\Extensions\Commerce\Marketplace\CommissionPolicyResolver;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceMode;
 use Glueful\Extensions\Commerce\Marketplace\OwnershipDriftException;
 use Glueful\Extensions\Commerce\Marketplace\SellerAllocationCalculator;
@@ -373,10 +375,14 @@ final class CheckoutService
      *         allocated_shipping:int,
      *         allocated_tax:int,
      *         attributed_total:int,
-     *         tax_attribution_method:string
+     *         tax_attribution_method:string,
+     *         commission_amount:int
      *     }>,
      *     2: array<string,array<string,mixed>>
-     * } [attributed lines, seller allocations (ascending seller_uuid), seller rows keyed by seller_uuid]
+     * } [attributed lines (each carrying its resolved commission_* snapshot,
+     *   design spec §2.4), seller allocations (ascending seller_uuid, each
+     *   carrying its lines' summed commission_amount), seller rows keyed by
+     *   seller_uuid]
      */
     private function partitionCheckout(
         ApplicationContext $context,
@@ -398,6 +404,8 @@ final class CheckoutService
             $totals->discountTotal,
             $breakdown
         );
+
+        $lines = $this->attachCommissionSnapshot($context, $tenant, $lines, $sellerRows);
 
         $calculatorLines = array_map(
             static fn (array $line): array => [
@@ -426,7 +434,104 @@ final class CheckoutService
             $breakdown
         );
 
+        $allocations = $this->attachCommissionTotals($lines, $allocations);
+
         return [$lines, $allocations, $sellerRows];
+    }
+
+    /**
+     * Commission snapshot (design spec §2.4, MV3): resolves and snapshots the
+     * per-line commission policy product -> seller -> workspace -> config,
+     * immutably, onto every partitioned line, OVERWRITING the raw product-level
+     * `commission_kind`/`commission_bps`/`commission_fixed` `CartService::pricedLines()`
+     * attached to each line with the RESOLVED policy's values -- plus the new
+     * `commission_source`/`commission_basis`/`commission_amount` keys. The
+     * workspace-settings row ({@see MarketplaceMode::settingsRowFor()}) and the
+     * config tail are each read/resolved ONCE for the whole checkout, outside
+     * the loop, never once per line. `commission_basis` is computed from THIS
+     * line's `line_total` and its already-attached `discount_amount` (design
+     * spec §2.1) -- shipping/tax stay outside the basis.
+     *
+     * @param list<array<string,mixed>> $lines
+     * @param array<string,array<string,mixed>> $sellerRows keyed by seller_uuid
+     * @return list<array<string,mixed>>
+     */
+    private function attachCommissionSnapshot(
+        ApplicationContext $context,
+        string $tenant,
+        array $lines,
+        array $sellerRows
+    ): array {
+        $settingsRow = $this->marketplaceMode->settingsRowFor($context, $tenant);
+        $configPolicy = (array) config($context, 'commerce.marketplace.commission', []);
+
+        $workspaceLevel = $this->commissionLevel($settingsRow ?? []);
+        $configLevel = [
+            'kind' => isset($configPolicy['kind']) ? (string) $configPolicy['kind'] : null,
+            'bps' => isset($configPolicy['bps']) ? (int) $configPolicy['bps'] : null,
+            'fixed' => isset($configPolicy['fixed']) ? (int) $configPolicy['fixed'] : null,
+        ];
+
+        foreach ($lines as $index => $line) {
+            $sellerUuid = (string) $line['seller_uuid'];
+            $productLevel = $this->commissionLevel($line);
+            $sellerLevel = $this->commissionLevel($sellerRows[$sellerUuid] ?? []);
+
+            $policy = CommissionPolicyResolver::resolve([$productLevel, $sellerLevel, $workspaceLevel, $configLevel]);
+            $lineTotal = (int) $line['unit_price'] * (int) $line['quantity'];
+            $commission = CommissionCalculator::lineCommission(
+                $lineTotal,
+                (int) ($line['discount_amount'] ?? 0),
+                $policy
+            );
+
+            $lines[$index]['commission_source'] = $policy['source'];
+            $lines[$index]['commission_kind'] = $policy['kind'];
+            $lines[$index]['commission_bps'] = $policy['bps'];
+            $lines[$index]['commission_fixed'] = $policy['fixed'];
+            $lines[$index]['commission_basis'] = $commission['commission_basis'];
+            $lines[$index]['commission_amount'] = $commission['commission_amount'];
+        }
+
+        return $lines;
+    }
+
+    /** @param array<string,mixed> $row @return array{kind:?string,bps:?int,fixed:?int} */
+    private function commissionLevel(array $row): array
+    {
+        return [
+            'kind' => isset($row['commission_kind']) ? (string) $row['commission_kind'] : null,
+            'bps' => isset($row['commission_bps']) ? (int) $row['commission_bps'] : null,
+            'fixed' => isset($row['commission_fixed']) ? (int) $row['commission_fixed'] : null,
+        ];
+    }
+
+    /**
+     * Sums each seller's already-snapshotted lines' `commission_amount` onto
+     * its allocation row (design spec §2.1: seller-order `commission_amount`
+     * is the EXACT sum of its lines'). Reuses {@see CommissionCalculator::perSeller()}
+     * rather than `LargestRemainder` -- this is a straight per-line sum, not an
+     * allocation of an order-level total.
+     *
+     * @param list<array<string,mixed>> $lines
+     * @param array<string,array<string,mixed>> $allocations keyed by seller_uuid
+     * @return array<string,array<string,mixed>>
+     */
+    private function attachCommissionTotals(array $lines, array $allocations): array
+    {
+        $bySeller = CommissionCalculator::perSeller(array_map(
+            static fn (array $line): array => [
+                'seller_uuid' => (string) $line['seller_uuid'],
+                'commission_amount' => (int) $line['commission_amount'],
+            ],
+            $lines
+        ));
+
+        foreach ($allocations as $sellerUuid => $alloc) {
+            $allocations[$sellerUuid]['commission_amount'] = $bySeller[$sellerUuid] ?? 0;
+        }
+
+        return $allocations;
     }
 
     /**
@@ -595,7 +700,8 @@ final class CheckoutService
      *     allocated_shipping:int,
      *     allocated_tax:int,
      *     attributed_total:int,
-     *     tax_attribution_method:string
+     *     tax_attribution_method:string,
+     *     commission_amount:int
      * }> $sellerAllocations keyed by seller_uuid
      * @param array<string,array<string,mixed>> $sellerRows keyed by seller_uuid
      */
@@ -623,6 +729,7 @@ final class CheckoutService
                 'allocated_tax' => $alloc['allocated_tax'],
                 'attributed_total' => $alloc['attributed_total'],
                 'tax_attribution_method' => $alloc['tax_attribution_method'],
+                'commission_amount' => $alloc['commission_amount'],
             ];
         }
 

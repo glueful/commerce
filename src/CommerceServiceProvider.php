@@ -80,6 +80,8 @@ use Glueful\Extensions\Commerce\Inventory\StockRepository;
 use Glueful\Extensions\Commerce\Mail\CommerceMailer;
 use Glueful\Extensions\Commerce\Mail\NotificationCommerceMailer;
 use Glueful\Extensions\Commerce\Mail\OrderMailListener;
+use Glueful\Extensions\Commerce\Marketplace\CommissionPolicyEventRepository;
+use Glueful\Extensions\Commerce\Marketplace\CommissionPolicyService;
 use Glueful\Extensions\Commerce\Marketplace\Contracts\SellerRoleAuthority;
 use Glueful\Extensions\Commerce\Marketplace\FixedSellerRoleAuthority;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceActivationService;
@@ -372,6 +374,14 @@ final class CommerceServiceProvider extends ServiceProvider
                 'class' => FixedSellerRoleAuthority::class,
                 'shared' => true,
             ],
+            CommissionPolicyEventRepository::class => [
+                'class' => CommissionPolicyEventRepository::class,
+                'shared' => true,
+            ],
+            CommissionPolicyService::class => [
+                'factory' => [self::class, 'makeCommissionPolicyService'],
+                'shared' => true,
+            ],
             SellerService::class => [
                 'factory' => [self::class, 'makeSellerService'],
                 'shared' => true,
@@ -595,7 +605,18 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(ShippingClassRepository::class),
             $container->get(MarketplaceMode::class),
             $container->get(MarketplaceWorkspaceLock::class),
-            $container->get(SellerRepository::class)
+            $container->get(SellerRepository::class),
+            $container->get(CommissionPolicyService::class)
+        );
+    }
+
+    public static function makeCommissionPolicyService(ContainerInterface $container): CommissionPolicyService
+    {
+        return new CommissionPolicyService(
+            $container->get(ProductRepository::class),
+            $container->get(SellerRepository::class),
+            $container->get(MarketplaceWorkspaceLock::class),
+            $container->get(CommissionPolicyEventRepository::class)
         );
     }
 
@@ -1180,7 +1201,9 @@ final class CommerceServiceProvider extends ServiceProvider
     {
         return new SellerService(
             $container->get(SellerRepository::class),
-            $container->get(SellerMembershipRepository::class)
+            $container->get(SellerMembershipRepository::class),
+            null,
+            $container->get(CommissionPolicyService::class)
         );
     }
 
@@ -1220,7 +1243,9 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(SellerMembershipService::class),
             self::tenantResolver($container),
             $container->get(MarketplaceActivationService::class),
-            $container->get(SellerAttributionService::class)
+            $container->get(SellerAttributionService::class),
+            $container->get(CommissionPolicyService::class),
+            $container->get(MarketplaceMode::class)
         );
     }
 

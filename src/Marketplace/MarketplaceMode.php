@@ -51,4 +51,27 @@ final class MarketplaceMode
 
         return $row !== null && (string) $row['status'] === 'active';
     }
+
+    /**
+     * O(1) accessor returning the FULL `commerce_marketplace_settings` row
+     * (design spec §2.4, MV3), including its `commission_kind`/`commission_bps`/
+     * `commission_fixed` workspace-level commission override -- unlike
+     * {@see self::activeFor()}, which reads the same row but discards
+     * everything except the boolean `status === 'active'` check. Intended
+     * caller: `CheckoutService`'s partitioned-checkout branch, called ONCE per
+     * checkout (never once per line) so the workspace commission level isn't
+     * a duplicate query. Returns null when the tenant has never activated (no
+     * row) -- the same "never activated" case `activeFor()` also treats as
+     * false. Same caller contract as `activeFor()`: never call this unless
+     * {@see self::installEnabled()} is true, and never on a non-partitioned
+     * checkout path.
+     *
+     * @return array<string,mixed>|null
+     */
+    public function settingsRowFor(ApplicationContext $context, string $tenant): ?array
+    {
+        return db($context)->table('commerce_marketplace_settings')
+            ->where('tenant_uuid', '=', $tenant)
+            ->first();
+    }
 }

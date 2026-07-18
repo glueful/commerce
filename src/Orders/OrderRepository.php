@@ -356,6 +356,16 @@ SQL,
      * to each line before calling `insert()`; a non-partitioned checkout
      * never sets them, so they default to null/0 exactly as the schema does.
      *
+     * Marketplace commission snapshot (design spec §2.4, MV3): `commission_source`
+     * is the provenance signal -- ONLY `CheckoutService`'s commission-resolution
+     * step (partitioned checkout only) ever sets it, so its presence (not the
+     * mere presence of `commission_kind`/`commission_bps`/`commission_fixed`,
+     * which `CartService::pricedLines()` ALSO populates from the product's raw,
+     * unresolved override on every line, partitioned or not) is what gates
+     * persisting the other five commission columns here. A non-partitioned
+     * checkout therefore always writes null/0 commission columns regardless
+     * of what a product's own raw commission override happens to hold.
+     *
      * @param array<string,mixed> $order
      * @param array<string,mixed> $line
      * @return array<string,mixed>
@@ -366,6 +376,7 @@ SQL,
         $unitPrice = (int) $line['unit_price'];
         $addons = is_array($line['addons'] ?? null) ? $line['addons'] : [];
         $downloads = $line['downloads'] ?? null;
+        $commissionSource = isset($line['commission_source']) ? (string) $line['commission_source'] : null;
 
         return [
             'uuid' => (string) ($line['line_uuid'] ?? Utils::generateNanoID()),
@@ -380,6 +391,14 @@ SQL,
             'seller_uuid' => isset($line['seller_uuid']) ? (string) $line['seller_uuid'] : null,
             'discount_amount' => (int) ($line['discount_amount'] ?? 0),
             'tax_amount' => (int) ($line['tax_amount'] ?? 0),
+            'commission_source' => $commissionSource,
+            'commission_kind' => $commissionSource !== null ? (string) $line['commission_kind'] : null,
+            'commission_bps' => $commissionSource !== null && $line['commission_bps'] !== null
+                ? (int) $line['commission_bps'] : null,
+            'commission_fixed' => $commissionSource !== null && $line['commission_fixed'] !== null
+                ? (int) $line['commission_fixed'] : null,
+            'commission_basis' => $commissionSource !== null ? (int) $line['commission_basis'] : 0,
+            'commission_amount' => $commissionSource !== null ? (int) $line['commission_amount'] : 0,
             'addons' => $addons === [] ? null : json_encode($addons, JSON_THROW_ON_ERROR),
             'downloads' => is_array($downloads) ? json_encode($downloads, JSON_THROW_ON_ERROR) : null,
         ];

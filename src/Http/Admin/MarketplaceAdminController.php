@@ -13,8 +13,11 @@ use Glueful\Extensions\Commerce\Http\DTOs\GrantSellerMembershipData;
 use Glueful\Extensions\Commerce\Http\DTOs\SellerListQuery;
 use Glueful\Extensions\Commerce\Http\DTOs\SellerMembershipListQuery;
 use Glueful\Extensions\Commerce\Http\DTOs\UpdateSellerData;
+use Glueful\Extensions\Commerce\Marketplace\CommissionPolicyException;
+use Glueful\Extensions\Commerce\Marketplace\CommissionPolicyService;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceActivationException;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceActivationService;
+use Glueful\Extensions\Commerce\Marketplace\MarketplaceMode;
 use Glueful\Extensions\Commerce\Marketplace\SellerAttributionException;
 use Glueful\Extensions\Commerce\Marketplace\SellerAttributionService;
 use Glueful\Extensions\Commerce\Marketplace\SellerLifecycleException;
@@ -58,6 +61,8 @@ final class MarketplaceAdminController
         private ?CurrentTenantResolver $tenants = null,
         private ?MarketplaceActivationService $activation = null,
         private ?SellerAttributionService $attribution = null,
+        private ?CommissionPolicyService $commissionPolicy = null,
+        private ?MarketplaceMode $marketplaceMode = null,
     ) {
         $this->sellers ??= app($context, SellerService::class);
         $this->memberships ??= app($context, SellerMembershipService::class);
@@ -66,6 +71,8 @@ final class MarketplaceAdminController
             : new SentinelTenantResolver();
         $this->activation ??= app($context, MarketplaceActivationService::class);
         $this->attribution ??= app($context, SellerAttributionService::class);
+        $this->commissionPolicy ??= app($context, CommissionPolicyService::class);
+        $this->marketplaceMode ??= app($context, MarketplaceMode::class);
     }
 
     #[ApiOperation(summary: 'List marketplace sellers', tags: ['Commerce Admin', 'Marketplace'])]
@@ -132,6 +139,10 @@ final class MarketplaceAdminController
     {
         try {
             $tenant = $this->tenants->tenantUuid($this->context);
+            // A commission_kind/bps/fixed field (design spec §2.3, MV3 Task 4) is
+            // operator-only and IS allowed here -- SellerService::update() routes
+            // it through CommissionPolicyService for validation + a durable audit
+            // row, using the resolved actor below.
             $seller = $this->sellers->update(
                 $this->context,
                 $tenant,
@@ -143,6 +154,8 @@ final class MarketplaceAdminController
             return Response::success($seller, 'Seller updated');
         } catch (ValidationException $e) {
             return Response::validation($e->firstErrors());
+        } catch (CommissionPolicyException $e) {
+            return Response::validation(['commission' => $e->getMessage()]);
         }
     }
 
@@ -323,6 +336,40 @@ final class MarketplaceAdminController
         $settings = $this->activation->deactivate($this->context, $tenant, $this->actorUuid($request));
 
         return Response::success($settings, 'Marketplace deactivated');
+    }
+
+    #[ApiOperation(
+        summary: 'Set the workspace-level (fallback) commission policy',
+        tags: ['Commerce Admin', 'Marketplace']
+    )]
+    #[ApiResponse(200, description: 'Workspace commission policy updated')]
+    #[ApiResponse(422, description: 'Validation failed')]
+    public function updateWorkspaceCommission(Request $request): Response
+    {
+        try {
+            $tenant = $this->tenants->tenantUuid($this->context);
+            $body = $this->input($request);
+
+            $this->commissionPolicy->setWorkspace(
+                $this->context,
+                $tenant,
+                $tenant,
+                [
+                    'kind' => $body['commission_kind'] ?? null,
+                    'bps' => $body['commission_bps'] ?? null,
+                    'fixed' => $body['commission_fixed'] ?? null,
+                ],
+                $this->actorUuid($request)
+            );
+
+            $settings = $this->marketplaceMode->settingsRowFor($this->context, $tenant);
+
+            return Response::success($settings, 'Workspace commission policy updated');
+        } catch (ValidationException $e) {
+            return Response::validation($e->firstErrors());
+        } catch (CommissionPolicyException $e) {
+            return Response::validation(['commission' => $e->getMessage()]);
+        }
     }
 
     #[ApiOperation(summary: 'Adopt or transfer a product to a seller', tags: ['Commerce Admin', 'Marketplace'])]

@@ -79,6 +79,16 @@ final class CreateCommerceOrderTables implements MigrationInterface
                 $table->string('seller_uuid', 12)->nullable();
                 $table->bigInteger('discount_amount')->default(0);
                 $table->bigInteger('tax_amount')->default(0);
+                // Marketplace commission snapshot (MV3, design spec §2.4/§3.1): resolved and
+                // written once at checkout inside the existing partition write, alongside
+                // seller_uuid/discount_amount/tax_amount above -- these are immutable checkout
+                // facts, never rewritten by later commission-policy edits.
+                $table->string('commission_source', 16)->nullable();
+                $table->string('commission_kind', 16)->nullable();
+                $table->integer('commission_bps')->nullable();
+                $table->bigInteger('commission_fixed')->nullable();
+                $table->bigInteger('commission_basis')->default(0);
+                $table->bigInteger('commission_amount')->default(0);
                 $table->json('addons')->nullable();
                 $table->json('downloads')->nullable();
 

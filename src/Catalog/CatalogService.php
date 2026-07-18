@@ -6,6 +6,8 @@ namespace Glueful\Extensions\Commerce\Catalog;
 
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
+use Glueful\Extensions\Commerce\Marketplace\CommissionPolicyService;
+use Glueful\Extensions\Commerce\Marketplace\CommissionPolicyResolver;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceMode;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceWorkspaceLock;
 use Glueful\Extensions\Commerce\Marketplace\SellerAttributionException;
@@ -75,6 +77,7 @@ final class CatalogService
         private ?MarketplaceMode $marketplaceMode = null,
         private ?MarketplaceWorkspaceLock $workspaceLock = null,
         private ?SellerRepository $sellers = null,
+        private ?CommissionPolicyService $commissionPolicy = null,
     ) {
         $this->stock ??= new StockRepository();
         $this->children ??= new ProductChildrenRepository();
@@ -422,10 +425,24 @@ final class CatalogService
      * {@see \Glueful\Extensions\Commerce\Marketplace\SellerAttributionService}
      * adoption/transfer operation.
      *
+     * Commission policy (design spec §2.3, MV3 Task 4): $changes touching ANY
+     * of {@see CommissionPolicyResolver::FIELDS} is routed through the
+     * injected {@see CommissionPolicyService} (validated, applied, AND
+     * audited in its own transaction) BEFORE the remaining, non-commission
+     * fields (if any) run through the ordinary guarded patch below. Operator
+     * only -- there is no `$sellerUuid` parameter here at all, so this path
+     * is reached exclusively by the platform admin product-update surface;
+     * {@see self::updateSellerProduct()} rejects commission fields outright
+     * before ever delegating here.
+     *
      * @param array<string,mixed> $changes
      */
-    public function updateProduct(ApplicationContext $context, string $productUuid, array $changes): void
-    {
+    public function updateProduct(
+        ApplicationContext $context,
+        string $productUuid,
+        array $changes,
+        ?string $actorUuid = null
+    ): void {
         if (array_key_exists('seller_uuid', $changes)) {
             throw ValidationException::forField(
                 'seller_uuid',
@@ -435,7 +452,21 @@ final class CatalogService
 
         $tenant = $this->tenants->tenantUuid($context);
 
-        $this->applyGuardedProductPatch($context, $tenant, $productUuid, $changes);
+        $commission = CommissionPolicyResolver::extractFromChanges($changes);
+        if ($commission !== null) {
+            if ($this->commissionPolicy === null) {
+                throw ValidationException::forField(
+                    'commission_kind',
+                    'Commission policy management is not available.'
+                );
+            }
+            $this->commissionPolicy->setProduct($context, $tenant, $productUuid, $commission, $actorUuid);
+        }
+
+        $remaining = CommissionPolicyResolver::withoutFields($changes);
+        if ($commission === null || $remaining !== []) {
+            $this->applyGuardedProductPatch($context, $tenant, $productUuid, $remaining);
+        }
     }
 
     /**
@@ -491,6 +522,14 @@ final class CatalogService
      * as an unknown one -- never a 403 that would confirm the product exists
      * under a different seller.
      *
+     * Commission-field rejection backstop (design spec §2.3, MV3 Task 4):
+     * sellers can NEVER set their own commission policy. `SellerCatalogController::update()`
+     * already inspects the raw request body and rejects a commission field
+     * with a field-specific 422 before it ever reaches this method -- this
+     * is the service-level backstop for any caller that bypasses that
+     * controller, checked BEFORE the ownership claim so it costs nothing
+     * extra on the ordinary (no commission field) path.
+     *
      * @param array<string,mixed> $changes
      */
     public function updateSellerProduct(
@@ -499,10 +538,27 @@ final class CatalogService
         string $productUuid,
         array $changes
     ): void {
+        $this->rejectCommissionFields($changes);
+
         $tenant = $this->tenants->tenantUuid($context);
         $this->requireSellerOwnedProduct($context, $tenant, $sellerUuid, $productUuid);
 
         $this->updateProduct($context, $productUuid, $changes);
+    }
+
+    /**
+     * @param array<string,mixed> $changes
+     */
+    private function rejectCommissionFields(array $changes): void
+    {
+        foreach (CommissionPolicyResolver::FIELDS as $field) {
+            if (array_key_exists($field, $changes)) {
+                throw ValidationException::forField(
+                    $field,
+                    'Sellers cannot set commission policy; only platform operators may change it.'
+                );
+            }
+        }
     }
 
     /**

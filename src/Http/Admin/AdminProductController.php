@@ -17,6 +17,7 @@ use Glueful\Extensions\Commerce\Http\DTOs\ProductVariantData;
 use Glueful\Extensions\Commerce\Http\DTOs\SetProductChildrenData;
 use Glueful\Extensions\Commerce\Http\DTOs\UpdateProductData;
 use Glueful\Extensions\Commerce\Http\DTOs\UpdateVariantData;
+use Glueful\Extensions\Commerce\Marketplace\CommissionPolicyException;
 use Glueful\Extensions\Commerce\Shipping\ShippingClassRepository;
 use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
@@ -31,6 +32,7 @@ use Symfony\Component\HttpFoundation\Request;
 final class AdminProductController
 {
     use ReadsAdminInput;
+    use ResolvesActor;
 
     public function __construct(
         private ApplicationContext $context,
@@ -108,14 +110,21 @@ final class AdminProductController
             // adoption/transfer operation; CatalogService::updateProduct()'s
             // unconditional 422 guard stays intact as the backstop for any
             // caller that reaches it with the key still present.
+            //
+            // A commission_kind/bps/fixed field (design spec §2.3, MV3 Task 4) is
+            // operator-only and IS allowed here -- CatalogService::updateProduct()
+            // routes it through CommissionPolicyService for validation + a
+            // durable audit row, using the resolved actor below.
             $changes = $this->input($request);
             unset($changes['seller_uuid']);
 
-            $this->catalog->updateProduct($this->context, $uuid, $changes);
+            $this->catalog->updateProduct($this->context, $uuid, $changes, $this->actorUuid($request));
 
             return Response::success($this->product($uuid), 'Product updated');
         } catch (ValidationException $e) {
             return Response::validation($e->firstErrors());
+        } catch (CommissionPolicyException $e) {
+            return Response::validation(['commission' => $e->getMessage()]);
         }
     }
 

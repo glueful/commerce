@@ -43,8 +43,12 @@ final class SellerOrderRepository
      *     allocated_shipping:int,
      *     allocated_tax:int,
      *     attributed_total:int,
-     *     tax_attribution_method:string
-     * }> $sellerOrderRows
+     *     tax_attribution_method:string,
+     *     commission_amount?:int
+     * }> $sellerOrderRows commission_amount (design spec §2.1/§2.4, MV3 -- the
+     *   exact sum of this seller's order lines' commission_amount snapshots)
+     *   defaults to 0 when omitted, so pre-MV3 direct callers stay
+     *   source-compatible.
      */
     public function insertForOrder(ApplicationContext $context, string $tenant, array $sellerOrderRows): void
     {
@@ -71,6 +75,7 @@ final class SellerOrderRepository
                 'allocated_tax' => $row['allocated_tax'],
                 'attributed_total' => $row['attributed_total'],
                 'tax_attribution_method' => $row['tax_attribution_method'],
+                'commission_amount' => $row['commission_amount'] ?? 0,
                 'confirmed_at' => null,
                 'fulfillment_status' => 'unfulfilled',
                 'status' => 'open',

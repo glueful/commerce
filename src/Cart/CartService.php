@@ -370,6 +370,15 @@ final class CartService
                 'addons' => $snapshot,
                 'shipping_class' => $classUuid !== null ? ($slugsByUuid[$classUuid] ?? null) : null,
                 'tax_class' => (string) ($product['tax_class'] ?? 'standard'),
+                // Marketplace commission (MV3, design spec §2.4): the product's own
+                // commission-policy override level, riding the ALREADY-fetched product
+                // row above -- no new query. Null means "inherit the next precedence
+                // level"; a non-marketplace/non-partitioned checkout never resolves
+                // these keys at all, so they are harmless when carried but unused.
+                'commission_kind' => isset($product['commission_kind']) ? (string) $product['commission_kind'] : null,
+                'commission_bps' => isset($product['commission_bps']) ? (int) $product['commission_bps'] : null,
+                'commission_fixed' => isset($product['commission_fixed'])
+                    ? (int) $product['commission_fixed'] : null,
             ];
         }
 

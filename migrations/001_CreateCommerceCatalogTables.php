@@ -21,6 +21,13 @@ final class CreateCommerceCatalogTables implements MigrationInterface
                 // before a workspace activates marketplace mode start unowned until the
                 // activation adoption gate assigns one.
                 $table->string('seller_uuid', 12)->nullable();
+                // Marketplace commission policy (MV3, design spec §2.2/§3.1): all three
+                // nullable -- null means "inherit the next level" in the
+                // product -> seller -> workspace-settings -> config precedence chain
+                // CommissionPolicyResolver walks at checkout.
+                $table->string('commission_kind', 16)->nullable();
+                $table->integer('commission_bps')->nullable();
+                $table->bigInteger('commission_fixed')->nullable();
                 $table->string('slug', 191);
                 $table->string('name', 255);
                 $table->text('description')->nullable();

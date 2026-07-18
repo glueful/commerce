@@ -326,6 +326,17 @@ if ($marketplaceEnabled) {
             [MarketplaceAdminController::class, 'assignSeller']
         )->middleware($write);
 
+        // Commission-policy authority (design spec §2.3, MV3 Task 4): product/
+        // seller commission ride the EXISTING `/products/{uuid}` and
+        // `/marketplace/sellers/{uuid}` update routes above (CatalogService::
+        // updateProduct()/SellerService::update() route commission fields
+        // through CommissionPolicyService); the workspace-settings level has no
+        // prior update surface, so it gets a dedicated route here.
+        $router->patch(
+            '/marketplace/settings/commission',
+            [MarketplaceAdminController::class, 'updateWorkspaceCommission']
+        )->middleware($write);
+
         // Marketplace MV2 (design spec §6.2, Task 9): operator fulfills ANY
         // seller order directly. Gated the SAME way as every other route in
         // this group -- with the install master switch off, a

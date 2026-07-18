@@ -11,6 +11,7 @@ use Glueful\Extensions\Commerce\Http\DTOs\CreateVariantData;
 use Glueful\Extensions\Commerce\Http\DTOs\ProductVariantData;
 use Glueful\Extensions\Commerce\Http\DTOs\SellerCreateProductData;
 use Glueful\Extensions\Commerce\Http\DTOs\UpdateProductData;
+use Glueful\Extensions\Commerce\Marketplace\CommissionPolicyResolver;
 use Glueful\Http\Response;
 use Glueful\Routing\Attributes\ApiOperation;
 use Glueful\Routing\Attributes\ApiRequestBody;
@@ -81,6 +82,13 @@ final class SellerCatalogController
     public function store(SellerCreateProductData $input, Request $request, string $sellerUuid): Response
     {
         try {
+            // Commission policy is operator-only (design spec §2.3, MV3 Task 4):
+            // SellerCreateProductData's hydrator silently drops unknown keys, so
+            // a commission field would otherwise vanish unremarked -- the RAW
+            // body is inspected here instead, to reject it loudly with a
+            // field-specific 422 rather than silently ignoring it.
+            $this->rejectCommissionFields($this->input($request));
+
             $payload = $this->createProductPayload($input);
             $product = $this->catalog->createProduct($this->context, $payload, $sellerUuid);
 
@@ -102,6 +110,7 @@ final class SellerCatalogController
             // silently dropped, never rejected -- attribution only ever moves via
             // the dedicated platform adoption/transfer operation.
             $changes = $this->input($request);
+            $this->rejectCommissionFields($changes);
             unset($changes['seller_uuid']);
 
             $this->catalog->updateSellerProduct($this->context, $sellerUuid, $uuid, $changes);
@@ -130,6 +139,29 @@ final class SellerCatalogController
             return Response::created($variant, 'Variant created');
         } catch (ValidationException $e) {
             return Response::validation($e->firstErrors());
+        }
+    }
+
+    /**
+     * Commission-field rejection (design spec §2.3, MV3 Task 4): a seller can
+     * never set their own commission policy, on create OR update -- checked
+     * against the RAW request body, before any DTO/patch handling, so a
+     * commission field can never be silently dropped. `403` stays reserved
+     * for callers lacking the route capability (the `commerce_seller`
+     * middleware, which has already run by the time this method body
+     * executes) -- this is a separate, field-specific `422`.
+     *
+     * @param array<string,mixed> $changes
+     */
+    private function rejectCommissionFields(array $changes): void
+    {
+        foreach (CommissionPolicyResolver::FIELDS as $field) {
+            if (array_key_exists($field, $changes)) {
+                throw ValidationException::forField(
+                    $field,
+                    'Sellers cannot set commission policy; only platform operators may change it.'
+                );
+            }
         }
     }
 

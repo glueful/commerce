@@ -55,6 +55,7 @@ final class SellerService
         private SellerRepository $sellers,
         private SellerMembershipRepository $memberships,
         ?callable $uuidGenerator = null,
+        private ?CommissionPolicyService $commissionPolicy = null,
     ) {
         $this->uuidGenerator = $uuidGenerator ?? static fn (): string => Utils::generateNanoID();
     }
@@ -154,7 +155,15 @@ final class SellerService
      * $changes is rejected with 422 (never silently dropped), mirroring
      * {@see \Glueful\Extensions\Commerce\Shipping\ShippingClassService::update()}.
      *
-     * @param array<string,mixed> $changes 'name' and/or 'metadata'
+     * Commission policy (design spec §2.3, MV3 Task 4): $changes touching
+     * ANY of {@see CommissionPolicyResolver::FIELDS} is routed through the
+     * injected {@see CommissionPolicyService} FIRST -- validated, applied,
+     * AND audited in its own transaction -- before the ordinary name/metadata
+     * claim-then-patch below runs (which always executes regardless, exactly
+     * as before, so the return value stays a fresh re-read of the seller
+     * row). Operator only -- sellers have no route to this method.
+     *
+     * @param array<string,mixed> $changes 'name' and/or 'metadata' and/or commission fields
      * @return array<string,mixed>
      */
     public function update(
@@ -168,7 +177,20 @@ final class SellerService
             throw ValidationException::forField('slug', 'slug is immutable and cannot be changed after creation.');
         }
 
-        return db($c)->transaction(function () use ($c, $tenant, $uuid, $changes): array {
+        $commission = CommissionPolicyResolver::extractFromChanges($changes);
+        if ($commission !== null) {
+            if ($this->commissionPolicy === null) {
+                throw ValidationException::forField(
+                    'commission_kind',
+                    'Commission policy management is not available.'
+                );
+            }
+            $this->commissionPolicy->setSeller($c, $tenant, $uuid, $commission, $actor);
+        }
+
+        $fieldChanges = CommissionPolicyResolver::withoutFields($changes);
+
+        return db($c)->transaction(function () use ($c, $tenant, $uuid, $fieldChanges): array {
             if (!$this->sellers->claimRevision($c, $tenant, $uuid)) {
                 throw new NotFoundException('Resource not found.');
             }
@@ -178,15 +200,15 @@ final class SellerService
             }
 
             $set = [];
-            if (array_key_exists('name', $changes) && $changes['name'] !== null) {
-                $name = trim((string) $changes['name']);
+            if (array_key_exists('name', $fieldChanges) && $fieldChanges['name'] !== null) {
+                $name = trim((string) $fieldChanges['name']);
                 if ($name === '') {
                     throw ValidationException::forField('name', 'Name is required.');
                 }
                 $set['name'] = $name;
             }
-            if (array_key_exists('metadata', $changes)) {
-                $set['metadata'] = $changes['metadata'];
+            if (array_key_exists('metadata', $fieldChanges)) {
+                $set['metadata'] = $fieldChanges['metadata'];
             }
 
             if ($set !== []) {

@@ -394,8 +394,9 @@ final class CatalogBreadthTenancyTest extends CommerceTestCase
     {
         // Exact list, not a subset check -- pins every tenant table this layer
         // knows about (the pre-existing ten plus the six added in Layer 2, plus the
-        // three Marketplace MV1 foundation tables added in migration 010, plus the
-        // MV2 `commerce_seller_orders` table added in migration 011), so a future
+        // three Marketplace MV1 foundation tables added in migration 010, the
+        // MV2 `commerce_seller_orders` table added in migration 011, and the four
+        // MV3 settlement-ledger tables added in migrations 012/013), so a future
         // accidental removal/addition is caught here as well as locally.
         self::assertSame([
             'commerce_products',
@@ -425,6 +426,10 @@ final class CatalogBreadthTenancyTest extends CommerceTestCase
             'commerce_sellers',
             'commerce_seller_memberships',
             'commerce_seller_orders',
+            'commerce_marketplace_ledger',
+            'commerce_ledger_account_locks',
+            'commerce_commission_policy_events',
+            'commerce_payouts',
         ], DiagnosticsReport::tenantTables());
 
         // The join/child tables added alongside the six must never be treated as

@@ -57,6 +57,18 @@ return [
     // Glueful\Extensions\Commerce\Marketplace\MarketplaceMode.
     'marketplace' => [
         'enabled' => (bool) env('COMMERCE_MARKETPLACE_ENABLED', false),
+
+        // Commission MV3, design spec §2.2/§3.6: the final fallback level in the
+        // product -> seller -> workspace-settings -> config precedence chain
+        // CommissionPolicyResolver walks at checkout. Unlike the three inheritable
+        // database levels, this tail is TOTAL -- it must never be all-null, so
+        // policy resolution always terminates. Same validated shape as the
+        // database levels ({kind: percentage|fixed, bps: 0..10000, fixed: >=0}).
+        'commission' => [
+            'kind' => env('COMMERCE_COMMISSION_KIND', 'percentage'),
+            'bps' => (int) env('COMMERCE_COMMISSION_BPS', 0),
+            'fixed' => env('COMMERCE_COMMISSION_FIXED', null),
+        ],
     ],
 
     // Null-tolerant: invoice-data serializes each key as null, never omitted, when unset.
