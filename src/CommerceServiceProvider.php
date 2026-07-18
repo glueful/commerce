@@ -95,6 +95,8 @@ use Glueful\Extensions\Commerce\Marketplace\MarketplaceActivationService;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceMode;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceRefundGuard;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceWorkspaceLock;
+use Glueful\Extensions\Commerce\Marketplace\PayoutAccountRepository;
+use Glueful\Extensions\Commerce\Marketplace\PayoutAccountService;
 use Glueful\Extensions\Commerce\Marketplace\PayoutRepository;
 use Glueful\Extensions\Commerce\Marketplace\PayoutService;
 use Glueful\Extensions\Commerce\Marketplace\ReconciliationService;
@@ -147,6 +149,7 @@ use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Glueful\Extensions\Contracts\Tenancy\TenantTableRegistry;
 use Glueful\Extensions\Contracts\Payments\PaymentCollector;
 use Glueful\Extensions\Contracts\Payments\PaymentConfirmationHandler;
+use Glueful\Extensions\Contracts\Payments\PayoutCollector;
 use Glueful\Extensions\Contracts\Payments\RefundCollector;
 use Glueful\Extensions\ServiceProvider;
 use Glueful\Repository\BlobRepository;
@@ -395,6 +398,14 @@ final class CommerceServiceProvider extends ServiceProvider
             ],
             PayoutRepository::class => [
                 'class' => PayoutRepository::class,
+                'shared' => true,
+            ],
+            PayoutAccountRepository::class => [
+                'class' => PayoutAccountRepository::class,
+                'shared' => true,
+            ],
+            PayoutAccountService::class => [
+                'factory' => [self::class, 'makePayoutAccountService'],
                 'shared' => true,
             ],
             PayoutService::class => [
@@ -695,8 +706,39 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(PayoutRepository::class),
             $container->get(LedgerRepository::class),
             $container->get(LedgerAccountLock::class),
-            $container->get(SellerBalanceService::class)
+            $container->get(SellerBalanceService::class),
+            null,
+            self::makePayoutCollector($container),
+            $container->get(PayoutAccountService::class)
         );
+    }
+
+    public static function makePayoutAccountService(ContainerInterface $container): PayoutAccountService
+    {
+        return new PayoutAccountService(
+            $container->get(PayoutAccountRepository::class),
+            null,
+            self::makePayoutCollector($container)
+        );
+    }
+
+    /**
+     * Soft-resolved, same pattern as {@see self::makeRefundCollector()}: the provider-payout
+     * port (design spec §2.9) is provider-injected by the host; with nothing bound, provider
+     * payouts stay unavailable (422) while manual payouts + ledger semantics keep working.
+     */
+    private static function makePayoutCollector(ContainerInterface $container): ?PayoutCollector
+    {
+        if (!$container->has(PayoutCollector::class)) {
+            return null;
+        }
+
+        $collector = $container->get(PayoutCollector::class);
+        if (!$collector instanceof PayoutCollector) {
+            throw new \RuntimeException('Configured payout collector does not implement PayoutCollector.');
+        }
+
+        return $collector;
     }
 
     public static function makeProductMediaService(ContainerInterface $container): ProductMediaService
