@@ -135,6 +135,188 @@ final class RefundPostingTest extends CommerceTestCase
     }
 
     // -----------------------------------------------------------------
+    // 1b. CRITICAL regression: a full-remaining auto-expand must never
+    //     attribute more merchandise basis than ITS OWN refund amount
+    //     covers, even when a prior refund under-attributed the line
+    //     (leaving a larger "remaining basis" than the later refund's cash
+    //     can fund). Before the fix, this drove postRefund's marketplace
+    //     remainder negative, silently skipped the marketplace leg, and
+    //     over-debited the seller -- the ledger recorded more refunded
+    //     merchandise than cash actually moved.
+    // -----------------------------------------------------------------
+
+    public function testUnderAttributedPartialThenFullRemainingAutoExpandNeverOverDebitsSellerOrGoesNegative(): void
+    {
+        $this->activateMarketplace();
+        $this->seedSeller('sellerAAAA01', 'Seller A', 'active', [
+            'commission_kind' => 'percentage', 'commission_bps' => 1000,
+        ]);
+        $product = $this->seedProduct('under-attr-then-full-x', 1000, 'sellerAAAA01');
+        $order = $this->placeOneSellerOrder($product);
+        $orderUuid = (string) $order['uuid'];
+        self::assertSame(1500, (int) $order['grand_total'], 'sanity: 1000 product + 500 flat shipping');
+        $this->paymentService()->markPaid($this->context, self::TENANT, $orderUuid);
+        $line = $this->orderLinesFor($orderUuid)[0];
+
+        // Refund 1 (manual, completes): amount 900, deliberately under-attributes
+        // only 100 of the line's 1000 commission_basis -- design-sanctioned; the
+        // 800 gap (900 - 100) is marketplace-funded.
+        $refund1 = $this->refundService()->issue(
+            $this->context,
+            $orderUuid,
+            new RefundInput(900, 'partial under-attributed', [
+                ['order_line_uuid' => (string) $line['uuid'], 'quantity' => 1, 'amount' => 100],
+            ], false),
+            'idem-critical-1'
+        );
+        self::assertSame('completed', $refund1['status']);
+
+        // Refund 2: full-remaining (600), no lines -- must auto-expand. The line's
+        // remaining commission_basis (1000 - 100 = 900) EXCEEDS the 600 cash left.
+        // Before the fix, autoExpand attributed the full 900 to the line, driving
+        // postRefund's marketplaceRemainder to (900-900)+(600-900) = -300 and
+        // silently skipping the marketplace leg via its `> 0` guard.
+        $refund2 = $this->refundService()->issue(
+            $this->context,
+            $orderUuid,
+            new RefundInput(null, 'full remaining after under-attribution', [], false),
+            'idem-critical-2'
+        );
+        self::assertSame('completed', $refund2['status']);
+        self::assertSame('refunded', $this->orderRow($orderUuid)['status']);
+
+        $refund2Lines = $this->refundLinesFor((string) $refund2['uuid']);
+        self::assertCount(1, $refund2Lines);
+        self::assertSame(
+            600,
+            (int) $refund2Lines[0]['amount'],
+            "auto-expand must cap refund 2's line attribution at its own refund amount (600), never the "
+                . 'larger remaining commission basis (900)'
+        );
+
+        $ledger1 = $this->ledgerRowsForRefund((string) $refund1['uuid']);
+        $ledger2 = $this->ledgerRowsForRefund((string) $refund2['uuid']);
+
+        $sellerDebit1 = $this->ledgerRowForSellerAndType($ledger1, 'sellerAAAA01', 'refund_debit');
+        $sellerDebit2 = $this->ledgerRowForSellerAndType($ledger2, 'sellerAAAA01', 'refund_debit');
+
+        self::assertSame(-100, (int) $sellerDebit1['amount']);
+        self::assertSame(
+            -600,
+            (int) $sellerDebit2['amount'],
+            'refund 2 must debit the seller at most the 600 cash it actually refunded, never the '
+                . 'over-attributed 900 remaining basis'
+        );
+
+        // marketplaceRemainder resolves to exactly 0 for refund 2 (600 attributed ==
+        // 600 amount) -- no marketplace row posts, and critically no NEGATIVE
+        // remainder was silently swallowed either (the bug's failure mode).
+        $marketplace2 = array_values(array_filter(
+            $ledger2,
+            static fn (array $row): bool => $row['account_kind'] === 'marketplace'
+        ));
+        self::assertSame(
+            [],
+            $marketplace2,
+            'refund 2 fully attributes its 600 to the seller line; no marketplace remainder posts'
+        );
+
+        $totalSellerDebit = abs((int) $sellerDebit1['amount']) + abs((int) $sellerDebit2['amount']);
+        $totalMarketplaceDebit = 0;
+        foreach ([$ledger1, $ledger2] as $rows) {
+            foreach ($rows as $row) {
+                if ($row['account_kind'] === 'marketplace' && $row['entry_type'] === 'refund_debit') {
+                    $totalMarketplaceDebit += abs((int) $row['amount']);
+                }
+            }
+        }
+
+        self::assertSame(
+            1500,
+            $totalSellerDebit + $totalMarketplaceDebit,
+            'sum(abs(all seller refund_debit)) + sum(abs(all marketplace refund_debit)) across both refunds '
+                . 'must equal the total cash refunded (900 + 600 = 1500) exactly -- no ledger row records '
+                . 'more refunded merchandise than cash actually moved'
+        );
+        self::assertLessThanOrEqual(
+            1000,
+            $totalSellerDebit,
+            "the seller's cumulative refund_debit across both refunds must never exceed the line's own "
+                . 'commission_basis (1000)'
+        );
+    }
+
+    public function testAutoExpandCapsCumulativeLineAttributionAtTheRefundAmountEvenWhenRemainingBasisExceedsIt(): void
+    {
+        $orderUuid = 'orderCAPTEST';
+        $lineUuid = 'lineCAPTEST1';
+        $sellerUuid = 'sellerCAPTS1';
+        $priorRefundUuid = 'refundCAPTS1';
+
+        $this->connection->table('commerce_order_lines')->insert([
+            'uuid' => $lineUuid,
+            'order_uuid' => $orderUuid,
+            'variant_uuid' => 'variantCAPT1',
+            'product_name' => 'Cap Test Product',
+            'sku' => 'CAPTESTSKU',
+            'option_values' => '[]',
+            'unit_price' => 1000,
+            'quantity' => 1,
+            'line_total' => 1000,
+            'seller_uuid' => $sellerUuid,
+            'commission_basis' => 1000,
+            'commission_amount' => 100,
+        ]);
+
+        // A prior COMPLETED refund that deliberately under-attributed only 100 of
+        // the line's 1000 commission_basis (design-sanctioned: the shortfall goes
+        // marketplace-funded) -- leaving 900 of "remaining basis" still visible to
+        // a later auto-expand.
+        $this->connection->table('commerce_refunds')->insert([
+            'uuid' => $priorRefundUuid,
+            'tenant_uuid' => self::TENANT,
+            'order_uuid' => $orderUuid,
+            'idempotency_key' => 'idem-cap-prior',
+            'request_fingerprint' => 'fp-cap-prior',
+            'amount' => 900,
+            'currency' => 'USD',
+            'method' => 'manual',
+            'status' => 'completed',
+            'restocked' => false,
+        ]);
+        $this->connection->table('commerce_refund_lines')->insert([
+            'refund_uuid' => $priorRefundUuid,
+            'order_line_uuid' => $lineUuid,
+            'quantity' => 1,
+            'amount' => 100,
+        ]);
+
+        $guard = new MarketplaceRefundGuard(new RefundRepository());
+        // A full-remaining refund of 600 -- the line's remaining basis (1000 - 100
+        // = 900) exceeds it. autoExpand's returned lines must sum to at most 600,
+        // never the larger remaining basis.
+        $order = ['uuid' => $orderUuid, 'grand_total' => 1600, 'refunded_total' => 1000];
+        $lines = $guard->validateAndNormalize($this->context, self::TENANT, $order, 600, []);
+
+        self::assertCount(1, $lines);
+        self::assertSame($lineUuid, $lines[0]['order_line_uuid']);
+        self::assertSame(
+            600,
+            (int) $lines[0]['amount'],
+            "auto-expand must cap the line's attribution at the refund amount (600), never the larger "
+                . 'remaining commission basis (900)'
+        );
+
+        $sum = array_sum(array_column($lines, 'amount'));
+        self::assertLessThanOrEqual(
+            600,
+            $sum,
+            "autoExpand's returned line amounts must sum to at most the refund amount even when a "
+                . "line's own remaining basis exceeds it"
+        );
+    }
+
+    // -----------------------------------------------------------------
     // 2. delta_R caps at the line's remaining basis; both marketplace-funded
     //    remainder mechanisms (over-cap AND amount never attributed to any
     //    line) in one refund.

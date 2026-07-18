@@ -162,9 +162,32 @@ final class LedgerPostingService
      * account as a single `refund_debit` (idempotency
      * `{refund}:marketplace:refund_debit`). By construction
      * `Σ |seller refund_debit| + |marketplace refund_debit| = refund.amount`
-     * exactly; this is hard-asserted below as a guardrail, mirroring
-     * {@see CommissionCalculator::perSeller()}'s "unreachable by
-     * construction, kept as a guardrail" discipline.
+     * exactly.
+     *
+     * Two guardrails enforce this, both meant to be unreachable given a
+     * well-behaved caller ({@see MarketplaceRefundGuard} caps the
+     * auto-expand path's `Σ lines` at `amount`, and {@see
+     * \Glueful\Extensions\Commerce\Orders\Refunds\RefundService::validateLines()}
+     * does the same for the manual path) but real enough to actually FIRE if
+     * that ever regresses, mirroring {@see CommissionCalculator::perSeller()}'s
+     * "unreachable by construction, kept as a guardrail" discipline:
+     *
+     *  - If the marketplace remainder (`refund.amount - Σ delta_R`) is
+     *    NEGATIVE -- i.e. the lines attributed more merchandise basis than
+     *    the refund's own cash covers -- that is an integrity failure and
+     *    throws {@see LedgerException} before anything posts, rather than
+     *    silently skipping the marketplace leg (its `> 0` posting guard)
+     *    and over-debiting the seller for cash that was never refunded.
+     *  - After posting, the amounts ACTUALLY passed to {@see
+     *    LedgerRepository::post()} for seller `refund_debit` plus the
+     *    marketplace `refund_debit` (zero/skipped legs contribute zero) are
+     *    hard-asserted to sum to exactly `refund.amount`. Unlike a check
+     *    computed purely from the pre-posting `delta_R`/`lineAmount`
+     *    arithmetic (which is a tautology of its own construction and can
+     *    never fire), this compares the posting loop's real side effects
+     *    against the refund's independent cash amount, so a future
+     *    regression in the posting loop itself (wrong account, dropped leg,
+     *    wrong variable) is caught here.
      *
      * Every affected seller account lock plus the marketplace account lock
      * are claimed in sorted `account_key` order (§2.6 deadlock avoidance) --
@@ -242,13 +265,17 @@ final class LedgerPostingService
 
         $marketplaceRemainder += $refundAmount - $attributedSum;
 
-        $totalSellerDebit = array_sum($sellerDebit);
-        if ($totalSellerDebit + $marketplaceRemainder !== $refundAmount) {
+        // Integrity guardrail: unreachable given a well-behaved caller (see the
+        // class docblock), but if the attributed lines ever claim more merchandise
+        // basis than this refund's own cash covers, that is a real bug -- fail loud
+        // rather than let the `> 0` posting guard below silently skip the
+        // marketplace leg and over-debit the seller for cash that was never
+        // refunded.
+        if ($marketplaceRemainder < 0) {
             throw new LedgerException(sprintf(
-                'Refund posting reconciliation failure (refund %s): seller debit %d + marketplace remainder %d'
-                    . ' != refund amount %d.',
+                'Refund posting integrity failure (refund %s): marketplace remainder %d is negative -- '
+                    . 'attributed lines claim more merchandise basis than the refund amount %d covers.',
                 $refundUuid,
-                $totalSellerDebit,
                 $marketplaceRemainder,
                 $refundAmount
             ));
@@ -269,6 +296,12 @@ final class LedgerPostingService
         foreach ($accounts as $account) {
             $this->lock->claim($context, $tenant, $account['account_key'], $currency);
         }
+
+        // Tallied strictly from the amounts actually handed to $this->ledger->post()
+        // below (not re-derived from the pre-posting delta_R/lineAmount arithmetic) --
+        // this is what makes the hard-assert after the loop a real guardrail rather
+        // than a restatement of an identity that holds by construction.
+        $postedTotal = 0;
 
         foreach ($accounts as $account) {
             if ($account['seller_uuid'] === null) {
@@ -291,6 +324,7 @@ final class LedgerPostingService
                     'refund_uuid' => $refundUuid,
                     'idempotency_key' => "{$refundUuid}:{$sellerUuid}:refund_debit",
                 ]);
+                $postedTotal += $debit;
             }
 
             if ($reversal > 0) {
@@ -320,6 +354,21 @@ final class LedgerPostingService
                 'refund_uuid' => $refundUuid,
                 'idempotency_key' => "{$refundUuid}:marketplace:refund_debit",
             ]);
+            $postedTotal += $marketplaceRemainder;
+        }
+
+        // Hard-assert on what was ACTUALLY posted (never on the pre-posting
+        // delta_R/lineAmount arithmetic that produced it -- that identity holds by
+        // construction and can never fire). A mismatch here means the posting loop
+        // itself diverged from the refund's own cash amount.
+        if ($postedTotal !== $refundAmount) {
+            throw new LedgerException(sprintf(
+                'Refund posting reconciliation failure (refund %s): posted seller + marketplace refund_debit'
+                    . ' total %d != refund amount %d.',
+                $refundUuid,
+                $postedTotal,
+                $refundAmount
+            ));
         }
     }
 
