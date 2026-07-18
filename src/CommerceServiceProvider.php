@@ -84,8 +84,12 @@ use Glueful\Extensions\Commerce\Marketplace\CommissionPolicyEventRepository;
 use Glueful\Extensions\Commerce\Marketplace\CommissionPolicyService;
 use Glueful\Extensions\Commerce\Marketplace\Contracts\SellerRoleAuthority;
 use Glueful\Extensions\Commerce\Marketplace\FixedSellerRoleAuthority;
+use Glueful\Extensions\Commerce\Marketplace\LedgerAccountLock;
+use Glueful\Extensions\Commerce\Marketplace\LedgerPostingService;
+use Glueful\Extensions\Commerce\Marketplace\LedgerRepository;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceActivationService;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceMode;
+use Glueful\Extensions\Commerce\Marketplace\MarketplaceRefundGuard;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceWorkspaceLock;
 use Glueful\Extensions\Commerce\Marketplace\SellerAttributionService;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipRepository;
@@ -361,6 +365,24 @@ final class CommerceServiceProvider extends ServiceProvider
             SellerOrderPaymentConfirmation::class => [
                 'class' => SellerOrderPaymentConfirmation::class,
                 'shared' => true,
+            ],
+            LedgerRepository::class => [
+                'class' => LedgerRepository::class,
+                'shared' => true,
+            ],
+            LedgerAccountLock::class => [
+                'class' => LedgerAccountLock::class,
+                'shared' => true,
+            ],
+            LedgerPostingService::class => [
+                'class' => LedgerPostingService::class,
+                'shared' => true,
+                'autowire' => true,
+            ],
+            MarketplaceRefundGuard::class => [
+                'class' => MarketplaceRefundGuard::class,
+                'shared' => true,
+                'autowire' => true,
             ],
             SellerOrderFulfillmentService::class => [
                 'factory' => [self::class, 'makeSellerOrderFulfillmentService'],
@@ -838,7 +860,9 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(RefundRepository::class),
             $container->get(StockRepository::class),
             self::tenantResolver($container),
-            self::makeRefundCollector($container)
+            self::makeRefundCollector($container),
+            $container->get(MarketplaceRefundGuard::class),
+            $container->get(LedgerPostingService::class)
         );
     }
 

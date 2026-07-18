@@ -9,6 +9,8 @@ use Glueful\Events\EventService;
 use Glueful\Extensions\Commerce\Events\RefundCompleted;
 use Glueful\Extensions\Commerce\Events\RefundFailed;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
+use Glueful\Extensions\Commerce\Marketplace\LedgerPostingService;
+use Glueful\Extensions\Commerce\Marketplace\MarketplaceRefundGuard;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
 use Glueful\Extensions\Commerce\Orders\OrderStateMachine;
 use Glueful\Extensions\Contracts\Payments\PayableReference;
@@ -31,6 +33,14 @@ use Glueful\Http\Exceptions\Client\NotFoundException;
  * FINALIZE transaction (`finalize`) claims the order again, then atomically claims the
  * refund out of `pending` via `RefundRepository::claimPending()` — the idempotency point
  * where exactly one finalizer wins and losers get back the already-terminal row.
+ *
+ * `$marketplaceGuard` and `$ledgerPosting` are APPENDED OPTIONAL collaborators (design
+ * spec §2.8, MV3 Task 7) — the same idiom as {@see
+ * \Glueful\Extensions\Commerce\Orders\OrderPaymentService}'s `$sellerOrders`/
+ * `$ledgerPosting` pair: every pre-MV3 direct-construction call site (tests included)
+ * stays source-compatible. Together they let `validate()` tighten/auto-expand a
+ * `marketplace_partitioned` order's refund line attribution and `applyCompletion()` post
+ * the refund's settlement entries, without touching non-partitioned behavior at all.
  */
 final class RefundService
 {
@@ -40,6 +50,8 @@ final class RefundService
         private readonly StockRepository $stock,
         private readonly CurrentTenantResolver $tenants,
         private readonly ?RefundCollector $collector = null,
+        private readonly ?MarketplaceRefundGuard $marketplaceGuard = null,
+        private readonly ?LedgerPostingService $ledgerPosting = null,
     ) {
     }
 
@@ -424,6 +436,17 @@ final class RefundService
 
         $lines = $this->validateLines($c, $tenant, $orderUuid, $input, $amount);
 
+        // Design spec §2.8 (MV3 Task 7): marketplace-aware line-attribution tightening/
+        // auto-expansion for a marketplace_partitioned order, layered ON TOP of the
+        // validateLines() shape validation above — never replacing it. Reads the order's
+        // OWN marketplace_partitioned snapshot, never current activeFor(), so a
+        // non-partitioned refund (or one with no guard wired) never reaches the guard at
+        // all — zero marketplace queries, byte-identical behavior.
+        $partitioned = (bool) ($order['marketplace_partitioned'] ?? false);
+        if ($partitioned && $this->marketplaceGuard !== null) {
+            $lines = $this->marketplaceGuard->validateAndNormalize($c, $tenant, $order, $amount, $lines);
+        }
+
         return [$order, $amount, $lines];
     }
 
@@ -580,6 +603,19 @@ SQL,
 
         if ($affected !== 1) {
             throw new ConcurrentRefundException('Order totals changed concurrently.');
+        }
+
+        // Design spec §2.8 (MV3 Task 7): posted INSIDE this same transaction, immediately
+        // after the CAS above — a marketplace_partitioned order with the ledger
+        // collaborator wired posts refund_debit/commission_reversal (per seller) plus any
+        // marketplace-funded remainder before anything else in this method runs. $lines is
+        // already the persisted refund_lines set for both callers (the manual path's
+        // freshly-inserted rows, the gateway finalize path's freshly-read linesFor()), so
+        // this never re-derives attribution. Any LedgerException (or any other throw) rolls
+        // the CAS, the refund row itself (manual path), and every posting back together.
+        $partitioned = (bool) ($order['marketplace_partitioned'] ?? false);
+        if ($partitioned && $this->ledgerPosting !== null) {
+            $this->ledgerPosting->postRefund($c, $tenant, $order, $refund, $lines);
         }
 
         if ($newTotal === $grandTotal) {
