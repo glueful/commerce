@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Glueful\Extensions\Commerce\Tests\Integration\Migrations;
 
+use Glueful\Database\Connection;
 use Glueful\Extensions\Commerce\Database\Migrations\CreatePayoutTable;
 use Glueful\Extensions\Commerce\Database\Migrations\CreateSellerPayoutAccountsTable;
 use Glueful\Extensions\Commerce\Support\DiagnosticsReport;
@@ -401,5 +402,240 @@ final class PayoutProviderShapeTest extends CommerceTestCase
         $actualColumns = array_column($columns, 'name');
 
         self::assertSame($expectedColumns, $actualColumns, "unexpected column set/order for {$indexName}");
+    }
+
+    // =====================================================================
+    // Real-PostgreSQL convergence lanes (design spec §3/§10, MV4 Task 11 GATES):
+    // the SQLite tests above prove the SHAPE; these prove the SAME migrations
+    // (013's folded MV4 columns, 014's brand-new table) converge on a genuinely
+    // different engine -- every index via `pg_indexes` (the schema builder
+    // exposes no `hasIndex`, and index names are generated identically across
+    // drivers -- {@see \Glueful\Database\Schema\TableBuilder::generateIndexName()}
+    // in the framework -- so the SAME pinned names from the SQLite tests above
+    // apply here unchanged), and re-running 013/014 is a no-op. Gating,
+    // fixture-width discipline, and the throwaway `Connection`/`ApplicationContext`
+    // construction all mirror `SettlementShapeTest`'s own pgsql lanes exactly.
+    // =====================================================================
+
+    public function testFreshInstallConvergesOnRealPostgresWithFoldedProviderColumnsAndSellerPayoutAccounts(): void
+    {
+        $this->skipUnlessPgsql();
+
+        $connection = $this->migratedConnection($this->pgConfig());
+        $schema = $connection->getSchemaBuilder();
+
+        foreach (
+            [
+                'status', 'method', 'provider', 'provider_ref', 'destination_ref',
+                'failure_code', 'failure_reason', 'retryable', 'attempt_count',
+                'last_attempt_at', 'next_attempt_at', 'next_reconcile_at',
+                'reversed_total', 'updated_at', 'completed_at',
+            ] as $column
+        ) {
+            self::assertTrue(
+                $schema->hasColumn('commerce_payouts', $column),
+                "commerce_payouts missing folded column {$column} on PostgreSQL"
+            );
+        }
+
+        self::assertTrue(
+            $schema->hasTable('commerce_seller_payout_accounts'),
+            'missing commerce_seller_payout_accounts on PostgreSQL'
+        );
+        foreach (
+            [
+                'id', 'uuid', 'tenant_uuid', 'seller_uuid', 'provider', 'account_ref',
+                'readiness_state', 'last_synced_at', 'failure_code', 'created_at', 'updated_at',
+            ] as $column
+        ) {
+            self::assertTrue(
+                $schema->hasColumn('commerce_seller_payout_accounts', $column),
+                "commerce_seller_payout_accounts missing column {$column} on PostgreSQL"
+            );
+        }
+    }
+
+    public function testPayoutSweepAndSellerPayoutAccountsIndexesExistOnRealPostgresViaPgIndexes(): void
+    {
+        $this->skipUnlessPgsql();
+
+        $connection = $this->migratedConnection($this->pgConfig());
+
+        $this->assertPgIndexExists(
+            $connection,
+            'commerce_payouts',
+            'commerce_payouts_status_next_attempt_index',
+            ['tenant_uuid', 'status', 'next_attempt_at']
+        );
+        $this->assertPgIndexExists(
+            $connection,
+            'commerce_payouts',
+            'commerce_payouts_status_next_reconcile_index',
+            ['tenant_uuid', 'status', 'next_reconcile_at']
+        );
+
+        $this->assertPgIndexExists(
+            $connection,
+            'commerce_seller_payout_accounts',
+            'commerce_payout_accounts_tenant_seller_index',
+            ['tenant_uuid', 'seller_uuid']
+        );
+        // Unlike SQLite (see this file's own docblock note on inline-unique naming),
+        // PostgreSQL DOES honor an inline `->unique(..., 'name')`'s custom name via
+        // `CONSTRAINT name UNIQUE (...)` -- so both composite uniques, unverifiable by
+        // name on SQLite, ARE verifiable here.
+        $this->assertPgIndexExists(
+            $connection,
+            'commerce_seller_payout_accounts',
+            'commerce_payout_accounts_tenant_seller_provider_unique',
+            ['tenant_uuid', 'seller_uuid', 'provider']
+        );
+        $this->assertPgIndexExists(
+            $connection,
+            'commerce_seller_payout_accounts',
+            'commerce_payout_accounts_tenant_uuid_unique',
+            ['tenant_uuid', 'uuid']
+        );
+    }
+
+    public function testPayoutPositiveAmountCheckConstraintIsEnforcedOnRealPostgres(): void
+    {
+        $this->skipUnlessPgsql();
+
+        $connection = $this->migratedConnection($this->pgConfig());
+
+        foreach ([0, -100] as $amount) {
+            try {
+                $connection->table('commerce_payouts')->insert([
+                    'uuid' => 'pgckprv' . abs($amount),
+                    'tenant_uuid' => 'tntpgckpv001',
+                    'seller_uuid' => 'pgckprvslr01',
+                    'currency' => 'USD',
+                    'amount' => $amount,
+                    'idempotency_key' => 'idem-pg-ckpv-' . $amount,
+                ]);
+                self::fail("a payout amount of {$amount} must violate the CHECK constraint on PostgreSQL");
+            } catch (\Throwable) {
+                $this->addToAssertionCount(1);
+            }
+        }
+    }
+
+    public function testSellerPayoutAccountsUniqueTenantSellerProviderIsEnforcedOnRealPostgres(): void
+    {
+        $this->skipUnlessPgsql();
+
+        $connection = $this->migratedConnection($this->pgConfig());
+        // Self-healing cleanup: the valid row inserted below is a REAL commit against the
+        // persistent PostgreSQL test database, unlike every SQLite test in this file.
+        $connection->table('commerce_seller_payout_accounts')
+            ->where('tenant_uuid', '=', 'tntpgckac001')
+            ->delete();
+
+        $connection->table('commerce_seller_payout_accounts')->insert([
+            'uuid' => 'pgckacct0001',
+            'tenant_uuid' => 'tntpgckac001',
+            'seller_uuid' => 'pgckacctslr1',
+            'provider' => 'payvia',
+            'account_ref' => 'acct-pg-ckac',
+        ]);
+
+        try {
+            $connection->table('commerce_seller_payout_accounts')->insert([
+                'uuid' => 'pgckacct0002',
+                'tenant_uuid' => 'tntpgckac001',
+                'seller_uuid' => 'pgckacctslr1',
+                'provider' => 'payvia',
+                'account_ref' => 'acct-pg-ckac-2',
+            ]);
+            self::fail('duplicate (tenant_uuid, seller_uuid, provider) account insert must be rejected on PostgreSQL');
+        } catch (\Throwable) {
+            $this->addToAssertionCount(1);
+        }
+
+        $connection->table('commerce_seller_payout_accounts')
+            ->where('tenant_uuid', '=', 'tntpgckac001')
+            ->delete();
+    }
+
+    public function testRerunning013And014MigrationsAreNoOpsOnRealPostgres(): void
+    {
+        $this->skipUnlessPgsql();
+
+        $connection = $this->migratedConnection($this->pgConfig());
+        $schema = $connection->getSchemaBuilder();
+
+        // migratedConnection() already ran every migration (including 013/014) once;
+        // re-running up() again must be a no-op guarded by hasTable().
+        (new CreatePayoutTable())->up($schema);
+        (new CreatePayoutTable())->up($schema);
+        (new CreateSellerPayoutAccountsTable())->up($schema);
+        (new CreateSellerPayoutAccountsTable())->up($schema);
+
+        self::assertTrue($schema->hasTable('commerce_payouts'));
+        self::assertTrue($schema->hasTable('commerce_seller_payout_accounts'));
+    }
+
+    private function skipUnlessPgsql(): void
+    {
+        if (getenv('COMMERCE_TEST_DB_DRIVER') !== 'pgsql') {
+            self::markTestSkipped('Requires a PostgreSQL test lane to prove migration convergence is portable.');
+        }
+    }
+
+    /**
+     * `pg_indexes.indexdef` looks like `CREATE INDEX name ON public.table
+     * USING btree (col_a, col_b)` (or `CREATE UNIQUE INDEX ...` for a named
+     * unique constraint) -- the column list (in order) is the content of the
+     * LAST parenthesized group.
+     *
+     * @param list<string> $expectedColumns ordered, leading column first
+     */
+    private function assertPgIndexExists(
+        Connection $connection,
+        string $table,
+        string $indexName,
+        array $expectedColumns
+    ): void {
+        $pdo = $connection->getPDO();
+        $stmt = $pdo->prepare('SELECT indexdef FROM pg_indexes WHERE tablename = ? AND indexname = ?');
+        $stmt->execute([$table, $indexName]);
+        $indexDef = $stmt->fetchColumn();
+
+        self::assertIsString($indexDef, "missing index {$indexName} on {$table} (pg_indexes)");
+        self::assertMatchesRegularExpression('/\(([^()]+)\)\s*$/', $indexDef, "unparseable indexdef: {$indexDef}");
+        preg_match('/\(([^()]+)\)\s*$/', $indexDef, $matches);
+        $actualColumns = array_map('trim', explode(',', $matches[1]));
+
+        self::assertSame($expectedColumns, $actualColumns, "unexpected column set/order for {$indexName}");
+    }
+
+    /** @return array<string,mixed> */
+    private function pgConfig(): array
+    {
+        return [
+            'engine' => 'pgsql',
+            'pgsql' => [
+                'host' => getenv('DB_PGSQL_HOST') ?: '127.0.0.1',
+                'port' => (int) (getenv('DB_PGSQL_PORT') ?: 5432),
+                'db' => getenv('DB_PGSQL_DATABASE') ?: 'glueful_test',
+                'user' => getenv('DB_PGSQL_USERNAME') ?: 'postgres',
+                'pass' => getenv('DB_PGSQL_PASSWORD') ?: '',
+                'schema' => getenv('DB_PGSQL_SCHEMA') ?: 'public',
+            ],
+            'pooling' => ['enabled' => false],
+        ];
+    }
+
+    /** @param array<string,mixed> $pgConfig */
+    private function migratedConnection(array $pgConfig): Connection
+    {
+        $connection = new Connection($pgConfig);
+        $schema = $connection->getSchemaBuilder();
+        foreach (static::MIGRATIONS as $migration) {
+            (new $migration())->up($schema);
+        }
+
+        return $connection;
     }
 }

@@ -41,6 +41,10 @@ use Glueful\Extensions\Commerce\Marketplace\LedgerRepository;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceMode;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceRefundGuard;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceWorkspaceLock;
+use Glueful\Extensions\Commerce\Marketplace\PayoutException;
+use Glueful\Extensions\Commerce\Marketplace\PayoutRepository;
+use Glueful\Extensions\Commerce\Marketplace\PayoutService;
+use Glueful\Extensions\Commerce\Marketplace\SellerBalanceService;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerOrderPaymentConfirmation;
 use Glueful\Extensions\Commerce\Marketplace\SellerOrderRepository;
@@ -131,6 +135,9 @@ final class MarketplaceRegressionTest extends CommerceTestCase
         'commerce_commission_policy_events',
         'commerce_payouts',
     ];
+
+    /** MV4 Task 11 (design spec §3.2): the brand-new payout-destination table. */
+    private const MV4_PAYOUT_ACCOUNTS_TABLE = 'commerce_seller_payout_accounts';
 
     // =====================================================================
     // 1. Route manifest: flag off == pre-MV1, byte for byte.
@@ -416,7 +423,9 @@ final class MarketplaceRegressionTest extends CommerceTestCase
 
         // MV3 Task 12: the expanded 8-table zero-query proof -- the MV1 trio
         // plus MV2's commerce_seller_orders plus the four MV3 settlement
-        // tables.
+        // tables. MV4 Task 11 (GATES) adds a 9th: commerce_seller_payout_accounts
+        // -- no ordinary request path may ever touch the payout-destination
+        // table or its retry/reconcile sweep indexes either.
         $marketplaceTables = [
             'commerce_marketplace_settings',
             'commerce_sellers',
@@ -426,6 +435,7 @@ final class MarketplaceRegressionTest extends CommerceTestCase
             'commerce_ledger_account_locks',
             'commerce_commission_policy_events',
             'commerce_payouts',
+            self::MV4_PAYOUT_ACCOUNTS_TABLE,
         ];
         foreach (QueryLoggingPdoStatement::$queries as $sql) {
             foreach ($marketplaceTables as $table) {
@@ -929,6 +939,220 @@ final class MarketplaceRegressionTest extends CommerceTestCase
         );
         self::assertArrayNotHasKey('seller_groups', $body['data']);
         self::assertSame(0, $this->connection->table('commerce_seller_orders')->count());
+    }
+
+    // =====================================================================
+    // 7. MV4 Task 11 GATES (design spec §2.9/§7): marketplace off / no
+    //    `PayoutCollector` bound -- the manual `record()` path stays
+    //    byte-identical to its pre-MV4 (MV3) shape, the provider saga path is
+    //    cleanly inert (never a fatal error, never a trace in the ledger),
+    //    no MV4 route leaks into the manifest, the folded schema default
+    //    keeps an old-shaped insert reading back paid/manual, and the new
+    //    `commerce_seller_payout_accounts` table joins the SAME maintenance
+    //    guarantees the MV1-MV3 tables already have (§4).
+    // =====================================================================
+
+    public function testManualPayoutRecordStaysByteIdenticalToItsPreMv4ShapeWithNoCollectorBound(): void
+    {
+        self::assertFalse((bool) config($this->context, 'commerce.marketplace.enabled', false));
+
+        $ledger = new LedgerRepository();
+        $payouts = new PayoutRepository();
+        $balances = new SellerBalanceService($ledger);
+        // No PayoutCollector, no PayoutAccountService -- exactly the "marketplace off,
+        // provider unbound" host configuration this whole file proves invariance under;
+        // the manual path never reads either collaborator.
+        $service = new PayoutService($payouts, $ledger, new LedgerAccountLock(), $balances);
+
+        $seller = 'regressplr001';
+        $ledger->post($this->context, self::TENANT, [
+            'account_kind' => 'seller',
+            'account_key' => LedgerRepository::accountKeyForSeller($seller),
+            'seller_uuid' => $seller,
+            'currency' => 'USD',
+            'entry_type' => 'sale_credit',
+            'amount' => 5000,
+            'order_uuid' => 'regressplord1',
+            'idempotency_key' => 'regressplord1:' . $seller . ':sale_credit',
+        ]);
+
+        $payout = $service->record(
+            $this->context,
+            self::TENANT,
+            $seller,
+            'USD',
+            2000,
+            'idem-regress-payout-off',
+            'ext-regress-payout-off',
+            'a regression note',
+            'operatorregr1'
+        );
+
+        // The EXACT pre-MV4 (MV3) field set -- unchanged values, unchanged types.
+        self::assertSame($seller, $payout['seller_uuid']);
+        self::assertSame('USD', $payout['currency']);
+        self::assertSame(2000, (int) $payout['amount']);
+        self::assertSame('ext-regress-payout-off', $payout['external_ref']);
+        self::assertSame('a regression note', $payout['note']);
+        self::assertSame('operatorregr1', $payout['created_by']);
+        self::assertSame('idem-regress-payout-off', $payout['idempotency_key']);
+
+        // The folded MV4 columns are now written EXPLICITLY (design spec §3.1) but stay
+        // at their inert/manual defaults -- never a provider-shaped row.
+        self::assertSame('manual', $payout['method']);
+        self::assertSame('paid', $payout['status']);
+        self::assertNotNull($payout['completed_at']);
+
+        $persisted = $payouts->findByUuid($this->context, self::TENANT, (string) $payout['uuid']);
+        self::assertNotNull($persisted);
+        self::assertSame('manual', $persisted['method']);
+        self::assertSame('paid', $persisted['status']);
+        self::assertNull($persisted['provider']);
+        self::assertNull($persisted['provider_ref']);
+        self::assertNull($persisted['destination_ref']);
+        self::assertFalse((bool) $persisted['retryable']);
+        self::assertSame(0, (int) $persisted['attempt_count']);
+    }
+
+    public function testProviderPayoutPathIsCleanlyInertAndUnreachableWithNoCollectorBound(): void
+    {
+        $ledger = new LedgerRepository();
+        $payouts = new PayoutRepository();
+        $balances = new SellerBalanceService($ledger);
+        $service = new PayoutService($payouts, $ledger, new LedgerAccountLock(), $balances);
+
+        $seller = 'regressplr002';
+        $ledger->post($this->context, self::TENANT, [
+            'account_kind' => 'seller',
+            'account_key' => LedgerRepository::accountKeyForSeller($seller),
+            'seller_uuid' => $seller,
+            'currency' => 'USD',
+            'entry_type' => 'sale_credit',
+            'amount' => 5000,
+            'order_uuid' => 'regressplord2',
+            'idempotency_key' => 'regressplord2:' . $seller . ':sale_credit',
+        ]);
+
+        $threw = null;
+        try {
+            $service->execute($this->context, self::TENANT, $seller, 'USD', 1000, 'operatorregr2');
+        } catch (PayoutException $e) {
+            $threw = $e;
+        }
+        self::assertInstanceOf(
+            PayoutException::class,
+            $threw,
+            'the provider saga must be cleanly unreachable (a plain 422-mapped DomainException), never a fatal error.'
+        );
+        self::assertStringContainsString('No payout provider is configured', $threw->getMessage());
+
+        // Inert: no row, no hold -- the provider path leaves no trace whatsoever.
+        self::assertSame(
+            0,
+            $this->connection->table('commerce_payouts')->where('seller_uuid', '=', $seller)->count()
+        );
+        self::assertSame(
+            0,
+            $this->connection->table('commerce_marketplace_ledger')
+                ->where('seller_uuid', '=', $seller)
+                ->where('entry_type', '=', 'reserve_hold')
+                ->count()
+        );
+    }
+
+    public function testProviderPayoutRoutesNeverLeakIntoTheManifestWithTheMasterSwitchOff(): void
+    {
+        self::assertFalse((bool) config($this->context, 'commerce.marketplace.enabled', false));
+
+        $router = $this->freshRouter();
+        $paths = array_map(static fn (array $route): string => (string) $route['path'], $router->getAllRoutes());
+
+        foreach (
+            [
+                '/commerce/admin/marketplace/payouts/execute',
+                '/commerce/admin/marketplace/payouts/{uuid}/retry',
+                '/commerce/admin/marketplace/payouts/accounts',
+                '/commerce/admin/marketplace/payouts/accounts/sync',
+                '/commerce/seller/{sellerUuid}/payouts/accounts',
+            ] as $mv4Route
+        ) {
+            self::assertNotContains(
+                $mv4Route,
+                $paths,
+                "{$mv4Route} must not leak into the manifest with the master switch off."
+            );
+        }
+    }
+
+    public function testOldShapedPayoutInsertOmittingTheNewProviderColumnsStillReadsBackPaidAndManual(): void
+    {
+        // §3.1: the folded default keeps ANY historical/pre-MV4-shaped insert -- one that
+        // never even knew these columns existed -- reading back exactly as a completed
+        // manual payout, regardless of the master switch.
+        $this->connection->table('commerce_payouts')->insert([
+            'uuid' => 'regressoldsh1',
+            'tenant_uuid' => self::TENANT,
+            'seller_uuid' => 'regressoldsl1',
+            'currency' => 'USD',
+            'amount' => 4200,
+            'external_ref' => 'wire-regress-old',
+            'created_by' => 'operatorregr3',
+            'idempotency_key' => 'idem-regress-old-shape',
+            // Deliberately omits status/method/provider/retryable/attempt_count/... entirely.
+        ]);
+
+        $row = $this->connection->table('commerce_payouts')->where('uuid', '=', 'regressoldsh1')->first();
+        self::assertNotNull($row);
+        self::assertSame('paid', $row['status']);
+        self::assertSame('manual', $row['method']);
+        self::assertNull($row['provider']);
+        self::assertFalse((bool) $row['retryable']);
+        self::assertSame(0, (int) $row['attempt_count']);
+    }
+
+    public function testDiagnosticsReportListsSellerPayoutAccountsTableAsPresentWithTheSwitchOff(): void
+    {
+        self::assertFalse((bool) config($this->context, 'commerce.marketplace.enabled', false));
+
+        $present = DiagnosticsReport::build($this->context)['database']['commerce_tables_present'];
+
+        self::assertArrayHasKey(self::MV4_PAYOUT_ACCOUNTS_TABLE, $present);
+        self::assertTrue(
+            $present[self::MV4_PAYOUT_ACCOUNTS_TABLE],
+            'DiagnosticsReport must list commerce_seller_payout_accounts as present regardless of the switch'
+        );
+    }
+
+    public function testTenantAdoptRekeysSellerPayoutAccountsEvenWhenTheMasterSwitchIsOff(): void
+    {
+        self::assertFalse(
+            (bool) config($this->context, 'commerce.marketplace.enabled', false),
+            'this test relies on the master switch being off (the default)'
+        );
+
+        $this->connection->table(self::MV4_PAYOUT_ACCOUNTS_TABLE)->insert([
+            'uuid' => 'mv4adoptac01',
+            'tenant_uuid' => '',
+            'seller_uuid' => 'mv4adoptsl01',
+            'provider' => 'default',
+            'account_ref' => 'acct-mv4-adopt',
+        ]);
+
+        $result = (new TenantAdopter())->adopt($this->context, 'tenantMV40099');
+
+        self::assertSame(1, $result['tables'][self::MV4_PAYOUT_ACCOUNTS_TABLE], 'exactly 1 rekeyed row');
+        self::assertSame(
+            0,
+            $this->connection->table(self::MV4_PAYOUT_ACCOUNTS_TABLE)->where('tenant_uuid', '=', '')->count(),
+            'no sentinel rows left behind'
+        );
+        self::assertSame(
+            1,
+            $this->connection->table(self::MV4_PAYOUT_ACCOUNTS_TABLE)
+                ->where('tenant_uuid', '=', 'tenantMV40099')
+                ->count(),
+            'row must be rekeyed to the adopted tenant'
+        );
     }
 
     // -----------------------------------------------------------------

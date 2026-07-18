@@ -115,6 +115,21 @@ final class HttpDocumentationTest extends CommerceTestCase
         self::assertContains('/commerce/seller/{sellerUuid}/payouts', $paths);
         self::assertContains('/commerce/seller/{sellerUuid}/commission-policy', $paths);
 
+        // MV4 Task 11 (GATES): the provider-payout saga surfaces -- operator
+        // single-seller execute/retry, operator payout-account attach/sync, and the
+        // seller's own payout-account readiness read. Every one of these actions
+        // already flows through the fully generic walk below with zero changes
+        // (`commerceRouteActions()` collects every `[class, method]` handler under the
+        // commerce HTTP namespace, no hand-maintained list) -- these `assertContains`
+        // calls only pin that the NEW routes are genuinely present in this pass, so a
+        // future regression that accidentally drops one of them from `routes.php`
+        // fails loudly here rather than silently shrinking the walked set.
+        self::assertContains('/commerce/admin/marketplace/payouts/execute', $paths);
+        self::assertContains('/commerce/admin/marketplace/payouts/{uuid}/retry', $paths);
+        self::assertContains('/commerce/admin/marketplace/payouts/accounts', $paths);
+        self::assertContains('/commerce/admin/marketplace/payouts/accounts/sync', $paths);
+        self::assertContains('/commerce/seller/{sellerUuid}/payouts/accounts', $paths);
+
         $this->assertEveryCommerceRouteActionIsDocumented($router, $actions);
     }
 
