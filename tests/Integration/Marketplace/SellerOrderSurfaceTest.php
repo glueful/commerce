@@ -327,6 +327,41 @@ final class SellerOrderSurfaceTest extends CommerceRouterTestCase
         self::assertSame('Seller A Widget', $body['data']['lines'][0]['product_name']);
     }
 
+    public function testDetailExposesTheSnapshottedCommissionPolicyPerLine(): void
+    {
+        // §2.4/§6.2: the seller sees the commission SNAPSHOTTED on each of their
+        // own sold lines (their own money data) -- the "snapshotted" half of the
+        // effective+snapshotted policy view.
+        $seller = $this->seedSeller('commission-view', 'ownerCommV001');
+        $fixture = $this->seedConfirmedSellerOrder($seller['uuid'], lineOverrides: [
+            'product_name' => 'Commissioned Widget',
+            'line_total' => 1000,
+            'discount_amount' => 0,
+            'commission_source' => 'seller',
+            'commission_kind' => 'percentage',
+            'commission_bps' => 1500,
+            'commission_fixed' => null,
+            'commission_basis' => 1000,
+            'commission_amount' => 150,
+        ]);
+
+        $router = $this->freshRouter();
+        $response = $this->dispatch($router, $this->requestAs(
+            'ownerCommV001',
+            'GET',
+            "/commerce/seller/{$seller['uuid']}/orders/{$fixture['seller_order']['uuid']}"
+        ));
+
+        self::assertSame(200, $response->getStatusCode());
+        $commission = $this->json($response)['data']['lines'][0]['commission'];
+        self::assertSame('seller', $commission['source']);
+        self::assertSame('percentage', $commission['kind']);
+        self::assertSame(1500, $commission['bps']);
+        self::assertNull($commission['fixed']);
+        self::assertSame(1000, $commission['basis']);
+        self::assertSame(150, $commission['amount']);
+    }
+
     public function testShippingAddressNormalizesRegionPostcodeAndNameAliases(): void
     {
         $seller = $this->seedSeller('alias-normalize', 'ownerAlias0001');

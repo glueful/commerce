@@ -193,6 +193,18 @@ final class SellerOrderService
             'line_total' => (int) ($line['line_total'] ?? 0),
             'option_values' => is_array($line['option_values'] ?? null) ? $line['option_values'] : [],
             'addons' => AddonSnapshot::sanitize(is_array($line['addons'] ?? null) ? $line['addons'] : []),
+            // The immutable commission policy SNAPSHOTTED at checkout (design spec
+            // §2.4/§6.2): the seller's own money data, so they can see exactly what
+            // commission was applied to each of their sold lines. This is the
+            // "snapshotted" half of the seller's effective+snapshotted policy view.
+            'commission' => [
+                'source' => $line['commission_source'] !== null ? (string) $line['commission_source'] : null,
+                'kind' => $line['commission_kind'] !== null ? (string) $line['commission_kind'] : null,
+                'bps' => $line['commission_bps'] !== null ? (int) $line['commission_bps'] : null,
+                'fixed' => $line['commission_fixed'] !== null ? (int) $line['commission_fixed'] : null,
+                'basis' => (int) ($line['commission_basis'] ?? 0),
+                'amount' => (int) ($line['commission_amount'] ?? 0),
+            ],
         ];
     }
 
