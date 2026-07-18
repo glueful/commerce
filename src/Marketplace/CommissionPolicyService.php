@@ -283,9 +283,18 @@ final class CommissionPolicyService
 
     private function dispatch(ApplicationContext $context, object $event): void
     {
-        $container = container($context);
-        if ($container->has(EventService::class)) {
-            $container->get(EventService::class)->dispatch($event);
+        // CommissionPolicyChanged is an OPTIONAL after-commit signal (§2.3), NOT
+        // the audit authority -- the durable commerce_commission_policy_events row
+        // already committed. A throwing/bound listener must never turn a successful,
+        // audited policy change into a 500 for the operator, so listener failures
+        // are swallowed here (the audit trail is unaffected either way).
+        try {
+            $container = container($context);
+            if ($container->has(EventService::class)) {
+                $container->get(EventService::class)->dispatch($event);
+            }
+        } catch (\Throwable) {
+            // Intentionally ignored: post-commit notification is best-effort.
         }
     }
 }
