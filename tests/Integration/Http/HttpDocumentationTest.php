@@ -70,6 +70,13 @@ final class HttpDocumentationTest extends CommerceTestCase
      * MV2 actions with zero changes; the explicit path assertions below only
      * pin that the NEW routes are genuinely present in this pass (never
      * silently absent), not that they're individually documented.
+     *
+     * MV3 (plan Task 11, gated here by Task 12): the commission-policy /
+     * payout / adjustment / operator-financial / seller-financial routes all
+     * live in the SAME `if ($marketplaceEnabled)` groups (`routes.php`), so
+     * they too fall out of the fully generic walk with zero changes -- the
+     * additional `assertContains` pins below only prove they are genuinely
+     * present in this pass.
      */
     public function testEveryCommerceRouteActionIsDocumentedWithMarketplaceEnabled(): void
     {
@@ -93,6 +100,20 @@ final class HttpDocumentationTest extends CommerceTestCase
         self::assertContains('/commerce/seller/{sellerUuid}/orders', $paths);
         self::assertContains('/commerce/seller/{sellerUuid}/orders/{sellerOrderUuid}', $paths);
         self::assertContains('/commerce/seller/{sellerUuid}/orders/{sellerOrderUuid}/fulfill', $paths);
+
+        // MV3 Task 11/12: the settlement-ledger surfaces -- manual payouts,
+        // operator adjustments, operator financial summary/seller balance/
+        // seller report, and the seller's own financial surfaces (report,
+        // balance, payouts, effective commission policy).
+        self::assertContains('/commerce/admin/marketplace/payouts', $paths);
+        self::assertContains('/commerce/admin/marketplace/adjustments', $paths);
+        self::assertContains('/commerce/admin/marketplace/financials/summary', $paths);
+        self::assertContains('/commerce/admin/marketplace/sellers/{uuid}/balance', $paths);
+        self::assertContains('/commerce/admin/marketplace/sellers/{uuid}/report', $paths);
+        self::assertContains('/commerce/seller/{sellerUuid}/financials/report', $paths);
+        self::assertContains('/commerce/seller/{sellerUuid}/financials/balance', $paths);
+        self::assertContains('/commerce/seller/{sellerUuid}/payouts', $paths);
+        self::assertContains('/commerce/seller/{sellerUuid}/commission-policy', $paths);
 
         $this->assertEveryCommerceRouteActionIsDocumented($router, $actions);
     }

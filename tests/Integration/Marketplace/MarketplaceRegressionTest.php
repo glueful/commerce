@@ -35,7 +35,11 @@ use Glueful\Extensions\Commerce\Http\Storefront\OrderController;
 use Glueful\Extensions\Commerce\Http\Storefront\ProductController;
 use Glueful\Extensions\Commerce\Invoices\ConfigSellerIdentityProvider;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
+use Glueful\Extensions\Commerce\Marketplace\LedgerAccountLock;
+use Glueful\Extensions\Commerce\Marketplace\LedgerPostingService;
+use Glueful\Extensions\Commerce\Marketplace\LedgerRepository;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceMode;
+use Glueful\Extensions\Commerce\Marketplace\MarketplaceRefundGuard;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceWorkspaceLock;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerOrderPaymentConfirmation;
@@ -46,7 +50,9 @@ use Glueful\Extensions\Commerce\Orders\CheckoutService;
 use Glueful\Extensions\Commerce\Orders\OrderNumberGenerator;
 use Glueful\Extensions\Commerce\Orders\OrderPaymentService;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
+use Glueful\Extensions\Commerce\Orders\Refunds\RefundInput;
 use Glueful\Extensions\Commerce\Orders\Refunds\RefundRepository;
+use Glueful\Extensions\Commerce\Orders\Refunds\RefundService;
 use Glueful\Extensions\Commerce\Payments\ManualPaymentCollector;
 use Glueful\Extensions\Commerce\Pricing\PricingEngine;
 use Glueful\Extensions\Commerce\Pricing\ShippingQuote;
@@ -55,6 +61,7 @@ use Glueful\Extensions\Commerce\Reports\SalesReportRepository;
 use Glueful\Extensions\Commerce\Shipping\ShippingClassRepository;
 use Glueful\Extensions\Commerce\Support\DiagnosticsReport;
 use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
+use Glueful\Extensions\Commerce\Tenancy\TenantAdopter;
 use Glueful\Extensions\Commerce\Tests\Support\CommerceTestCase;
 use Glueful\Extensions\Commerce\Tests\Support\QueryLoggingPdoStatement;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
@@ -81,10 +88,17 @@ use Symfony\Component\HttpFoundation\Request;
  *    storefront browse, cart add, checkout quote, admin product create AND
  *    update, a reports endpoint, and (MV2 Task 10) a full non-partitioned
  *    checkout/payment/fulfill/cancel/projection sweep, matched against ALL
- *    FOUR marketplace tables (`commerce_marketplace_settings`,
- *    `commerce_sellers`, `commerce_seller_memberships`,
- *    `commerce_seller_orders`) -- the MV2 table joins the zero-query proof
- *    exactly like the MV1 trio.
+ *    EIGHT marketplace tables: the MV1 trio (`commerce_marketplace_settings`,
+ *    `commerce_sellers`, `commerce_seller_memberships`), MV2's
+ *    `commerce_seller_orders`, and (MV3 Task 12) the four new settlement
+ *    tables (`commerce_marketplace_ledger`, `commerce_ledger_account_locks`,
+ *    `commerce_commission_policy_events`, `commerce_payouts`) -- every table
+ *    joins the SAME zero-query proof. MV3 also adds a refund lane to the
+ *    checkout/payment/fulfill sweep (design spec §7: "checkout/payment/
+ *    refund/fulfill" all post nothing and query nothing settlement-side for
+ *    a non-partitioned order), since payment posting alone doesn't exercise
+ *    {@see \Glueful\Extensions\Commerce\Marketplace\LedgerPostingService::postRefund()}'s
+ *    own gate.
  * 3. Public payload allowlist: `seller_uuid` never appears in a storefront
  *    product projection, even for a product a prior activation (since
  *    switched back off -- design spec §2.1's explicit exception, data stays
@@ -109,6 +123,14 @@ use Symfony\Component\HttpFoundation\Request;
 final class MarketplaceRegressionTest extends CommerceTestCase
 {
     private const TENANT = '';
+
+    /** MV3 Task 12 (design spec §3.2-§3.5): the four new settlement tables. */
+    private const MV3_SETTLEMENT_TABLES = [
+        'commerce_marketplace_ledger',
+        'commerce_ledger_account_locks',
+        'commerce_commission_policy_events',
+        'commerce_payouts',
+    ];
 
     // =====================================================================
     // 1. Route manifest: flag off == pre-MV1, byte for byte.
@@ -392,13 +414,18 @@ final class MarketplaceRegressionTest extends CommerceTestCase
 
         self::assertNotEmpty(QueryLoggingPdoStatement::$queries, 'sanity: the call itself must run some queries');
 
-        // MV2 Task 10: the expanded 4-table zero-query proof -- the MV1 trio
-        // plus commerce_seller_orders.
+        // MV3 Task 12: the expanded 8-table zero-query proof -- the MV1 trio
+        // plus MV2's commerce_seller_orders plus the four MV3 settlement
+        // tables.
         $marketplaceTables = [
             'commerce_marketplace_settings',
             'commerce_sellers',
             'commerce_seller_memberships',
             'commerce_seller_orders',
+            'commerce_marketplace_ledger',
+            'commerce_ledger_account_locks',
+            'commerce_commission_policy_events',
+            'commerce_payouts',
         ];
         foreach (QueryLoggingPdoStatement::$queries as $sql) {
             foreach ($marketplaceTables as $table) {
@@ -447,6 +474,38 @@ final class MarketplaceRegressionTest extends CommerceTestCase
         });
 
         self::assertSame('paid', $this->orderRow((string) $order['uuid'])['status']);
+    }
+
+    /**
+     * MV3 Task 12: closes the "checkout/payment/refund/fulfill" quartet the
+     * spec §7 gate names -- {@see \Glueful\Extensions\Commerce\Marketplace\LedgerPostingService::postRefund()}
+     * has its OWN gate on the order's `marketplace_partitioned` flag,
+     * independent of {@see \Glueful\Extensions\Commerce\Marketplace\LedgerPostingService::postSale()}'s,
+     * so the payment-side zero-query proof above does not exercise it.
+     * `refundService()` is wired WITH both marketplace collaborators
+     * (`MarketplaceRefundGuard`, `LedgerPostingService`) so this proves the
+     * REAL branch condition, never merely a missing collaborator -- the same
+     * discipline `PaymentPostingTest::
+     * testNonPartitionedPaidTransitionExecutesZeroLedgerAndLockQueriesAndPostsNothing()`
+     * already established for `markPaid()`.
+     */
+    public function testAdminRefundIssuesZeroMarketplaceTableQueries(): void
+    {
+        $order = $this->placeNonPartitionedOrder()['order'];
+        $this->paymentService()->markPaid($this->context, self::TENANT, (string) $order['uuid']);
+
+        $this->assertNoMarketplaceQueries(function () use ($order): void {
+            $refund = $this->refundService()->issue(
+                $this->context,
+                (string) $order['uuid'],
+                new RefundInput(null, 'regress full refund', [], false),
+                'idem-regress-refund-1'
+            );
+            self::assertSame('completed', $refund['status']);
+        });
+
+        self::assertSame('refunded', $this->orderRow((string) $order['uuid'])['status']);
+        self::assertSame(0, $this->connection->table('commerce_marketplace_ledger')->count());
     }
 
     public function testAdminFulfillIssuesZeroMarketplaceTableQueries(): void
@@ -576,6 +635,99 @@ final class MarketplaceRegressionTest extends CommerceTestCase
             self::assertTrue(
                 $present[$table],
                 "DiagnosticsReport must list {$table} as present regardless of the switch"
+            );
+        }
+    }
+
+    /**
+     * MV3 Task 12: the four settlement tables (design spec §3.7) join the
+     * SAME maintenance-surface guarantee as the MV1/MV2 quartet above --
+     * `DiagnosticsReport` lists them as present regardless of the master
+     * switch.
+     */
+    public function testDiagnosticsReportListsAllFourMv3SettlementTablesAsPresentWithTheSwitchOff(): void
+    {
+        self::assertFalse((bool) config($this->context, 'commerce.marketplace.enabled', false));
+
+        $present = DiagnosticsReport::build($this->context)['database']['commerce_tables_present'];
+
+        foreach (self::MV3_SETTLEMENT_TABLES as $table) {
+            self::assertArrayHasKey($table, $present);
+            self::assertTrue(
+                $present[$table],
+                "DiagnosticsReport must list {$table} as present regardless of the switch"
+            );
+        }
+    }
+
+    /**
+     * MV3 Task 12: `commerce:tenancy:adopt` rekeys the four new settlement
+     * tables too -- {@see \Glueful\Extensions\Commerce\Support\DiagnosticsReport::tenantTables()}
+     * already lists them unconditionally (design spec §3.7), so
+     * {@see \Glueful\Extensions\Commerce\Tenancy\TenantAdopter} picks them up
+     * mechanically; this pins that behaviorally, mirroring
+     * `Tenancy\TenantAdopterTest::testAdoptRekeysMarketplaceTablesEvenWhenTheMasterSwitchIsOff()`
+     * exactly, switch off (the default).
+     */
+    public function testTenantAdoptRekeysAllFourMv3SettlementTablesEvenWhenTheMasterSwitchIsOff(): void
+    {
+        self::assertFalse(
+            (bool) config($this->context, 'commerce.marketplace.enabled', false),
+            'this test relies on the master switch being off (the default)'
+        );
+
+        $this->connection->table('commerce_marketplace_ledger')->insert([
+            'uuid' => 'mv3adoptldg1',
+            'tenant_uuid' => '',
+            'account_key' => 'seller:mv3adoptsel1',
+            'account_kind' => 'seller',
+            'seller_uuid' => 'mv3adoptsel1',
+            'currency' => 'USD',
+            'entry_type' => 'sale_credit',
+            'amount' => 1000,
+            'idempotency_key' => 'mv3-adopt-ledger-1',
+        ]);
+        $this->connection->table('commerce_ledger_account_locks')->insert([
+            'tenant_uuid' => '',
+            'account_key' => 'seller:mv3adoptsel1',
+            'currency' => 'USD',
+        ]);
+        $this->connection->table('commerce_commission_policy_events')->insert([
+            'uuid' => 'mv3adoptevt1',
+            'tenant_uuid' => '',
+            'subject_kind' => 'seller',
+            'subject_uuid' => 'mv3adoptsel1',
+            'actor_uuid' => 'mv3adoptop01',
+            'before_policy' => json_encode(['kind' => null, 'bps' => null, 'fixed' => null], JSON_THROW_ON_ERROR),
+            'after_policy' => json_encode(
+                ['kind' => 'percentage', 'bps' => 500, 'fixed' => null],
+                JSON_THROW_ON_ERROR
+            ),
+        ]);
+        $this->connection->table('commerce_payouts')->insert([
+            'uuid' => 'mv3adoptpay1',
+            'tenant_uuid' => '',
+            'seller_uuid' => 'mv3adoptsel1',
+            'currency' => 'USD',
+            'amount' => 500,
+            'external_ref' => 'mv3-adopt-payout-ref',
+            'created_by' => 'mv3adoptop01',
+            'idempotency_key' => 'mv3-adopt-payout-1',
+        ]);
+
+        $result = (new TenantAdopter())->adopt($this->context, 'tenantMV30099');
+
+        foreach (self::MV3_SETTLEMENT_TABLES as $table) {
+            self::assertSame(1, $result['tables'][$table], "{$table} must report exactly 1 rekeyed row");
+            self::assertSame(
+                0,
+                $this->connection->table($table)->where('tenant_uuid', '=', '')->count(),
+                "{$table} must have no sentinel rows left behind"
+            );
+            self::assertSame(
+                1,
+                $this->connection->table($table)->where('tenant_uuid', '=', 'tenantMV30099')->count(),
+                "{$table} row must be rekeyed to the adopted tenant"
             );
         }
     }
@@ -1010,9 +1162,41 @@ final class MarketplaceRegressionTest extends CommerceTestCase
      * (the order's own `marketplace_partitioned` flag) rather than merely a
      * missing collaborator.
      */
+    /**
+     * MV3 Task 12: also wired WITH `SellerOrderRepository` +
+     * `LedgerPostingService` (design spec §2.7) -- like
+     * `SellerOrderPaymentConfirmation` above, this is what makes the
+     * zero-query proofs exercise the REAL `marketplace_partitioned` branch
+     * rather than a merely-absent collaborator.
+     */
     private function paymentService(): OrderPaymentService
     {
-        return new OrderPaymentService(new OrderRepository(), new SellerOrderPaymentConfirmation());
+        return new OrderPaymentService(
+            new OrderRepository(),
+            new SellerOrderPaymentConfirmation(),
+            null,
+            new SellerOrderRepository(),
+            $this->ledgerPostingService()
+        );
+    }
+
+    private function ledgerPostingService(): LedgerPostingService
+    {
+        return new LedgerPostingService(new LedgerRepository(), new LedgerAccountLock());
+    }
+
+    /** MV3 Task 12: wired WITH both marketplace collaborators -- see {@see paymentService()}. */
+    private function refundService(): RefundService
+    {
+        return new RefundService(
+            new OrderRepository(),
+            new RefundRepository(),
+            new StockRepository(),
+            $this->fixedTenant(),
+            null,
+            new MarketplaceRefundGuard(new RefundRepository()),
+            $this->ledgerPostingService()
+        );
     }
 
     private function marketplaceAdminOrderController(): AdminOrderController

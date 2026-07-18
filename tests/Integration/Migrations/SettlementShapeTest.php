@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Glueful\Extensions\Commerce\Tests\Integration\Migrations;
 
+use Glueful\Database\Connection;
 use Glueful\Extensions\Commerce\Database\Migrations\CreateMarketplaceLedgerTables;
 use Glueful\Extensions\Commerce\Database\Migrations\CreatePayoutTable;
 use Glueful\Extensions\Commerce\Support\DiagnosticsReport;
@@ -852,5 +853,362 @@ final class SettlementShapeTest extends CommerceTestCase
         $actualColumns = array_column($columns, 'name');
 
         self::assertSame($expectedColumns, $actualColumns, "unexpected column set/order for {$indexName}");
+    }
+
+    // =====================================================================
+    // Real-PostgreSQL convergence lanes (design spec §3/§10, MV3 plan Task
+    // 12): the SQLite tests above prove the SHAPE; these prove the SAME
+    // migrations converge on a genuinely different engine -- a fresh install
+    // produces the folded commission columns and the four new tables, every
+    // index is asserted via `pg_indexes` (the schema builder exposes no
+    // `hasIndex`, and index names are generated identically across drivers --
+    // {@see \Glueful\Database\Schema\TableBuilder::generateIndexName()} in
+    // the framework -- so the SAME pinned names from the SQLite tests above
+    // apply here unchanged), the PostgreSQL-only CHECK constraints that DO
+    // exist (the ledger account_kind/account_key identity CHECK and the
+    // payout positive-amount CHECK -- design spec's "commission shape" is
+    // validated only in {@see \Glueful\Extensions\Commerce\Marketplace\CommissionPolicyResolver::validate()},
+    // service-side on every driver; there is no DB-level CHECK for it,
+    // deliberately, since `commission_kind`/`bps`/`fixed` alone cannot
+    // express "all-null inherits, percentage needs only bps, fixed needs
+    // only fixed" as a portable column CHECK) actually fire on real
+    // PostgreSQL, and re-running 012/013 is a no-op. Gating, fixture-width
+    // discipline, and the throwaway `Connection`/`ApplicationContext`
+    // construction all mirror `Migrations\MarketplaceOrderShapeTest`/
+    // `Marketplace\MarketplacePgsqlTest` exactly.
+    // =====================================================================
+
+    public function testFreshInstallConvergesOnRealPostgresWithFoldedCommissionColumnsAndTheFourNewTables(): void
+    {
+        $this->skipUnlessPgsql();
+
+        $connection = $this->migratedConnection($this->pgConfig());
+        $schema = $connection->getSchemaBuilder();
+
+        foreach (['commission_kind', 'commission_bps', 'commission_fixed'] as $column) {
+            self::assertTrue(
+                $schema->hasColumn('commerce_products', $column),
+                "commerce_products missing folded column {$column} on PostgreSQL"
+            );
+            self::assertTrue(
+                $schema->hasColumn('commerce_sellers', $column),
+                "commerce_sellers missing folded column {$column} on PostgreSQL"
+            );
+            self::assertTrue(
+                $schema->hasColumn('commerce_marketplace_settings', $column),
+                "commerce_marketplace_settings missing folded column {$column} on PostgreSQL"
+            );
+        }
+        foreach (
+            [
+                'commission_source', 'commission_kind', 'commission_bps', 'commission_fixed',
+                'commission_basis', 'commission_amount',
+            ] as $column
+        ) {
+            self::assertTrue(
+                $schema->hasColumn('commerce_order_lines', $column),
+                "commerce_order_lines missing folded column {$column} on PostgreSQL"
+            );
+        }
+        self::assertTrue(
+            $schema->hasColumn('commerce_seller_orders', 'commission_amount'),
+            'commerce_seller_orders missing folded column commission_amount on PostgreSQL'
+        );
+
+        self::assertTrue($schema->hasTable('commerce_marketplace_ledger'), 'missing commerce_marketplace_ledger');
+        foreach (
+            [
+                'id', 'uuid', 'tenant_uuid', 'account_key', 'account_kind', 'seller_uuid',
+                'currency', 'entry_type', 'amount', 'order_uuid', 'seller_order_uuid',
+                'refund_uuid', 'payout_uuid', 'idempotency_key', 'reason', 'created_by', 'created_at',
+            ] as $column
+        ) {
+            self::assertTrue(
+                $schema->hasColumn('commerce_marketplace_ledger', $column),
+                "commerce_marketplace_ledger missing column {$column} on PostgreSQL"
+            );
+        }
+
+        self::assertTrue(
+            $schema->hasTable('commerce_ledger_account_locks'),
+            'missing commerce_ledger_account_locks'
+        );
+        foreach (
+            ['id', 'tenant_uuid', 'account_key', 'currency', 'revision', 'created_at', 'updated_at'] as $column
+        ) {
+            self::assertTrue(
+                $schema->hasColumn('commerce_ledger_account_locks', $column),
+                "commerce_ledger_account_locks missing column {$column} on PostgreSQL"
+            );
+        }
+
+        self::assertTrue(
+            $schema->hasTable('commerce_commission_policy_events'),
+            'missing commerce_commission_policy_events'
+        );
+        foreach (
+            [
+                'id', 'uuid', 'tenant_uuid', 'subject_kind', 'subject_uuid', 'actor_uuid',
+                'before_policy', 'after_policy', 'created_at',
+            ] as $column
+        ) {
+            self::assertTrue(
+                $schema->hasColumn('commerce_commission_policy_events', $column),
+                "commerce_commission_policy_events missing column {$column} on PostgreSQL"
+            );
+        }
+
+        self::assertTrue($schema->hasTable('commerce_payouts'), 'missing commerce_payouts');
+        foreach (
+            [
+                'id', 'uuid', 'tenant_uuid', 'seller_uuid', 'currency', 'amount',
+                'external_ref', 'note', 'created_by', 'idempotency_key', 'created_at',
+            ] as $column
+        ) {
+            self::assertTrue(
+                $schema->hasColumn('commerce_payouts', $column),
+                "commerce_payouts missing column {$column} on PostgreSQL"
+            );
+        }
+    }
+
+    public function testLedgerAndPayoutIndexesExistOnRealPostgresViaPgIndexes(): void
+    {
+        $this->skipUnlessPgsql();
+
+        $connection = $this->migratedConnection($this->pgConfig());
+
+        $this->assertPgIndexExists(
+            $connection,
+            'commerce_marketplace_ledger',
+            'commerce_ledger_account_key_currency_index',
+            ['tenant_uuid', 'account_key', 'currency']
+        );
+        $this->assertPgIndexExists(
+            $connection,
+            'commerce_marketplace_ledger',
+            'commerce_ledger_account_kind_seller_currency_index',
+            ['tenant_uuid', 'account_kind', 'seller_uuid', 'currency']
+        );
+        $this->assertPgIndexExists(
+            $connection,
+            'commerce_marketplace_ledger',
+            'commerce_marketplace_ledger_order_uuid_index',
+            ['order_uuid']
+        );
+        $this->assertPgIndexExists(
+            $connection,
+            'commerce_marketplace_ledger',
+            'commerce_marketplace_ledger_refund_uuid_index',
+            ['refund_uuid']
+        );
+        $this->assertPgIndexExists(
+            $connection,
+            'commerce_marketplace_ledger',
+            'commerce_marketplace_ledger_payout_uuid_index',
+            ['payout_uuid']
+        );
+
+        // Unlike SQLite (see the docblock note above `testAccountLocksUniqueTenantUuidAccountKeyCurrencyIsEnforced()`),
+        // PostgreSQL DOES honor an inline `->unique(..., 'name')`'s custom
+        // name via `CONSTRAINT name UNIQUE (...)` -- so this composite
+        // uniqueness, unverifiable by name on SQLite, IS verifiable here.
+        $this->assertPgIndexExists(
+            $connection,
+            'commerce_ledger_account_locks',
+            'commerce_ledger_account_locks_key_currency_unique',
+            ['tenant_uuid', 'account_key', 'currency']
+        );
+
+        $this->assertPgIndexExists(
+            $connection,
+            'commerce_commission_policy_events',
+            'commerce_commission_events_subject_created_index',
+            ['tenant_uuid', 'subject_kind', 'subject_uuid', 'created_at']
+        );
+
+        $this->assertPgIndexExists(
+            $connection,
+            'commerce_payouts',
+            'commerce_payouts_tenant_uuid_seller_uuid_currency_index',
+            ['tenant_uuid', 'seller_uuid', 'currency']
+        );
+    }
+
+    public function testLedgerAccountIdentityCheckConstraintIsEnforcedOnRealPostgres(): void
+    {
+        $this->skipUnlessPgsql();
+
+        $connection = $this->migratedConnection($this->pgConfig());
+        // Self-healing cleanup (mirrors `Marketplace\MarketplacePgsqlTest`'s
+        // per-test `cleanupTenant()` convention): the valid row inserted
+        // below is a REAL commit against the persistent PostgreSQL test
+        // database, unlike every SQLite test in this file -- it must not
+        // survive to collide with a later run.
+        $connection->table('commerce_marketplace_ledger')->where('tenant_uuid', '=', 'tenantpgckl1')->delete();
+
+        try {
+            $connection->table('commerce_marketplace_ledger')->insert([
+                'uuid' => 'pgcklgr0001',
+                'tenant_uuid' => 'tenantpgckl1',
+                'account_key' => 'seller:pgckseller1',
+                'account_kind' => 'seller',
+                'seller_uuid' => null,
+                'currency' => 'USD',
+                'entry_type' => 'sale_credit',
+                'amount' => 1000,
+                'idempotency_key' => 'idem-pg-ckl-1',
+            ]);
+            self::fail('a seller account row without seller_uuid must violate the CHECK constraint on PostgreSQL');
+        } catch (\Throwable) {
+            $this->addToAssertionCount(1);
+        }
+
+        try {
+            $connection->table('commerce_marketplace_ledger')->insert([
+                'uuid' => 'pgcklgr0002',
+                'tenant_uuid' => 'tenantpgckl1',
+                'account_key' => 'marketplace',
+                'account_kind' => 'marketplace',
+                'seller_uuid' => 'pgckseller1',
+                'currency' => 'USD',
+                'entry_type' => 'refund_debit',
+                'amount' => -500,
+                'idempotency_key' => 'idem-pg-ckl-2',
+            ]);
+            self::fail(
+                'a marketplace account row with a non-null seller_uuid must violate the CHECK constraint '
+                    . 'on PostgreSQL'
+            );
+        } catch (\Throwable) {
+            $this->addToAssertionCount(1);
+        }
+
+        // A valid row still succeeds -- the CHECK is precise, not overbroad.
+        $connection->table('commerce_marketplace_ledger')->insert([
+            'uuid' => 'pgcklgr0003',
+            'tenant_uuid' => 'tenantpgckl1',
+            'account_key' => 'seller:pgckseller1',
+            'account_kind' => 'seller',
+            'seller_uuid' => 'pgckseller1',
+            'currency' => 'USD',
+            'entry_type' => 'sale_credit',
+            'amount' => 1000,
+            'idempotency_key' => 'idem-pg-ckl-3',
+        ]);
+        self::assertSame(
+            1,
+            $connection->table('commerce_marketplace_ledger')->where('uuid', '=', 'pgcklgr0003')->count()
+        );
+
+        $connection->table('commerce_marketplace_ledger')->where('tenant_uuid', '=', 'tenantpgckl1')->delete();
+    }
+
+    public function testPayoutPositiveAmountCheckConstraintIsEnforcedOnRealPostgres(): void
+    {
+        $this->skipUnlessPgsql();
+
+        $connection = $this->migratedConnection($this->pgConfig());
+
+        foreach ([0, -100] as $amount) {
+            try {
+                $connection->table('commerce_payouts')->insert([
+                    'uuid' => 'pgckpay' . abs($amount),
+                    'tenant_uuid' => 'tenantpgckp1',
+                    'seller_uuid' => 'pgckpayslr01',
+                    'currency' => 'USD',
+                    'amount' => $amount,
+                    'external_ref' => 'pg-ck-payout-ref',
+                    'created_by' => 'pgckpayop001',
+                    'idempotency_key' => 'idem-pg-ckp-' . $amount,
+                ]);
+                self::fail("a payout amount of {$amount} must violate the CHECK constraint on PostgreSQL");
+            } catch (\Throwable) {
+                $this->addToAssertionCount(1);
+            }
+        }
+    }
+
+    public function testRerunning012And013MigrationsAreNoOpsOnRealPostgres(): void
+    {
+        $this->skipUnlessPgsql();
+
+        $connection = $this->migratedConnection($this->pgConfig());
+        $schema = $connection->getSchemaBuilder();
+
+        // migratedConnection() already ran every migration (including 012/013)
+        // once; re-running up() again must be a no-op guarded by hasTable().
+        (new CreateMarketplaceLedgerTables())->up($schema);
+        (new CreateMarketplaceLedgerTables())->up($schema);
+        (new CreatePayoutTable())->up($schema);
+        (new CreatePayoutTable())->up($schema);
+
+        self::assertTrue($schema->hasTable('commerce_marketplace_ledger'));
+        self::assertTrue($schema->hasTable('commerce_ledger_account_locks'));
+        self::assertTrue($schema->hasTable('commerce_commission_policy_events'));
+        self::assertTrue($schema->hasTable('commerce_payouts'));
+    }
+
+    private function skipUnlessPgsql(): void
+    {
+        if (getenv('COMMERCE_TEST_DB_DRIVER') !== 'pgsql') {
+            self::markTestSkipped('Requires a PostgreSQL test lane to prove migration convergence is portable.');
+        }
+    }
+
+    /**
+     * `pg_indexes.indexdef` looks like `CREATE INDEX name ON public.table
+     * USING btree (col_a, col_b)` (or `CREATE UNIQUE INDEX ...` for a named
+     * unique constraint) -- the column list (in order) is the content of the
+     * LAST parenthesized group.
+     *
+     * @param list<string> $expectedColumns ordered, leading column first
+     */
+    private function assertPgIndexExists(
+        Connection $connection,
+        string $table,
+        string $indexName,
+        array $expectedColumns
+    ): void {
+        $pdo = $connection->getPDO();
+        $stmt = $pdo->prepare('SELECT indexdef FROM pg_indexes WHERE tablename = ? AND indexname = ?');
+        $stmt->execute([$table, $indexName]);
+        $indexDef = $stmt->fetchColumn();
+
+        self::assertIsString($indexDef, "missing index {$indexName} on {$table} (pg_indexes)");
+        self::assertMatchesRegularExpression('/\(([^()]+)\)\s*$/', $indexDef, "unparseable indexdef: {$indexDef}");
+        preg_match('/\(([^()]+)\)\s*$/', $indexDef, $matches);
+        $actualColumns = array_map('trim', explode(',', $matches[1]));
+
+        self::assertSame($expectedColumns, $actualColumns, "unexpected column set/order for {$indexName}");
+    }
+
+    /** @return array<string,mixed> */
+    private function pgConfig(): array
+    {
+        return [
+            'engine' => 'pgsql',
+            'pgsql' => [
+                'host' => getenv('DB_PGSQL_HOST') ?: '127.0.0.1',
+                'port' => (int) (getenv('DB_PGSQL_PORT') ?: 5432),
+                'db' => getenv('DB_PGSQL_DATABASE') ?: 'glueful_test',
+                'user' => getenv('DB_PGSQL_USERNAME') ?: 'postgres',
+                'pass' => getenv('DB_PGSQL_PASSWORD') ?: '',
+                'schema' => getenv('DB_PGSQL_SCHEMA') ?: 'public',
+            ],
+            'pooling' => ['enabled' => false],
+        ];
+    }
+
+    /** @param array<string,mixed> $pgConfig */
+    private function migratedConnection(array $pgConfig): Connection
+    {
+        $connection = new Connection($pgConfig);
+        $schema = $connection->getSchemaBuilder();
+        foreach (static::MIGRATIONS as $migration) {
+            (new $migration())->up($schema);
+        }
+
+        return $connection;
     }
 }
