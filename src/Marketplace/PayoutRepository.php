@@ -158,6 +158,121 @@ SQL,
     }
 
     /**
+     * Retry-sweep candidates (design spec §2.6, Task 9): every `failed AND retryable
+     * AND attempt_count < $maxAttempts AND next_attempt_at <= now` row -- the exact
+     * predicate {@see self::claimRetryableForAttempt()} itself CASes against, so every
+     * candidate this returns is (barring a concurrent sweep winning first) actually
+     * claimable. `retryable = TRUE` and the `next_attempt_at <= {utcNow}` comparison are
+     * literal SQL for the same PostgreSQL boolean-column reason documented on
+     * {@see self::claimRetryableForAttempt()}.
+     *
+     * @return list<array<string,mixed>>
+     */
+    public function dueForRetry(ApplicationContext $context, string $tenant, int $maxAttempts): array
+    {
+        $utcNow = UtcNowSql::expression(db($context)->getDriverName());
+
+        return db($context)->table('commerce_payouts')
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('status', '=', 'failed')
+            ->whereRaw('retryable = TRUE')
+            ->whereNotNull('next_attempt_at')
+            ->whereRaw("next_attempt_at <= {$utcNow}")
+            ->where('attempt_count', '<', $maxAttempts)
+            ->orderBy('id', 'ASC')
+            ->get();
+    }
+
+    /**
+     * Reconcile-sweep candidates (design spec §2.6, Task 9): due unresolved `pending`
+     * rows (`next_reconcile_at IS NULL` is an immediate repair backstop -- a row whose
+     * watchdog was somehow never armed is treated as due right away, never silently
+     * skipped) PLUS due `paid` rows (the slower reversal-discovery cadence, §2.8).
+     * Deliberately TWO separate selects merged in PHP rather than one OR'd query --
+     * mirrors the "select both due unresolved pending payouts ... and due paid payouts"
+     * phrasing verbatim and keeps each predicate simple. Never selects `failed` (that
+     * status' own `next_reconcile_at` watchdog belongs to the RETRY sweep, not this one
+     * -- {@see self::dueForRetry()}) or `reversed` (nothing left to reconcile).
+     *
+     * @return list<array<string,mixed>>
+     */
+    public function dueForReconcile(ApplicationContext $context, string $tenant): array
+    {
+        $utcNow = UtcNowSql::expression(db($context)->getDriverName());
+
+        $pending = db($context)->table('commerce_payouts')
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('status', '=', 'pending')
+            ->whereRaw("(next_reconcile_at IS NULL OR next_reconcile_at <= {$utcNow})")
+            ->orderBy('id', 'ASC')
+            ->get();
+
+        $paid = db($context)->table('commerce_payouts')
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('status', '=', 'paid')
+            ->whereNotNull('next_reconcile_at')
+            ->whereRaw("next_reconcile_at <= {$utcNow}")
+            ->orderBy('id', 'ASC')
+            ->get();
+
+        return [...$pending, ...$paid];
+    }
+
+    /**
+     * Unconditional `next_reconcile_at` re-arm (design spec §2.6, Task 9): used when a
+     * reconcile attempt learns nothing new -- a `status()` call that itself threw, or a
+     * provider observation that changed nothing actionable -- so the row stays a live
+     * candidate for a LATER sweep instead of being reconciled again on every tick
+     * (immediately due) or silently dropped. Deliberately unguarded by `status`: it never
+     * touches money or the state machine, only the watchdog timestamp.
+     */
+    public function scheduleReconcile(
+        ApplicationContext $context,
+        string $tenant,
+        string $uuid,
+        string $nextReconcileAt
+    ): void {
+        db($context)->table('commerce_payouts')
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('uuid', '=', $uuid)
+            ->update([
+                'next_reconcile_at' => $nextReconcileAt,
+                'updated_at' => db($context)->getDriver()->formatDateTime(),
+            ]);
+    }
+
+    /**
+     * Affected-row-checked apply of a provider-reported reversal delta (design spec
+     * §2.6/§2.8, Task 9) -- mirrors {@see self::claimPending()}'s CAS shape, guarded by
+     * BOTH `status = 'paid'` and `reversed_total = $expectedReversedTotal`. Callers
+     * ({@see PayoutService::reconcile()}) always claim the seller account lock and
+     * re-read `reversed_total` fresh UNDER that lock immediately before calling this, so
+     * in practice the CAS can only ever fail if the caller's own invariants are broken --
+     * this is defense in depth, not the primary serialization mechanism (the account
+     * lock is).
+     *
+     * @param array<string,mixed> $set additional columns (`reversed_total`,
+     *     `next_reconcile_at`) merged into the same UPDATE
+     */
+    public function applyReversal(
+        ApplicationContext $context,
+        string $tenant,
+        string $uuid,
+        int $expectedReversedTotal,
+        string $to,
+        array $set
+    ): bool {
+        $affected = db($context)->table('commerce_payouts')
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('uuid', '=', $uuid)
+            ->where('status', '=', 'paid')
+            ->where('reversed_total', '=', $expectedReversedTotal)
+            ->update($set + ['status' => $to, 'updated_at' => db($context)->getDriver()->formatDateTime()]);
+
+        return $affected === 1;
+    }
+
+    /**
      * Every payout for a seller, newest first (design spec §6.2, MV3 Task 11)
      * -- the seller/operator financial surfaces
      * ({@see \Glueful\Extensions\Commerce\Http\Seller\SellerFinancialController},

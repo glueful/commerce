@@ -21,6 +21,7 @@ use Glueful\Extensions\Commerce\Marketplace\FixedSellerRoleAuthority;
 use Glueful\Extensions\Commerce\Marketplace\LedgerRepository;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceMode;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceWorkspaceLock;
+use Glueful\Extensions\Commerce\Marketplace\PayoutAccountRepository;
 use Glueful\Extensions\Commerce\Marketplace\PayoutRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerBalanceService;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipRepository;
@@ -304,7 +305,8 @@ abstract class CommerceRouterTestCase extends CommerceTestCase
             new SellerBalanceService(new LedgerRepository()),
             new PayoutRepository(),
             new MarketplaceMode(),
-            $this->fixedTenant()
+            $this->fixedTenant(),
+            new PayoutAccountRepository()
         );
     }
 

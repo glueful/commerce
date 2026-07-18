@@ -154,6 +154,25 @@ final class PayoutAccountRepository
     }
 
     /**
+     * Every payout-account row for one seller, across ALL providers, `ready` included (design
+     * spec §6.2, MV4 Task 10) -- the seller's own read-only readiness surface
+     * ({@see \Glueful\Extensions\Commerce\Http\Seller\SellerFinancialController}) enumerates
+     * every provider a seller has ever attached. Deliberately distinct from
+     * {@see self::duePendingOrRestricted()} (a sync-sweep CANDIDATE list, which excludes
+     * `ready` on purpose) -- this is a plain readiness READ, never a sweep query.
+     *
+     * @return list<array<string,mixed>>
+     */
+    public function forSeller(ApplicationContext $context, string $tenant, string $sellerUuid): array
+    {
+        return db($context)->table('commerce_seller_payout_accounts')
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('seller_uuid', '=', $sellerUuid)
+            ->orderBy('provider', 'ASC')
+            ->get();
+    }
+
+    /**
      * Sync-sweep candidates (design spec §2.7, Task 8 console command):
      * every account NOT currently `ready` -- `pending` (never successfully
      * synced, or just reset by an attach) and `restricted` (a provider may

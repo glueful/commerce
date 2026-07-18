@@ -10,6 +10,7 @@ use Glueful\Extensions\Commerce\Http\DTOs\SellerPayoutListQuery;
 use Glueful\Extensions\Commerce\Marketplace\CommissionPolicyResolver;
 use Glueful\Extensions\Commerce\Marketplace\LedgerRepository;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceMode;
+use Glueful\Extensions\Commerce\Marketplace\PayoutAccountRepository;
 use Glueful\Extensions\Commerce\Marketplace\PayoutRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerBalanceService;
 use Glueful\Extensions\Commerce\Reports\ReportWindow;
@@ -47,6 +48,7 @@ final class SellerFinancialController
         private ?PayoutRepository $payouts = null,
         private ?MarketplaceMode $marketplaceMode = null,
         private ?CurrentTenantResolver $tenants = null,
+        private ?PayoutAccountRepository $payoutAccounts = null,
     ) {
         $this->reports ??= app($context, SellerFinancialReportRepository::class);
         $this->balances ??= app($context, SellerBalanceService::class);
@@ -55,6 +57,7 @@ final class SellerFinancialController
         $this->tenants ??= container($context)->has(CurrentTenantResolver::class)
             ? container($context)->get(CurrentTenantResolver::class)
             : new SentinelTenantResolver();
+        $this->payoutAccounts ??= app($context, PayoutAccountRepository::class);
     }
 
     #[ApiOperation(summary: "Seller's own financial report over a date window", tags: ['Commerce Seller'])]
@@ -128,6 +131,31 @@ final class SellerFinancialController
         );
     }
 
+    /**
+     * `GET /{sellerUuid}/payouts/accounts` (design spec §6.2/§2.7, MV4 Task 10): the seller's
+     * own payout-DESTINATION readiness, per provider -- a strict field-by-field allowlist of
+     * `provider`/`readiness_state`/`last_synced_at` ONLY. NEVER the opaque `account_ref`
+     * (provider-owned, never seller-facing) and NEVER a failure code/reason (operator-only
+     * detail) -- the readiness state alone is enough for a seller to know whether payouts can
+     * run. No mutation surface exists here or anywhere on this controller.
+     */
+    #[ApiOperation(
+        summary: "Seller's own payout-account readiness, per provider",
+        tags: ['Commerce Seller']
+    )]
+    #[ApiResponse(200, description: 'Payout account readiness retrieved')]
+    #[ApiResponse(404, description: 'Unknown seller, no active membership, or workspace not activated')]
+    public function payoutAccounts(Request $request, string $sellerUuid): Response
+    {
+        $tenant = $this->tenants->tenantUuid($this->context);
+        $rows = $this->payoutAccounts->forSeller($this->context, $tenant, $sellerUuid);
+
+        return Response::success(
+            array_map(fn (array $row): array => self::payoutAccountProjection($row), $rows),
+            'Payout account readiness retrieved'
+        );
+    }
+
     #[ApiOperation(
         summary: "Seller's own effective (resolved) commission policy",
         tags: ['Commerce Seller']
@@ -180,24 +208,95 @@ final class SellerFinancialController
     }
 
     /**
-     * Field-by-field allowlist -- never a raw `commerce_payouts` row spread.
-     * Excludes the internal `id`/`tenant_uuid`/`seller_uuid` (redundant --
-     * the seller already knows it's their own) and `idempotency_key`
-     * (internal correctness plumbing, never seller-facing).
+     * A fixed, closed dictionary from a `commerce_payouts.failure_code` to a stable
+     * human-readable message (design spec §6.2, MV4 Task 10) -- NEVER the raw provider
+     * `failure_reason` text, which may carry provider-internal detail (or, in principle, a
+     * poison string) that must never reach a seller. An unrecognized code (including anything
+     * that isn't one of Commerce's own known saga codes) falls back to the generic
+     * `payout_failed` code + message below via {@see self::sanitizedFailureCode()}/
+     * {@see self::sanitizedFailureMessage()} -- an unmapped code is sanitized away, never
+     * passed through verbatim.
+     */
+    private const FAILURE_MESSAGES = [
+        'insufficient_funds' => 'The payout could not be completed due to insufficient provider funds.',
+        'card_declined' => 'The destination declined the transfer.',
+        'account_closed' => 'The destination account is closed.',
+        'action_required' => 'The destination requires additional action before this payout can complete.',
+        'attempt_not_started' => 'The payout attempt has not yet reached the provider.',
+    ];
+
+    private const DEFAULT_FAILURE_MESSAGE = 'The payout could not be completed.';
+
+    /**
+     * Field-by-field allowlist -- never a raw `commerce_payouts` row spread. Excludes the
+     * internal `id`/`tenant_uuid`/`seller_uuid` (redundant -- the seller already knows it's
+     * their own), `idempotency_key` (internal correctness plumbing, never seller-facing), and
+     * (MV4, design spec §6.2/§2.7/§2.8) the provider-payout internals: raw `failure_reason`,
+     * `destination_ref`. `status`/`provider`/`provider_ref` plus a SANITIZED `failure_code`/
+     * human failure message are new for MV4; the pre-existing manual-payout fields
+     * (`external_ref`/`note`/`created_by`) keep their exact prior shape -- a provider row simply
+     * renders `external_ref`/`created_by` as `null` (now nullable at the schema level, design
+     * spec §3.1) rather than crashing.
      *
      * @param array<string,mixed> $row
      * @return array<string,mixed>
      */
     private function payoutProjection(array $row): array
     {
+        $failureCode = isset($row['failure_code']) && $row['failure_code'] !== null
+            ? (string) $row['failure_code']
+            : null;
+
         return [
             'uuid' => (string) $row['uuid'],
             'currency' => (string) $row['currency'],
             'amount' => (int) $row['amount'],
-            'external_ref' => (string) $row['external_ref'],
+            'external_ref' => $row['external_ref'] !== null ? (string) $row['external_ref'] : null,
             'note' => $row['note'],
             'created_by' => $row['created_by'],
             'created_at' => $row['created_at'],
+            'status' => (string) ($row['status'] ?? 'paid'),
+            'provider' => $row['provider'] !== null ? (string) $row['provider'] : null,
+            'provider_ref' => $row['provider_ref'] !== null ? (string) $row['provider_ref'] : null,
+            'failure_code' => self::sanitizedFailureCode($failureCode),
+            'failure_message' => self::sanitizedFailureMessage($failureCode),
+        ];
+    }
+
+    private static function sanitizedFailureCode(?string $code): ?string
+    {
+        if ($code === null || $code === '') {
+            return null;
+        }
+
+        return array_key_exists($code, self::FAILURE_MESSAGES) ? $code : 'payout_failed';
+    }
+
+    private static function sanitizedFailureMessage(?string $code): ?string
+    {
+        if ($code === null || $code === '') {
+            return null;
+        }
+
+        return self::FAILURE_MESSAGES[$code] ?? self::DEFAULT_FAILURE_MESSAGE;
+    }
+
+    /**
+     * Field-by-field allowlist for a seller's own payout-DESTINATION readiness (design spec
+     * §6.2/§2.7): `provider`/`readiness_state`/`last_synced_at` ONLY -- never the opaque
+     * `account_ref` (provider-owned, would let a seller see/compare raw provider account
+     * identifiers) and never `failure_code` (operator-only detail; the readiness state alone
+     * tells the seller whether payouts can run).
+     *
+     * @param array<string,mixed> $row
+     * @return array<string,mixed>
+     */
+    private static function payoutAccountProjection(array $row): array
+    {
+        return [
+            'provider' => (string) $row['provider'],
+            'readiness_state' => (string) $row['readiness_state'],
+            'last_synced_at' => $row['last_synced_at'],
         ];
     }
 }

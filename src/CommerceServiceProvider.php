@@ -1169,7 +1169,8 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(ApplicationContext::class),
             $container->get(PayoutService::class),
             $container->get(AdjustmentService::class),
-            self::tenantResolver($container)
+            self::tenantResolver($container),
+            $container->get(PayoutAccountService::class)
         );
     }
 
@@ -1469,7 +1470,8 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(SellerBalanceService::class),
             $container->get(PayoutRepository::class),
             $container->get(MarketplaceMode::class),
-            self::tenantResolver($container)
+            self::tenantResolver($container),
+            $container->get(PayoutAccountRepository::class)
         );
     }
 

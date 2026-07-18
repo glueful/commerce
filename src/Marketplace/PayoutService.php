@@ -11,6 +11,7 @@ use Glueful\Extensions\Contracts\Payments\PayoutCollector;
 use Glueful\Extensions\Contracts\Payments\PayoutDestination;
 use Glueful\Extensions\Contracts\Payments\PayoutRequest;
 use Glueful\Extensions\Contracts\Payments\PayoutResult;
+use Glueful\Extensions\Contracts\Payments\PayoutStatusResult;
 use Glueful\Helpers\Utils;
 use Glueful\Http\Exceptions\Client\NotFoundException;
 
@@ -330,6 +331,100 @@ final class PayoutService
             throw new PayoutException('Payout amount must be greater than zero.');
         }
 
+        [$collector, $account] = $this->requireCollectorAndReadyAccount($context, $tenant, $sellerUuid);
+
+        $payout = $this->reserve($context, $tenant, $sellerUuid, $currency, $amount, $actorUuid, $account)
+            // An explicit, already-validated-positive amount only ever refuses via the
+            // available-balance PayoutException above -- reserve() returning null (the
+            // derive-in-lock skip signal, Task 9) is unreachable on this path.
+            ?? throw new \LogicException('reserve() unexpectedly skipped an explicit-amount request.');
+
+        return $this->callAndFinalize($context, $tenant, $collector, $payout);
+    }
+
+    /**
+     * Task 9 batch counterpart to {@see self::execute()} (design spec §2.6): the SAME
+     * readiness gate + shared reserve step, but the payout amount is not known up front
+     * -- {@see self::reserve()}'s derive-in-lock signal (a `null` `$amount`) resolves it
+     * from the seller/currency account's `available` balance AS OF the moment the
+     * account lock is claimed, capped by the optional per-currency `maximums` config and
+     * refused (never inserted) below the per-currency `minimums` floor. This is what lets
+     * concurrent batch workers serialize on the account lock instead of needing a
+     * separate candidate lease (design spec §2.6's "makes concurrent batch workers
+     * serialize without a separate candidate lease").
+     *
+     * @return array<string,mixed>|null the finalized payout row, or null when the
+     *     candidate was skipped (the locked `available` was non-positive or below the
+     *     configured per-currency minimum) -- a legitimate no-op, not an error
+     * @throws PayoutException no bound collector/readiness gate, or no `ready` payout
+     *     destination for the configured provider (422, before any lock claim)
+     * @throws PayoutOutcomeUnknownException the transfer outcome is ambiguous -- same as
+     *     {@see self::execute()}
+     */
+    public function executeBatch(
+        ApplicationContext $context,
+        string $tenant,
+        string $sellerUuid,
+        string $currency,
+        ?string $actorUuid
+    ): ?array {
+        [$collector, $account] = $this->requireCollectorAndReadyAccount($context, $tenant, $sellerUuid);
+
+        $payout = $this->reserve($context, $tenant, $sellerUuid, $currency, null, $actorUuid, $account);
+        if ($payout === null) {
+            return null;
+        }
+
+        return $this->callAndFinalize($context, $tenant, $collector, $payout);
+    }
+
+    /**
+     * Task 9: claim-and-execute the next retry attempt for one payout (design spec
+     * §2.6) -- the SAME CAS an operator single-payout retry will later use
+     * ({@see PayoutRepository::claimRetryableForAttempt()}: the guarded
+     * `failed+retryable+due` -> `pending` transition that increments `attempt_count`,
+     * clears `next_attempt_at`, stamps `last_attempt_at`, and re-arms
+     * `next_reconcile_at` BEFORE any provider I/O) immediately followed by
+     * {@see self::callAndFinalize()} for the newly-claimed attempt. A crash between the
+     * claim and finalize is recovered by a reconcile sweep via that SAME watchdog, never
+     * a second blind retry.
+     *
+     * @return array<string,mixed>|null the finalized payout row, or null when nothing
+     *     was claimed (already claimed by a concurrent sweep, not yet due, exhausted, or
+     *     not retryable) -- a legitimate no-op, not an error
+     * @throws PayoutException no bound {@see PayoutCollector}
+     * @throws PayoutOutcomeUnknownException the new attempt's outcome is ambiguous --
+     *     same as {@see self::execute()}
+     */
+    public function retry(ApplicationContext $context, string $tenant, string $payoutUuid): ?array
+    {
+        $collector = $this->collector
+            ?? throw new PayoutException('No payout provider is configured for provider payouts.');
+        $maxAttempts = (int) config($context, 'commerce.marketplace.payouts.max_attempts', 5);
+
+        $claimed = $this->payouts->claimRetryableForAttempt($context, $tenant, $payoutUuid, $maxAttempts);
+        if ($claimed === null) {
+            return null;
+        }
+
+        return $this->callAndFinalize($context, $tenant, $collector, $claimed);
+    }
+
+    /**
+     * The soft-bound collector + reserve-time readiness gate {@see self::execute()} and
+     * {@see self::executeBatch()} both require BEFORE claiming any lock, inserting any
+     * row, or posting any hold (design spec §2.7) -- factored out so both entry points
+     * apply the exact same refusal order.
+     *
+     * @return array{0: PayoutCollector, 1: array<string,mixed>}
+     * @throws PayoutException no bound collector/readiness gate, or no `ready` payout
+     *     destination for the configured provider
+     */
+    private function requireCollectorAndReadyAccount(
+        ApplicationContext $context,
+        string $tenant,
+        string $sellerUuid
+    ): array {
         $collector = $this->collector
             ?? throw new PayoutException('No payout provider is configured for provider payouts.');
         $payoutAccounts = $this->payoutAccounts
@@ -344,9 +439,7 @@ final class PayoutService
         $provider = $this->defaultProvider($context);
         $account = $payoutAccounts->requireReady($context, $tenant, $sellerUuid, $provider);
 
-        $payout = $this->reserve($context, $tenant, $sellerUuid, $currency, $amount, $actorUuid, $account);
-
-        return $this->callAndFinalize($context, $tenant, $collector, $payout);
+        return [$collector, $account];
     }
 
     /**
@@ -365,29 +458,41 @@ final class PayoutService
 
     /**
      * Saga step 1: RESERVE. Same balance-safety order as {@see self::record()} -- claim the
-     * seller account lock, RE-READ `available` UNDER it, refuse (422, no hold posted) if the
-     * amount exceeds it -- but the row is inserted `pending`/`method=provider` instead of
-     * `paid`/`method=manual`, and this commits with NO network I/O: the collector call only
-     * ever happens after this transaction returns. `last_attempt_at` and the initial
-     * `next_reconcile_at` watchdog are stamped here so a process death between this commit and
-     * FINALIZE is recoverable by a reconcile sweep (Task 9) rather than stranding the hold.
+     * seller account lock, RE-READ `available` UNDER it -- but the row is inserted
+     * `pending`/`method=provider` instead of `paid`/`method=manual`, and this commits with NO
+     * network I/O: the collector call only ever happens after this transaction returns.
+     * `last_attempt_at` and the initial `next_reconcile_at` watchdog are stamped here so a
+     * process death between this commit and FINALIZE is recoverable by a reconcile sweep
+     * (Task 9) rather than stranding the hold.
+     *
+     * `$amount` carries the Task 9 derive-in-lock signal: an explicit positive amount (the
+     * {@see self::execute()} operator path) refuses (422, no hold posted) if it exceeds the
+     * locked `available`, exactly as before; `null` (the {@see self::executeBatch()} path)
+     * DERIVES the amount from that SAME locked `available` instead of checking a caller
+     * amount against it -- capped by the optional per-currency `maximums` config, and the
+     * candidate is SKIPPED (no row, no hold, returns null) when the locked value is below the
+     * per-currency `minimums` floor or non-positive. This is what makes concurrent batch
+     * workers serialize on the account lock rather than needing a separate candidate lease
+     * (design spec §2.6): the SECOND worker to claim the SAME lock re-reads an `available`
+     * already drained by the FIRST worker's hold, and derives a smaller amount (or skips).
      *
      * @param array<string,mixed> $account the ALREADY-gated ready account
-     *     ({@see self::execute()}'s {@see PayoutAccountService::requireReady()} call) -- its
-     *     `provider`/`account_ref` are copied verbatim onto the payout row (design spec §2.7's
-     *     in-flight-destination snapshot rule); this method performs no readiness lookup of
-     *     its own.
-     * @return array<string,mixed> the freshly-inserted commerce_payouts row
+     *     ({@see self::requireCollectorAndReadyAccount()}'s
+     *     {@see PayoutAccountService::requireReady()} call) -- its `provider`/`account_ref`
+     *     are copied verbatim onto the payout row (design spec §2.7's in-flight-destination
+     *     snapshot rule); this method performs no readiness lookup of its own.
+     * @return array<string,mixed>|null the freshly-inserted commerce_payouts row, or null
+     *     ONLY for a `null` (derive-in-lock) `$amount` whose locked value was skipped
      */
     private function reserve(
         ApplicationContext $context,
         string $tenant,
         string $sellerUuid,
         string $currency,
-        int $amount,
+        ?int $amount,
         ?string $actorUuid,
         array $account
-    ): array {
+    ): ?array {
         return db($context)->transaction(function () use (
             $context,
             $tenant,
@@ -396,15 +501,22 @@ final class PayoutService
             $amount,
             $actorUuid,
             $account
-        ): array {
+        ): ?array {
             $accountKey = LedgerRepository::accountKeyForSeller($sellerUuid);
             $this->lock->claim($context, $tenant, $accountKey, $currency);
 
             // The balance-safety recheck (design spec §2.3/§2.6): re-derived UNDER the lock
             // just claimed above, so a concurrent posting to this SAME account cannot land
-            // between an earlier, unlocked read and this refusal check.
+            // between an earlier, unlocked read and this refusal/derivation.
             $available = $this->balances->available($context, $tenant, $sellerUuid, $currency);
-            if ($amount > $available) {
+
+            if ($amount === null) {
+                $resolved = $this->deriveBatchAmount($context, $currency, $available);
+                if ($resolved === null) {
+                    return null;
+                }
+                $amount = $resolved;
+            } elseif ($amount > $available) {
                 throw new PayoutException(sprintf(
                     'Payout amount %d exceeds available balance %d for seller %s (%s).',
                     $amount,
@@ -454,6 +566,25 @@ final class PayoutService
 
             return $row;
         });
+    }
+
+    /**
+     * Task 9 batch amount derivation (design spec §2.6), called ONLY from inside
+     * {@see self::reserve()}'s account-lock-protected transaction, against the `$available`
+     * value that SAME lock just made safe to read: the full locked balance, optionally capped
+     * by `commerce.marketplace.payouts.maximums.{$currency}` (absent/zero means uncapped --
+     * the batch uses the full locked available balance), and refused (returns null -- the
+     * candidate is skipped, never inserted) when the resulting value is non-positive or below
+     * `commerce.marketplace.payouts.minimums.{$currency}`.
+     */
+    private function deriveBatchAmount(ApplicationContext $context, string $currency, int $available): ?int
+    {
+        $maximum = (int) (config($context, "commerce.marketplace.payouts.maximums.{$currency}", 0) ?? 0);
+        $derived = $maximum > 0 ? min($available, $maximum) : $available;
+
+        $minimum = (int) (config($context, "commerce.marketplace.payouts.minimums.{$currency}", 0) ?? 0);
+
+        return ($derived > 0 && $derived >= $minimum) ? $derived : null;
     }
 
     /**
@@ -520,26 +651,363 @@ final class PayoutService
 
             [$to, $set, $posts] = $this->planTransition($context, $current, $result);
 
-            if (!$this->payouts->claimPending($context, $tenant, $payoutUuid, $to, $set)) {
-                // Already finalized (or re-armed, for a pending->pending transition) by a
-                // concurrent finalizer -- idempotent no-op, never re-posted. Re-fetches through
-                // a distinct method (not a second literal findByUuid() call) so PHPStan does not
-                // (incorrectly) assume this returns the exact same result as the read at the top
-                // of this closure -- claimPending()'s own UPDATE, or a concurrent finalizer, may
-                // have changed the row in between.
-                return $this->refetch($context, $tenant, $payoutUuid) ?? $current;
-            }
-
-            if ($posts !== []) {
-                $accountKey = LedgerRepository::accountKeyForSeller((string) $current['seller_uuid']);
-                $this->lock->claim($context, $tenant, $accountKey, (string) $current['currency']);
-                foreach ($posts as $post) {
-                    $this->ledger->post($context, $tenant, $post);
-                }
-            }
-
-            return array_merge($current, $set, ['status' => $to]);
+            return $this->applyPendingTransition($context, $tenant, $current, $to, $set, $posts);
         });
+    }
+
+    /**
+     * Shared CAS-guarded apply for a `pending` -> `$to` transition plan -- extracted from
+     * {@see self::finalize()} so Task 9's {@see self::reconcile()} (resolving a still-`pending`
+     * attempt) can apply the EXACT same single-finalizer-wins primitive without duplicating it.
+     * Claims the payout out of `pending` via {@see PayoutRepository::claimPending()} BEFORE
+     * claiming the seller account lock or posting anything; only when the CAS actually wins AND
+     * `$posts !== []` does it claim the lock and post. A lost CAS (already finalized, or
+     * re-armed for a pending->pending transition, by a concurrent caller) is an idempotent
+     * no-op that returns the row's current state, never re-posted.
+     *
+     * @param array<string,mixed> $current
+     * @param array<string,mixed> $set
+     * @param list<array<string,mixed>> $posts
+     * @return array<string,mixed>
+     */
+    private function applyPendingTransition(
+        ApplicationContext $context,
+        string $tenant,
+        array $current,
+        string $to,
+        array $set,
+        array $posts
+    ): array {
+        $payoutUuid = (string) $current['uuid'];
+
+        if (!$this->payouts->claimPending($context, $tenant, $payoutUuid, $to, $set)) {
+            // Re-fetches through a distinct method (not a second literal findByUuid() call) so
+            // PHPStan does not (incorrectly) assume this returns the exact same result as the
+            // read the caller already performed -- claimPending()'s own UPDATE, or a concurrent
+            // finalizer/reconciler, may have changed the row in between.
+            return $this->refetch($context, $tenant, $payoutUuid) ?? $current;
+        }
+
+        if ($posts !== []) {
+            $accountKey = LedgerRepository::accountKeyForSeller((string) $current['seller_uuid']);
+            $this->lock->claim($context, $tenant, $accountKey, (string) $current['currency']);
+            foreach ($posts as $post) {
+                $this->ledger->post($context, $tenant, $post);
+            }
+        }
+
+        return array_merge($current, $set, ['status' => $to]);
+    }
+
+    // -----------------------------------------------------------------
+    // Task 9: reconcile (design spec §2.6/§2.8) -- resolves a still-pending attempt via
+    // PayoutCollector::status(), and discovers/applies provider-reported reversals on an
+    // already-paid payout.
+    // -----------------------------------------------------------------
+
+    /**
+     * Calls `PayoutCollector::status()` OUTSIDE any transaction for `$payoutRow`'s CURRENT
+     * attempt, then applies a closed state map in a finalize-style transaction (the seller
+     * account lock is claimed BEFORE any money post). `$payoutRow['status']` AT SELECTION TIME
+     * gates what this call is even allowed to do (design spec §2.6):
+     *  - `pending` (an unresolved attempt): resolves PAID/PENDING/RETRYABLE_FAILURE/
+     *    TERMINAL_FAILURE/UNKNOWN exactly as {@see self::finalize()} would for that SAME
+     *    attempt (reuses {@see self::planTransition()}) -- `REVERSED` is impossible here (a
+     *    payout cannot be reversed before it is paid) and is recorded as an integrity finding
+     *    instead, with no money change.
+     *  - `paid` (the reversal cadence, §2.8): only a continued PAID (possibly carrying a NEW
+     *    cumulative `reversedAmount`) or a full REVERSED is actionable. A cumulative
+     *    `reversedAmount` greater than the persisted `reversed_total` posts ONLY the unseen
+     *    delta as `payout_reversal` and updates `reversed_total` in the SAME transaction;
+     *    `reversedAmount === amount` reaches `status=reversed`, otherwise the row stays `paid`.
+     *    A provider regression to PENDING/RETRYABLE_FAILURE/TERMINAL_FAILURE, a `reversedAmount`
+     *    that goes BACKWARDS, or one that exceeds the payout's own `amount`, is an integrity
+     *    finding -- NEVER a ledger change, NEVER a release.
+     *  - already terminal (`failed`/`reversed`): a no-op; nothing left to reconcile.
+     * A `status()` call that itself throws leaves the row untouched and simply re-arms
+     * `next_reconcile_at` for a later sweep -- it never fabricates a state.
+     *
+     * @param array<string,mixed> $payoutRow the row a sweep (or direct caller) selected
+     * @return array<string,mixed> the row's state after this reconcile attempt
+     * @throws PayoutException no bound {@see PayoutCollector}
+     */
+    public function reconcile(ApplicationContext $context, string $tenant, array $payoutRow): array
+    {
+        $collector = $this->collector
+            ?? throw new PayoutException('No payout provider is configured for provider payouts.');
+
+        $payoutUuid = (string) $payoutRow['uuid'];
+        $destination = new PayoutDestination((string) $payoutRow['provider'], (string) $payoutRow['destination_ref']);
+        $attemptCount = max(1, (int) $payoutRow['attempt_count']);
+        $attemptKey = self::attemptKey($payoutUuid, $attemptCount);
+
+        try {
+            $result = $collector->status($context, $destination, $attemptKey);
+        } catch (\Throwable) {
+            $kind = (string) $payoutRow['status'] === 'paid' ? 'paid' : 'pending';
+            $this->payouts->scheduleReconcile(
+                $context,
+                $tenant,
+                $payoutUuid,
+                $this->reconcileWatchdog($context, $kind)
+            );
+
+            return $this->refetch($context, $tenant, $payoutUuid) ?? $payoutRow;
+        }
+
+        return $this->applyReconcile($context, $tenant, $payoutUuid, $result);
+    }
+
+    /** @return array<string,mixed> */
+    private function applyReconcile(
+        ApplicationContext $context,
+        string $tenant,
+        string $payoutUuid,
+        PayoutStatusResult $result
+    ): array {
+        return db($context)->transaction(function () use ($context, $tenant, $payoutUuid, $result): array {
+            $current = $this->payouts->findByUuid($context, $tenant, $payoutUuid)
+                ?? throw new NotFoundException('Resource not found.');
+
+            return match ((string) $current['status']) {
+                'pending' => $this->reconcilePendingAttempt($context, $tenant, $current, $result),
+                'paid' => $this->reconcilePaidPayout($context, $tenant, $current, $result),
+                // Already terminal (failed/reversed) -- nothing left to reconcile.
+                default => $this->reconcileTerminalRow($current, $result),
+            };
+        });
+    }
+
+    /**
+     * Reconcile branch for a still-`pending` attempt (design spec §2.3/§2.6): every status
+     * except `REVERSED`/`UNKNOWN` reuses {@see self::planTransition()} verbatim (the SAME map
+     * `finalize()` would apply for the same attempt) and {@see self::applyPendingTransition()}
+     * for the CAS/posting. `REVERSED` is impossible on an unresolved attempt -- a payout can't
+     * be reversed before it is paid -- so it is an integrity finding (no money change) instead.
+     * `UNKNOWN` is a legitimate, still-ambiguous provider answer (NOT an integrity violation):
+     * the hold stays, the row stays `pending`, the attempt never advances, and
+     * `next_reconcile_at` is simply re-armed for a later sweep -- handled as its own explicit
+     * branch (mirroring {@see self::finalizeUnknown()}'s watchdog cadence) rather than falling
+     * into {@see self::planTransition()}'s `default => throw` arm, which has no case for it and
+     * would otherwise escape this call: since {@see self::reconcile()}'s try/catch wraps only
+     * the `status()` call, an uncaught throw here would skip re-arming the watchdog entirely,
+     * leaving the row perpetually due and hot-looping every subsequent reconcile sweep.
+     *
+     * @param array<string,mixed> $current
+     * @return array<string,mixed>
+     */
+    private function reconcilePendingAttempt(
+        ApplicationContext $context,
+        string $tenant,
+        array $current,
+        PayoutStatusResult $result
+    ): array {
+        if ($result->status === PayoutStatusResult::REVERSED) {
+            $this->logIntegrityFinding(
+                $current,
+                'Provider reported REVERSED for a payout that is still pending (attempt unresolved).'
+            );
+
+            return $this->applyPendingTransition(
+                $context,
+                $tenant,
+                $current,
+                'pending',
+                ['next_reconcile_at' => $this->reconcileWatchdog($context, 'pending')],
+                []
+            );
+        }
+
+        if ($result->status === PayoutStatusResult::UNKNOWN) {
+            return $this->applyPendingTransition(
+                $context,
+                $tenant,
+                $current,
+                'pending',
+                ['next_reconcile_at' => $this->reconcileWatchdog($context, 'pending')],
+                []
+            );
+        }
+
+        $payoutResult = new PayoutResult(
+            $result->status,
+            $result->providerRef,
+            $result->failureCode,
+            $result->failureReason
+        );
+        [$to, $set, $posts] = $this->planTransition($context, $current, $payoutResult);
+
+        return $this->applyPendingTransition($context, $tenant, $current, $to, $set, $posts);
+    }
+
+    /**
+     * Reconcile branch for an already-`paid` payout (design spec §2.8): only a continued PAID
+     * (possibly carrying a NEW cumulative `reversedAmount`) or REVERSED is actionable -- any
+     * other reported status is a provider regression and an integrity finding. When a post IS
+     * warranted, the seller account lock is claimed BEFORE re-reading `reversed_total`/`status`
+     * fresh (the SAME "claim then re-read" discipline {@see self::reserve()}/`record()` use) --
+     * `$current`'s IMMUTABLE identity fields (amount/seller/currency/created_by) are safe to use
+     * as read before the lock; only the MUTABLE fields need the fresh, lock-protected read.
+     *
+     * @param array<string,mixed> $current
+     * @return array<string,mixed>
+     */
+    private function reconcilePaidPayout(
+        ApplicationContext $context,
+        string $tenant,
+        array $current,
+        PayoutStatusResult $result
+    ): array {
+        $payoutUuid = (string) $current['uuid'];
+        $amount = (int) $current['amount'];
+
+        if (!in_array($result->status, [PayoutStatusResult::PAID, PayoutStatusResult::REVERSED], true)) {
+            $this->logIntegrityFinding($current, sprintf(
+                "Provider reported status '%s' for payout %s, which Commerce already recorded as paid.",
+                $result->status,
+                $payoutUuid
+            ));
+            $this->payouts->scheduleReconcile(
+                $context,
+                $tenant,
+                $payoutUuid,
+                $this->reconcileWatchdog($context, 'paid')
+            );
+
+            return $this->refetch($context, $tenant, $payoutUuid) ?? $current;
+        }
+
+        $accountKey = LedgerRepository::accountKeyForSeller((string) $current['seller_uuid']);
+        $currency = (string) $current['currency'];
+        $this->lock->claim($context, $tenant, $accountKey, $currency);
+
+        // Fresh, lock-protected read (design spec §2.6): only NOW is `reversed_total`/`status`
+        // guaranteed to reflect every reversal already applied by an earlier reconcile.
+        $fresh = $this->payouts->findByUuid($context, $tenant, $payoutUuid)
+            ?? throw new NotFoundException('Resource not found.');
+        if ((string) $fresh['status'] !== 'paid') {
+            // Resolved by a concurrent reconcile while this call waited for the lock.
+            return $fresh;
+        }
+
+        $reversedTotal = (int) $fresh['reversed_total'];
+        $reversedAmount = $result->reversedAmount;
+
+        if ($reversedAmount < $reversedTotal || $reversedAmount > $amount) {
+            $this->logIntegrityFinding($current, sprintf(
+                'Reported cumulative reversedAmount %d is invalid for payout %s '
+                    . '(recorded reversed_total %d, amount %d).',
+                $reversedAmount,
+                $payoutUuid,
+                $reversedTotal,
+                $amount
+            ));
+            $this->payouts->scheduleReconcile(
+                $context,
+                $tenant,
+                $payoutUuid,
+                $this->reconcileWatchdog($context, 'paid')
+            );
+
+            return $this->refetch($context, $tenant, $payoutUuid) ?? $fresh;
+        }
+
+        if ($reversedAmount === $reversedTotal) {
+            // Nothing new -- a replay of an already-applied reversal, or a plain continued PAID
+            // observation with no reversal reported. Re-arm the paid cadence and return.
+            $this->payouts->scheduleReconcile(
+                $context,
+                $tenant,
+                $payoutUuid,
+                $this->reconcileWatchdog($context, 'paid')
+            );
+
+            return $this->refetch($context, $tenant, $payoutUuid) ?? $fresh;
+        }
+
+        // A genuinely NEW cumulative reversedAmount -- post only the unseen delta (design spec
+        // §2.6/§2.8): POSITIVE (it returns money to the seller balance, offsetting the earlier
+        // `payout_debit = -amount`; see LedgerRepository::balanceComponents()'s
+        // `paid_out = -(Σ payout_debit + Σ payout_reversal)` -- a positive payout_reversal is
+        // what makes paid_out DECREASE). The idempotency key carries the CUMULATIVE
+        // target-after value (not the delta), so a replayed identical observation verifies
+        // against the SAME row instead of double-posting.
+        $delta = $reversedAmount - $reversedTotal;
+        $to = $reversedAmount === $amount ? 'reversed' : 'paid';
+        $set = [
+            'reversed_total' => $reversedAmount,
+            'next_reconcile_at' => $to === 'reversed' ? null : $this->reconcileWatchdog($context, 'paid'),
+        ];
+
+        $this->ledger->post($context, $tenant, [
+            'account_kind' => 'seller',
+            'account_key' => $accountKey,
+            'seller_uuid' => (string) $current['seller_uuid'],
+            'currency' => $currency,
+            'entry_type' => 'payout_reversal',
+            'amount' => $delta,
+            'payout_uuid' => $payoutUuid,
+            'created_by' => $current['created_by'] ?? null,
+            'idempotency_key' => "{$payoutUuid}:payout_reversal:{$reversedAmount}",
+        ]);
+
+        // Consumes applyReversal()'s CAS return, symmetric with every other single-finalizer
+        // call site in this class (e.g. applyPendingTransition()'s claimPending() check): a
+        // lost CAS (the row's status/reversed_total already moved since the lock-protected read
+        // above -- in practice only a concurrent reconcile that raced past the account lock
+        // this method already holds) is a benign concurrent-winner, never an error, so this
+        // never throws. It just means THIS call did not win the mutation -- the optimistic
+        // `$set` merge below must not be returned as if it had, since that would misreport a
+        // status/reversed_total this call never actually applied; the fresh row (whatever the
+        // winner left) is returned instead. The `payout_reversal` ledger post above already
+        // happened either way, guarded by its own idempotency key -- a lost CAS here never
+        // risks a double post, only which caller's return value reflects the DB.
+        $applied = $this->payouts->applyReversal($context, $tenant, $payoutUuid, $reversedTotal, $to, $set);
+
+        return $applied
+            ? array_merge($fresh, $set, ['status' => $to])
+            : ($this->refetch($context, $tenant, $payoutUuid) ?? $fresh);
+    }
+
+    /**
+     * Reconcile branch for an already-terminal row (`failed`/`reversed`, design spec §2.6) --
+     * nothing left to reconcile; the retry sweep owns `failed+retryable` rows and a fully
+     * `reversed` row has no further money to move. A reported observation that regresses an
+     * already-`reversed` row (a different status, or a `reversedAmount` no longer matching the
+     * recorded `amount`) is logged as an integrity finding -- never a ledger change.
+     *
+     * @param array<string,mixed> $current
+     * @return array<string,mixed>
+     */
+    private function reconcileTerminalRow(array $current, PayoutStatusResult $result): array
+    {
+        if ((string) $current['status'] === 'reversed') {
+            $stillFullyReversed = $result->status === PayoutStatusResult::REVERSED
+                && $result->reversedAmount === (int) $current['amount'];
+            if (!$stillFullyReversed) {
+                $this->logIntegrityFinding($current, sprintf(
+                    "Provider reported status '%s' (reversedAmount %d) for payout %s, already fully reversed.",
+                    $result->status,
+                    $result->reversedAmount,
+                    (string) $current['uuid']
+                ));
+            }
+        }
+
+        return $current;
+    }
+
+    /**
+     * @param array<string,mixed> $current
+     */
+    private function logIntegrityFinding(array $current, string $message): void
+    {
+        error_log(sprintf(
+            '[Commerce][PayoutService] Reconciliation integrity finding for payout %s (seller %s): %s',
+            (string) $current['uuid'],
+            (string) $current['seller_uuid'],
+            $message
+        ));
     }
 
     /**

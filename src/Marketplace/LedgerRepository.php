@@ -291,6 +291,38 @@ final class LedgerRepository
         return array_map(static fn (array $row): string => (string) $row['currency'], $rows);
     }
 
+    /**
+     * Batch candidate enumeration (design spec §2.6, Task 9): every distinct
+     * `(seller_uuid, currency)` seller account with a positive `available` balance --
+     * the SAME sign formula {@see self::balanceComponents()} uses for `available`
+     * (`SUM(amount)` over every entry), just aggregated across ALL seller accounts in
+     * one scan instead of one `balanceComponents()` call per seller. This is an
+     * UNLOCKED read and a candidate HINT ONLY -- {@see PayoutService}'s shared
+     * reserve-derive path re-reads `available` fresh UNDER the per-account lock before
+     * deriving or posting anything, so a stale/negative-by-the-time-it's-processed hint
+     * here is never a correctness risk, only a wasted (harmlessly skipped) candidate.
+     *
+     * @return list<array{seller_uuid: string, currency: string, available: int}>
+     */
+    public function positiveAvailableCandidates(ApplicationContext $context, string $tenant): array
+    {
+        $rows = db($context)->table('commerce_marketplace_ledger')
+            ->selectRaw('seller_uuid, currency, SUM(amount) as available')
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('account_kind', '=', 'seller')
+            ->groupBy(['seller_uuid', 'currency'])
+            ->havingRaw('SUM(amount) > 0')
+            ->orderBy('seller_uuid', 'ASC')
+            ->orderBy('currency', 'ASC')
+            ->get();
+
+        return array_map(static fn (array $row): array => [
+            'seller_uuid' => (string) $row['seller_uuid'],
+            'currency' => (string) $row['currency'],
+            'available' => (int) $row['available'],
+        ], $rows);
+    }
+
     /** Reconciliation scan (design spec §2.11): every posting for an order, oldest first. @return list<array<string,mixed>> */
     public function entriesForOrder(ApplicationContext $context, string $tenant, string $orderUuid): array
     {

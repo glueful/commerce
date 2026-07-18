@@ -349,6 +349,21 @@ if ($marketplaceEnabled) {
         $router->post('/marketplace/adjustments', [AdminPayoutController::class, 'storeAdjustment'])
             ->middleware($write);
 
+        // Provider-payout surfaces (design spec §2.3/§2.6/§2.7, MV4 Task 10): single-seller
+        // execute, retry-a-specific-payout, and account attach/sync -- gated the SAME way as
+        // the manual payout/adjustment routes above. Deliberately NO batch endpoint (CLI-only,
+        // design spec §2.6) and NO reverse/clawback endpoint (provider-reported only, §2.8).
+        $router->post('/marketplace/payouts/execute', [AdminPayoutController::class, 'executePayout'])
+            ->middleware($write);
+        $router->post('/marketplace/payouts/{uuid}/retry', [AdminPayoutController::class, 'retryPayout'])
+            ->middleware($write);
+        $router->post('/marketplace/payouts/accounts', [AdminPayoutController::class, 'attachPayoutAccount'])
+            ->middleware($write);
+        $router->post(
+            '/marketplace/payouts/accounts/sync',
+            [AdminPayoutController::class, 'syncPayoutAccount']
+        )->middleware($write);
+
         // Operator financial surfaces (design spec §6.1, MV3 Task 11): the
         // marketplace account's own summary plus any seller's balance/report --
         // read-only, gated the SAME way as every other route in this group.
@@ -454,6 +469,11 @@ if ($marketplaceEnabled) {
         $router->get('/{sellerUuid}/financials/balance', [SellerFinancialController::class, 'balance'])
             ->middleware($reportsRead);
         $router->get('/{sellerUuid}/payouts', [SellerFinancialController::class, 'payouts'])
+            ->middleware($payoutsRead);
+        // Payout-DESTINATION readiness (design spec §6.2/§2.7, MV4 Task 10): provider/state/
+        // last-synced only -- NEVER the opaque account_ref. Read-only, own seller only, same
+        // capability gate as the payouts list above.
+        $router->get('/{sellerUuid}/payouts/accounts', [SellerFinancialController::class, 'payoutAccounts'])
             ->middleware($payoutsRead);
         $router->get('/{sellerUuid}/commission-policy', [SellerFinancialController::class, 'commissionPolicy'])
             ->middleware($reportsRead);

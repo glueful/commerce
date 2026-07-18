@@ -37,8 +37,17 @@ use Glueful\Bootstrap\ApplicationContext;
  *      checked for a fully-MISSING row per seller -- see {@see
  *      self::scanRefunds()} for the exact-amount limitation this leaves and
  *      the false-positive guard that bounds it;
- *  (c) every `commerce_payouts` row -- expects a matching `payout_debit =
- *      -amount` referencing the payout.
+ *  (c) every `commerce_payouts` row -- a `paid` or `reversed` row expects a matching
+ *      `payout_debit = -amount` referencing the payout (MV4 Task 9, design spec
+ *      §2.3/§2.4/§2.6/§2.8); an in-flight `pending` hold or a `failed` row (retryable or
+ *      already released) is never flagged for a "missing" debit it was never supposed to
+ *      have yet. A row carrying a positive `reversed_total` (partially reversed while
+ *      still `paid`, or fully `reversed`) additionally requires cumulative
+ *      `payout_reversal` postings summing to EXACTLY `reversed_total`, and a `reversed`
+ *      row requires `reversed_total == amount`. Provider-side truth is never consulted
+ *      here -- Commerce's only provider-state seam anywhere is
+ *      `PayoutCollector::status()` ({@see PayoutService::reconcile()}); this class never
+ *      reads or names the Payvia extension's own durable provider-transfer-attempt table.
  *
  * **Missing** = the expected posting is entirely absent. **Duplicate** =
  * more than one ledger row exists for a posting slot that the deterministic
@@ -317,7 +326,12 @@ final class ReconciliationService
     }
 
     // -----------------------------------------------------------------
-    // (c) Payouts -- payout_debit = -amount.
+    // (c) Payouts -- payout_debit = -amount for a paid/reversed row; a reversed row
+    //     additionally requires cumulative payout_reversal == reversed_total (MV4 Task 9,
+    //     design spec §2.6/§2.8). Provider-side truth is NEVER consulted here -- this is a
+    //     pure ledger-vs-row scan, exactly like sources (a)/(b); Commerce's ONLY provider-state
+    //     seam anywhere is `PayoutCollector::status()` (see {@see PayoutService::reconcile()}),
+    //     and this class never reads or names the Payvia extension's own transfer-attempt table.
     // -----------------------------------------------------------------
 
     /** @return array{missing: list<array<string,mixed>>, duplicate: list<array<string,mixed>>, mismatched: list<array<string,mixed>>} */
@@ -333,13 +347,24 @@ final class ReconciliationService
         }
 
         $payoutUuids = array_values(array_unique(array_column($payouts, 'uuid')));
-        $entries = $this->groupEntriesByColumn(
-            db($context)->table('commerce_marketplace_ledger')
-                ->where('tenant_uuid', '=', $tenant)
-                ->whereIn('payout_uuid', $payoutUuids)
-                ->where('entry_type', '=', 'payout_debit')
-                ->orderBy('id', 'ASC')
-                ->get(),
+        $ledgerRows = db($context)->table('commerce_marketplace_ledger')
+            ->where('tenant_uuid', '=', $tenant)
+            ->whereIn('payout_uuid', $payoutUuids)
+            ->whereIn('entry_type', ['payout_debit', 'payout_reversal'])
+            ->orderBy('id', 'ASC')
+            ->get();
+        $debitEntries = $this->groupEntriesByColumn(
+            array_values(array_filter(
+                $ledgerRows,
+                static fn (array $row): bool => (string) $row['entry_type'] === 'payout_debit'
+            )),
+            'payout_uuid'
+        );
+        $reversalEntries = $this->groupEntriesByColumn(
+            array_values(array_filter(
+                $ledgerRows,
+                static fn (array $row): bool => (string) $row['entry_type'] === 'payout_reversal'
+            )),
             'payout_uuid'
         );
 
@@ -351,15 +376,82 @@ final class ReconciliationService
             $accountKey = LedgerRepository::accountKeyForSeller($sellerUuid);
             $currency = (string) $payout['currency'];
             $amount = (int) $payout['amount'];
+            $status = (string) $payout['status'];
+            $reversedTotal = (int) $payout['reversed_total'];
+            $identity = ['source' => 'payout', 'payout_uuid' => $payoutUuid, 'seller_uuid' => $sellerUuid];
 
+            // In-flight (`pending` -- an active reserve_hold, no debit yet) and `failed`
+            // (retryable=true keeps the hold, retryable=false already released it via
+            // reserve_release) rows never post a payout_debit -- not a coherence violation,
+            // just money that never (yet) actually left the account (design spec §2.3/§2.4).
+            if ($status === 'pending' || $status === 'failed') {
+                continue;
+            }
+
+            // `paid` and `reversed` BOTH keep their original payout_debit = -amount posting
+            // forever -- a reversal offsets it via payout_reversal, it never alters/removes
+            // the debit itself (design spec §2.8).
             $report = self::mergeReports($report, $this->checkSlot(
-                $entries[$payoutUuid] ?? [],
+                $debitEntries[$payoutUuid] ?? [],
                 -$amount,
                 $accountKey,
                 $currency,
                 'payout_debit',
-                ['source' => 'payout', 'payout_uuid' => $payoutUuid, 'seller_uuid' => $sellerUuid]
+                $identity
             ));
+
+            if ($reversedTotal <= 0 && $status !== 'reversed') {
+                continue;
+            }
+
+            $reversalRows = $reversalEntries[$payoutUuid] ?? [];
+            $reversalSum = 0;
+            foreach ($reversalRows as $row) {
+                $reversalSum += (int) $row['amount'];
+            }
+
+            if ($reversalRows === []) {
+                $report['missing'][] = $identity + [
+                    'account_key' => $accountKey,
+                    'entry_type' => 'payout_reversal',
+                    'expected_amount' => $reversedTotal,
+                    'found_amount' => 0,
+                    'detail' => sprintf(
+                        'Missing payout_reversal posting(s) for payout %s (reversed_total %d, found none).',
+                        $payoutUuid,
+                        $reversedTotal
+                    ),
+                ];
+            } elseif ($reversalSum !== $reversedTotal) {
+                $report['mismatched'][] = $identity + [
+                    'account_key' => $accountKey,
+                    'entry_type' => 'payout_reversal',
+                    'expected_amount' => $reversedTotal,
+                    'found_amount' => $reversalSum,
+                    'detail' => sprintf(
+                        'Mismatched cumulative payout_reversal total for payout %s: expected %d, found %d.',
+                        $payoutUuid,
+                        $reversedTotal,
+                        $reversalSum
+                    ),
+                ];
+            }
+
+            if ($status === 'reversed' && $reversedTotal !== $amount) {
+                $report['mismatched'][] = $identity + [
+                    'account_key' => $accountKey,
+                    'entry_type' => 'reversed_total',
+                    'expected_amount' => $amount,
+                    'found_amount' => $reversedTotal,
+                    'detail' => sprintf(
+                        'Payout %s is status=reversed but reversed_total (%d) != amount (%d) '
+                            . '-- a full reversal requires reversed_total == amount.',
+                        $payoutUuid,
+                        $reversedTotal,
+                        $amount
+                    ),
+                ];
+            }
         }
 
         return $report;
