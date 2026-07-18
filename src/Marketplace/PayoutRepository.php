@@ -88,19 +88,32 @@ final class PayoutRepository
      * claimed by a concurrent sweep, not yet due, exhausted, or not
      * retryable).
      *
+     * `$ignoreDueTime` (design spec §2.6: "the operator retry uses the same claim but may
+     * ignore the due time") drops ONLY the `next_attempt_at <= {utcNow}` predicate from the
+     * WHERE clause below -- every OTHER guard (`status='failed'`, `retryable=TRUE`,
+     * `attempt_count < $maxAttempts`, `next_attempt_at IS NOT NULL`) stays unconditional, so
+     * a terminal/exhausted/non-retryable payout is still never claimable. Callers:
+     * {@see PayoutService::retry()} passes `true` for the operator single-payout retry path
+     * ({@see \Glueful\Extensions\Commerce\Http\Admin\AdminPayoutController::retryPayout()});
+     * the retry sweep ({@see \Glueful\Extensions\Commerce\Console\PayoutsRetrySweepCommand})
+     * keeps the default `false` -- due-gated, exactly as before.
+     *
      * @return array<string,mixed>|null
      */
     public function claimRetryableForAttempt(
         ApplicationContext $context,
         string $tenant,
         string $uuid,
-        int $maxAttempts
+        int $maxAttempts,
+        bool $ignoreDueTime = false
     ): ?array {
         $utcNow = UtcNowSql::expression(db($context)->getDriverName());
         $nextReconcileAt = gmdate(
             'Y-m-d H:i:s',
             time() + max(0, (int) config($context, 'commerce.marketplace.payouts.pending_reconcile_interval', 300))
         );
+
+        $dueTimePredicate = $ignoreDueTime ? '' : "\n  AND next_attempt_at <= {$utcNow}";
 
         $affected = db($context)->table('commerce_payouts')->executeModification(
             <<<SQL
@@ -116,8 +129,7 @@ WHERE tenant_uuid = ?
   AND status = 'failed'
   AND retryable = TRUE
   AND attempt_count < ?
-  AND next_attempt_at IS NOT NULL
-  AND next_attempt_at <= {$utcNow}
+  AND next_attempt_at IS NOT NULL{$dueTimePredicate}
 SQL,
             [$nextReconcileAt, $tenant, $uuid, $maxAttempts]
         );

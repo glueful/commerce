@@ -142,7 +142,7 @@ final class PayoutSurfaceTest extends CommerceRouterTestCase
     // Operator: retry a specific payout (design spec §2.6).
     // -----------------------------------------------------------------
 
-    public function testOperatorRetriesAFailedRetryablePayoutOverRealRouteAndAttemptAdvances(): void
+    public function testOperatorRetriesAFailedRetryablePayoutBeforeItIsDueWhileSweepStillSkipsIt(): void
     {
         $seller = $this->seedSeller('surf-retry', 'ownerSURFRT01');
         $this->seedAvailable($seller['uuid'], 5000);
@@ -167,8 +167,26 @@ final class PayoutSurfaceTest extends CommerceRouterTestCase
         self::assertSame('failed', $failedRow['status']);
         self::assertTrue((bool) $failedRow['retryable']);
         self::assertSame(1, (int) $failedRow['attempt_count']);
-        $this->forcePastDue($payoutUuid, 'next_attempt_at');
+        self::assertGreaterThan(
+            time(),
+            strtotime((string) $failedRow['next_attempt_at']),
+            'the backoff window must still be in the future -- this test proves the OPERATOR path '
+                . 'works despite that, never that the row happened to already be due.'
+        );
 
+        // The retry SWEEP's own due-selection (design spec §2.6) must still skip this row: the
+        // backoff window has not elapsed, and the sweep NEVER bypasses the due-time gate -- only
+        // the operator retry below does.
+        $maxAttempts = (int) config($this->context, 'commerce.marketplace.payouts.max_attempts', 5);
+        self::assertSame(
+            [],
+            $this->payoutsRepo->dueForRetry($this->context, $this->tenant, $maxAttempts),
+            'the sweep must never claim a not-yet-due retryable payout.'
+        );
+
+        // No forcePastDue(): the operator retry endpoint must succeed on its own, bypassing the
+        // due-time gate (design spec §2.6) -- the whole point of a manual operator retry is
+        // retrying NOW rather than waiting out the backoff window.
         $retried = $this->dispatch($router, $this->operatorRequest(
             'POST',
             "/commerce/admin/marketplace/payouts/{$payoutUuid}/retry"

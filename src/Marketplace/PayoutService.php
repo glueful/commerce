@@ -379,30 +379,49 @@ final class PayoutService
     }
 
     /**
-     * Task 9: claim-and-execute the next retry attempt for one payout (design spec
-     * §2.6) -- the SAME CAS an operator single-payout retry will later use
-     * ({@see PayoutRepository::claimRetryableForAttempt()}: the guarded
-     * `failed+retryable+due` -> `pending` transition that increments `attempt_count`,
-     * clears `next_attempt_at`, stamps `last_attempt_at`, and re-arms
+     * Task 9: claim-and-execute the next retry attempt for one payout (design spec §2.6) --
+     * the SAME CAS ({@see PayoutRepository::claimRetryableForAttempt()}: the guarded
+     * `failed+retryable+attempt_count<max` -> `pending` transition that increments
+     * `attempt_count`, clears `next_attempt_at`, stamps `last_attempt_at`, and re-arms
      * `next_reconcile_at` BEFORE any provider I/O) immediately followed by
      * {@see self::callAndFinalize()} for the newly-claimed attempt. A crash between the
      * claim and finalize is recovered by a reconcile sweep via that SAME watchdog, never
      * a second blind retry.
      *
-     * @return array<string,mixed>|null the finalized payout row, or null when nothing
-     *     was claimed (already claimed by a concurrent sweep, not yet due, exhausted, or
-     *     not retryable) -- a legitimate no-op, not an error
+     * `$ignoreDueTime` (design spec §2.6: "the operator retry uses the same claim but may
+     * ignore the due time; neither path may exceed max_attempts") is threaded straight into
+     * that CAS's own bypass. {@see \Glueful\Extensions\Commerce\Http\Admin\AdminPayoutController::retryPayout()}
+     * (the operator single-payout retry) passes `true` -- an operator retrying NOW is the
+     * whole point of a manual retry, it should never have to wait out the backoff window.
+     * {@see \Glueful\Extensions\Commerce\Console\PayoutsRetrySweepCommand} (the scheduled
+     * sweep) keeps the default `false`, so it stays due-gated exactly as before -- every OTHER
+     * guard (`status='failed'`, `retryable=true`, `attempt_count < max_attempts`) applies
+     * unconditionally on BOTH paths.
+     *
+     * @return array<string,mixed>|null the finalized payout row, or null when nothing was
+     *     claimed (already claimed by a concurrent sweep, exhausted, not retryable, or --
+     *     when `$ignoreDueTime` is false -- not yet due) -- a legitimate no-op, not an error
      * @throws PayoutException no bound {@see PayoutCollector}
      * @throws PayoutOutcomeUnknownException the new attempt's outcome is ambiguous --
      *     same as {@see self::execute()}
      */
-    public function retry(ApplicationContext $context, string $tenant, string $payoutUuid): ?array
-    {
+    public function retry(
+        ApplicationContext $context,
+        string $tenant,
+        string $payoutUuid,
+        bool $ignoreDueTime = false
+    ): ?array {
         $collector = $this->collector
             ?? throw new PayoutException('No payout provider is configured for provider payouts.');
         $maxAttempts = (int) config($context, 'commerce.marketplace.payouts.max_attempts', 5);
 
-        $claimed = $this->payouts->claimRetryableForAttempt($context, $tenant, $payoutUuid, $maxAttempts);
+        $claimed = $this->payouts->claimRetryableForAttempt(
+            $context,
+            $tenant,
+            $payoutUuid,
+            $maxAttempts,
+            $ignoreDueTime
+        );
         if ($claimed === null) {
             return null;
         }

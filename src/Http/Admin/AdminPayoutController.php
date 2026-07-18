@@ -119,9 +119,12 @@ final class AdminPayoutController
      * payout that is currently `failed AND retryable AND attempt_count < max_attempts` --
      * {@see PayoutService::retry()} uses the SAME guarded CAS
      * ({@see \Glueful\Extensions\Commerce\Marketplace\PayoutRepository::claimRetryableForAttempt()})
-     * the retry sweep itself uses. A `null` return (already claimed by a concurrent sweep, not
-     * yet due, exhausted, or not retryable/not failed at all) is a `422` -- it NEVER resurrects
-     * a terminal row; the caller must record/execute a fresh payout instead.
+     * the retry sweep itself uses, but passes `ignoreDueTime: true` (design spec §2.6: "the
+     * operator retry uses the same claim but may ignore the due time") -- an operator retrying a
+     * specific payout is asking to retry NOW, not to wait out the backoff window the scheduled
+     * sweep still respects. Every OTHER guard stays unconditional: a `null` return (already
+     * claimed by a concurrent sweep, exhausted, or not retryable/not failed at all) is a `422` --
+     * it NEVER resurrects a terminal row; the caller must record/execute a fresh payout instead.
      */
     #[ApiOperation(summary: 'Retry a specific failed, retryable payout', tags: ['Commerce Admin', 'Marketplace'])]
     #[ApiResponse(200, description: 'Payout retried')]
@@ -133,7 +136,8 @@ final class AdminPayoutController
             $result = $this->payouts->retry(
                 $this->context,
                 $this->tenants->tenantUuid($this->context),
-                $uuid
+                $uuid,
+                ignoreDueTime: true
             );
         } catch (PayoutException $e) {
             return Response::validation(['payout' => $e->getMessage()]);
@@ -143,8 +147,8 @@ final class AdminPayoutController
 
         if ($result === null) {
             return Response::validation([
-                'payout' => 'This payout is not currently retryable (terminal, exhausted, or not due) '
-                    . '-- create a new payout instead.',
+                'payout' => 'This payout is not currently retryable (terminal, exhausted, or already claimed '
+                    . 'by a concurrent retry) -- create a new payout instead.',
             ]);
         }
 
