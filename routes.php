@@ -19,6 +19,7 @@ use Glueful\Extensions\Commerce\Http\Admin\AdminDownloadController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminGrantController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminMediaController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminOrderController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminPayoutController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminProductController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminRefundController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminReportController;
@@ -336,6 +337,15 @@ if ($marketplaceEnabled) {
             '/marketplace/settings/commission',
             [MarketplaceAdminController::class, 'updateWorkspaceCommission']
         )->middleware($write);
+
+        // Manual payouts + operator adjustments (design spec §2.10/§6.1, MV3 Task 9): both
+        // POST-only, write-gated, ledger-backed settlement mutations -- gated the SAME way as
+        // every other route in this group (marketplace enabled), since neither has any
+        // meaning without a seller account that could ever carry a ledger balance.
+        $router->post('/marketplace/payouts', [AdminPayoutController::class, 'storePayout'])
+            ->middleware($write);
+        $router->post('/marketplace/adjustments', [AdminPayoutController::class, 'storeAdjustment'])
+            ->middleware($write);
 
         // Marketplace MV2 (design spec §6.2, Task 9): operator fulfills ANY
         // seller order directly. Gated the SAME way as every other route in

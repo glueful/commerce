@@ -50,6 +50,7 @@ use Glueful\Extensions\Commerce\Http\Admin\AdminDownloadController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminGrantController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminMediaController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminOrderController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminPayoutController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminProductController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminRefundController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminReportController;
@@ -80,6 +81,7 @@ use Glueful\Extensions\Commerce\Inventory\StockRepository;
 use Glueful\Extensions\Commerce\Mail\CommerceMailer;
 use Glueful\Extensions\Commerce\Mail\NotificationCommerceMailer;
 use Glueful\Extensions\Commerce\Mail\OrderMailListener;
+use Glueful\Extensions\Commerce\Marketplace\AdjustmentService;
 use Glueful\Extensions\Commerce\Marketplace\CommissionPolicyEventRepository;
 use Glueful\Extensions\Commerce\Marketplace\CommissionPolicyService;
 use Glueful\Extensions\Commerce\Marketplace\Contracts\SellerRoleAuthority;
@@ -91,7 +93,10 @@ use Glueful\Extensions\Commerce\Marketplace\MarketplaceActivationService;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceMode;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceRefundGuard;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceWorkspaceLock;
+use Glueful\Extensions\Commerce\Marketplace\PayoutRepository;
+use Glueful\Extensions\Commerce\Marketplace\PayoutService;
 use Glueful\Extensions\Commerce\Marketplace\SellerAttributionService;
+use Glueful\Extensions\Commerce\Marketplace\SellerBalanceService;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipService;
 use Glueful\Extensions\Commerce\Marketplace\SellerOrderFulfillmentService;
@@ -379,6 +384,28 @@ final class CommerceServiceProvider extends ServiceProvider
                 'shared' => true,
                 'autowire' => true,
             ],
+            SellerBalanceService::class => [
+                'class' => SellerBalanceService::class,
+                'shared' => true,
+                'autowire' => true,
+            ],
+            PayoutRepository::class => [
+                'class' => PayoutRepository::class,
+                'shared' => true,
+            ],
+            PayoutService::class => [
+                'factory' => [self::class, 'makePayoutService'],
+                'shared' => true,
+            ],
+            AdjustmentService::class => [
+                'class' => AdjustmentService::class,
+                'shared' => true,
+                'autowire' => true,
+            ],
+            AdminPayoutController::class => [
+                'factory' => [self::class, 'makeAdminPayoutController'],
+                'shared' => true,
+            ],
             MarketplaceRefundGuard::class => [
                 'class' => MarketplaceRefundGuard::class,
                 'shared' => true,
@@ -639,6 +666,16 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(SellerRepository::class),
             $container->get(MarketplaceWorkspaceLock::class),
             $container->get(CommissionPolicyEventRepository::class)
+        );
+    }
+
+    public static function makePayoutService(ContainerInterface $container): PayoutService
+    {
+        return new PayoutService(
+            $container->get(PayoutRepository::class),
+            $container->get(LedgerRepository::class),
+            $container->get(LedgerAccountLock::class),
+            $container->get(SellerBalanceService::class)
         );
     }
 
@@ -1060,6 +1097,16 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(OrderRepository::class),
             $container->get(RefundRepository::class),
             $container->get(RefundService::class),
+            self::tenantResolver($container)
+        );
+    }
+
+    public static function makeAdminPayoutController(ContainerInterface $container): AdminPayoutController
+    {
+        return new AdminPayoutController(
+            $container->get(ApplicationContext::class),
+            $container->get(PayoutService::class),
+            $container->get(AdjustmentService::class),
             self::tenantResolver($container)
         );
     }

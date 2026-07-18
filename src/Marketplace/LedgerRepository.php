@@ -243,6 +243,28 @@ final class LedgerRepository
         ];
     }
 
+    /**
+     * The distinct currencies an account has ANY ledger entries in (§2.9:
+     * balances are currency-separated, so a seller with USD and EUR entries
+     * has two independent balances). Task 8 ({@see SellerBalanceService})
+     * consumer -- kept here rather than duplicated because it is a query
+     * over the SAME table `balanceComponents()` reads, not balance math.
+     *
+     * @return list<string>
+     */
+    public function currenciesForAccount(ApplicationContext $context, string $tenant, string $accountKey): array
+    {
+        $rows = db($context)->table('commerce_marketplace_ledger')
+            ->select(['currency'])
+            ->distinct()
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('account_key', '=', $accountKey)
+            ->orderBy('currency', 'ASC')
+            ->get();
+
+        return array_map(static fn (array $row): string => (string) $row['currency'], $rows);
+    }
+
     /** Reconciliation scan (design spec §2.11): every posting for an order, oldest first. @return list<array<string,mixed>> */
     public function entriesForOrder(ApplicationContext $context, string $tenant, string $orderUuid): array
     {
