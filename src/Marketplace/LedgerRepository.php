@@ -195,8 +195,20 @@ final class LedgerRepository
      * magnitude. One `GROUP BY entry_type` scan (never per-component
      * queries) so every component is computed from the exact same read.
      *
+     * §2.4 (MV4): `reserve_hold`/`reserve_release` are REUSED for payout
+     * accounting -- the row's `payout_uuid` disambiguates which balance
+     * component it belongs to. A conditional `SUM(CASE WHEN payout_uuid IS
+     * NULL ...)` pair (portable across SQLite/PostgreSQL/MySQL) buckets each
+     * entry_type's total by payout-reference within the SAME grouped scan,
+     * so `pending`/`reserved` never cost a second round-trip:
+     *   - `pending`  = -(Σ reserve_hold + Σ reserve_release WHERE payout_uuid IS NOT NULL)
+     *   - `reserved` = -(Σ reserve_hold + Σ reserve_release WHERE payout_uuid IS NULL)
+     * `available` (SUM over every entry, hold included) and `paid_out` are
+     * unaffected by the split.
+     *
      * @return array{
      *     available: int,
+     *     pending: int,
      *     reserved: int,
      *     paid_out: int,
      *     gross_sales: int,
@@ -213,27 +225,41 @@ final class LedgerRepository
         string $currency
     ): array {
         $rows = db($context)->table('commerce_marketplace_ledger')
-            ->selectRaw('entry_type, SUM(amount) as total')
+            ->selectRaw(
+                'entry_type, SUM(amount) as total, '
+                . 'SUM(CASE WHEN payout_uuid IS NULL THEN amount ELSE 0 END) as total_no_payout, '
+                . 'SUM(CASE WHEN payout_uuid IS NOT NULL THEN amount ELSE 0 END) as total_with_payout'
+            )
             ->where('tenant_uuid', '=', $tenant)
             ->where('account_key', '=', $accountKey)
             ->where('currency', '=', $currency)
             ->groupBy('entry_type')
             ->get();
 
-        /** @var array<string,int> $sums entry_type => SUM(amount) */
+        /** @var array<string,int> $sums entry_type => SUM(amount) over every entry */
         $sums = [];
+        /** @var array<string,int> $sumsNoPayout entry_type => SUM(amount) WHERE payout_uuid IS NULL */
+        $sumsNoPayout = [];
+        /** @var array<string,int> $sumsWithPayout entry_type => SUM(amount) WHERE payout_uuid IS NOT NULL */
+        $sumsWithPayout = [];
         $available = 0;
         foreach ($rows as $row) {
+            $type = (string) $row['entry_type'];
             $total = (int) $row['total'];
-            $sums[(string) $row['entry_type']] = $total;
+            $sums[$type] = $total;
+            $sumsNoPayout[$type] = (int) $row['total_no_payout'];
+            $sumsWithPayout[$type] = (int) $row['total_with_payout'];
             $available += $total;
         }
 
         $s = static fn (string $type): int => $sums[$type] ?? 0;
+        $sNoPayout = static fn (string $type): int => $sumsNoPayout[$type] ?? 0;
+        $sWithPayout = static fn (string $type): int => $sumsWithPayout[$type] ?? 0;
 
         return [
             'available' => $available,
-            'reserved' => -($s('reserve_hold') + $s('reserve_release')),
+            'pending' => -($sWithPayout('reserve_hold') + $sWithPayout('reserve_release')),
+            'reserved' => -($sNoPayout('reserve_hold') + $sNoPayout('reserve_release')),
             'paid_out' => -($s('payout_debit') + $s('payout_reversal')),
             'gross_sales' => $s('sale_credit'),
             'commission' => -$s('commission_debit'),

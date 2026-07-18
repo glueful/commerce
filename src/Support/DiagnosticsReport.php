@@ -210,6 +210,10 @@ final class DiagnosticsReport
             'commerce_ledger_account_locks',
             'commerce_commission_policy_events',
             'commerce_payouts',
+            // Marketplace MV4 provider-payout destination accounts (design spec
+            // §3.2). Marketplace-aware REGARDLESS of `commerce.marketplace.enabled`
+            // for the same reason as the MV1-MV3 tables above.
+            'commerce_seller_payout_accounts',
         ];
     }
 

@@ -62,6 +62,7 @@ final class BalanceTest extends CommerceTestCase
 
         self::assertSame([
             'available' => 3270,
+            'pending' => 0,
             'reserved' => 150,
             'paid_out' => 200,
             'gross_sales' => 5000,
@@ -70,8 +71,6 @@ final class BalanceTest extends CommerceTestCase
             'commission_reversed' => 100,
             'adjustments' => 20,
         ], $balance);
-
-        self::assertArrayNotHasKey('pending', $balance, '§2.9: no pending component in MV3');
     }
 
     public function testAvailableConvenienceReturnsOnlyTheAvailableComponent(): void
@@ -151,6 +150,80 @@ final class BalanceTest extends CommerceTestCase
     }
 
     // -----------------------------------------------------------------
+    // MV4 §2.4: `pending` (payout-referenced holds) vs `reserved` (MV5 risk
+    // holds) -- the two are disambiguated purely by whether the
+    // `reserve_hold`/`reserve_release` entry carries a `payout_uuid`.
+    // -----------------------------------------------------------------
+
+    public function testPendingReflectsOnlyPayoutReferencedHoldsAndReservedOnlyNonPayoutHolds(): void
+    {
+        $accountKey = LedgerRepository::accountKeyForSeller(self::SELLER);
+
+        $this->ledger->post($this->context, self::TENANT, $this->reserveEntry(
+            $accountKey,
+            amount: -400,
+            payoutUuid: 'payoutBAL0001',
+            idempotencyKey: 'payoutBAL0001:' . self::SELLER . ':reserve_hold'
+        ));
+        $this->ledger->post($this->context, self::TENANT, $this->reserveEntry(
+            $accountKey,
+            amount: -250,
+            payoutUuid: null,
+            idempotencyKey: 'riskBAL00001:' . self::SELLER . ':reserve_hold'
+        ));
+
+        $balance = $this->service->balance($this->context, self::TENANT, self::SELLER, 'USD');
+
+        self::assertSame(400, $balance['pending'], 'the payout-referenced hold shows as pending');
+        self::assertSame(250, $balance['reserved'], 'the non-payout hold shows as reserved (MV5 risk reserve)');
+        self::assertSame(-650, $balance['available'], 'available sums every signed entry -- split is unchanged');
+    }
+
+    public function testAPayoutHoldThenItsReleaseNetsPendingToZeroWithoutTouchingReserved(): void
+    {
+        $accountKey = LedgerRepository::accountKeyForSeller(self::SELLER);
+
+        $this->ledger->post($this->context, self::TENANT, $this->reserveEntry(
+            $accountKey,
+            amount: -500,
+            payoutUuid: 'payoutBAL0002',
+            idempotencyKey: 'payoutBAL0002:' . self::SELLER . ':reserve_hold',
+            entryType: 'reserve_hold'
+        ));
+        $this->ledger->post($this->context, self::TENANT, $this->reserveEntry(
+            $accountKey,
+            amount: 500,
+            payoutUuid: 'payoutBAL0002',
+            idempotencyKey: 'payoutBAL0002:' . self::SELLER . ':reserve_release',
+            entryType: 'reserve_release'
+        ));
+        $this->ledger->post($this->context, self::TENANT, $this->reserveEntry(
+            $accountKey,
+            amount: -75,
+            payoutUuid: null,
+            idempotencyKey: 'riskBAL00002:' . self::SELLER . ':reserve_hold'
+        ));
+
+        $balance = $this->service->balance($this->context, self::TENANT, self::SELLER, 'USD');
+
+        self::assertSame(0, $balance['pending'], 'a released payout hold nets pending back to 0');
+        self::assertSame(75, $balance['reserved'], 'the unrelated risk hold is untouched by the payout release');
+        self::assertSame(-75, $balance['available']);
+    }
+
+    public function testSellerBalanceServiceBalanceSurfacesPending(): void
+    {
+        $this->postAll(self::SELLER, 'orderBAL00099', [
+            ['entry_type' => 'sale_credit', 'amount' => 1000],
+        ]);
+
+        $balance = $this->service->balance($this->context, self::TENANT, self::SELLER, 'USD');
+
+        self::assertArrayHasKey('pending', $balance);
+        self::assertSame(0, $balance['pending']);
+    }
+
+    // -----------------------------------------------------------------
     // Marketplace account balance is independent of any seller account.
     // -----------------------------------------------------------------
 
@@ -189,6 +262,7 @@ final class BalanceTest extends CommerceTestCase
 
         self::assertSame([
             'available' => 0,
+            'pending' => 0,
             'reserved' => 0,
             'paid_out' => 0,
             'gross_sales' => 0,
@@ -251,5 +325,31 @@ final class BalanceTest extends CommerceTestCase
                 'idempotency_key' => $orderUuid . ':' . $seller . ':' . $entry['entry_type'] . ':' . $suffix,
             ], $entry));
         }
+    }
+
+    /**
+     * A `reserve_hold`/`reserve_release` entry, optionally carrying a
+     * `payout_uuid` -- the MV4 §2.4 signal that disambiguates `pending`
+     * (payout-referenced) from `reserved` (MV5 risk-reserve) holds.
+     *
+     * @return array<string,mixed>
+     */
+    private function reserveEntry(
+        string $accountKey,
+        int $amount,
+        ?string $payoutUuid,
+        string $idempotencyKey,
+        string $entryType = 'reserve_hold'
+    ): array {
+        return [
+            'account_kind' => 'seller',
+            'account_key' => $accountKey,
+            'seller_uuid' => self::SELLER,
+            'currency' => 'USD',
+            'entry_type' => $entryType,
+            'amount' => $amount,
+            'payout_uuid' => $payoutUuid,
+            'idempotency_key' => $idempotencyKey,
+        ];
     }
 }

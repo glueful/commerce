@@ -677,22 +677,28 @@ final class SettlementShapeTest extends CommerceTestCase
         self::assertSame('', $row['tenant_uuid']);
     }
 
-    public function testPayoutsRequireExternalRefAndCreatedByActor(): void
+    public function testPayoutsExternalRefAndCreatedByAreNullableAtTheSchemaLevel(): void
     {
-        // §2.10/§3.5: external_ref and created_by are NOT NULL (DB defense-in-depth
-        // behind PayoutService validation); only `note` is optional.
-        foreach (['external_ref', 'created_by'] as $required) {
+        // MV4 (design spec §3.1) folds the provider-payout columns into this
+        // still-unreleased table and makes external_ref/created_by nullable at
+        // the SCHEMA level: a provider row is written before a provider
+        // reference is known, and a scheduled batch payout has no human
+        // actor. The manual `record()` service continues to require both --
+        // that is a SERVICE-level rule (Task 7), not a DB constraint.
+        foreach (['external_ref', 'created_by'] as $nowNullable) {
             $row = $this->minimalPayoutRow([
-                'uuid' => 'payoutreq' . substr($required, 0, 3),
-                'idempotency_key' => 'idem-req-' . $required,
+                'uuid' => 'payoutnull' . substr($nowNullable, 0, 3),
+                'idempotency_key' => 'idem-null-' . $nowNullable,
             ]);
-            unset($row[$required]);
-            try {
-                $this->connection->table('commerce_payouts')->insert($row);
-                self::fail("commerce_payouts.{$required} must be NOT NULL");
-            } catch (\Throwable) {
-                $this->addToAssertionCount(1);
-            }
+            unset($row[$nowNullable]);
+
+            $this->connection->table('commerce_payouts')->insert($row);
+
+            $inserted = $this->connection->table('commerce_payouts')
+                ->where('uuid', '=', $row['uuid'])
+                ->first();
+            self::assertNotNull($inserted);
+            self::assertNull($inserted[$nowNullable], "commerce_payouts.{$nowNullable} must be nullable");
         }
     }
 

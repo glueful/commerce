@@ -69,6 +69,56 @@ return [
             'bps' => (int) env('COMMERCE_COMMISSION_BPS', 0),
             'fixed' => env('COMMERCE_COMMISSION_FIXED', null),
         ],
+
+        // Provider-payout saga (MV4, design spec §2.6/§3.1/§3.5-config). Inert
+        // whether or not a `PayoutCollector` is bound -- manual payouts and
+        // ledger semantics never read this block.
+        'payouts' => [
+            // Per-currency minimum payout amount (minor units) below which
+            // `run-batch` skips a candidate. Empty by default -- no minimum
+            // unless configured. Only the store's single configured currency
+            // is env-backed here (mirrors the file's single-currency
+            // top-level `currency` key); add further currencies via an
+            // app-level config override.
+            'minimums' => array_filter(
+                [(string) env('COMMERCE_CURRENCY', 'USD') => (int) env('COMMERCE_PAYOUTS_MIN_AMOUNT', 0)],
+                static fn (int $amount): bool => $amount > 0
+            ),
+
+            // Optional per-currency maximum (minor units) capping a
+            // `run-batch` amount. An absent (or zero) currency means the
+            // batch uses the full locked available balance (§2.6) -- empty
+            // by default, same env-backing convention as `minimums` above.
+            'maximums' => array_filter(
+                [(string) env('COMMERCE_CURRENCY', 'USD') => (int) env('COMMERCE_PAYOUTS_MAX_AMOUNT', 0)],
+                static fn (int $amount): bool => $amount > 0
+            ),
+
+            // Retry backoff schedule driving `claimRetryableForAttempt`'s
+            // `next_attempt_at` (§2.6). Seconds.
+            'backoff' => [
+                'base_seconds' => (int) env('COMMERCE_PAYOUTS_BACKOFF_BASE_SECONDS', 60),
+                'multiplier' => (int) env('COMMERCE_PAYOUTS_BACKOFF_MULTIPLIER', 2),
+                'max_seconds' => (int) env('COMMERCE_PAYOUTS_BACKOFF_MAX_SECONDS', 3600),
+            ],
+
+            // Attempts exhausted beyond this terminalize the payout and
+            // release its hold rather than scheduling another retry.
+            'max_attempts' => (int) env('COMMERCE_PAYOUTS_MAX_ATTEMPTS', 5),
+
+            // Reconcile-sweep cadence (seconds) for unresolved pending/unknown
+            // payouts (§2.6/§2.8).
+            'pending_reconcile_interval' => (int) env('COMMERCE_PAYOUTS_PENDING_RECONCILE_INTERVAL', 300),
+
+            // Slower reconcile-sweep cadence (seconds) for already-paid
+            // payouts -- covers provider-reported reversals only (§2.8).
+            'paid_reconcile_interval' => (int) env('COMMERCE_PAYOUTS_PAID_RECONCILE_INTERVAL', 86400),
+
+            // Provider id used when a payout doesn't specify one explicitly.
+            // Null keeps provider payouts unavailable regardless of binding
+            // (soft `PayoutCollector`, design spec §2.9).
+            'default_provider' => env('COMMERCE_PAYOUTS_DEFAULT_PROVIDER'),
+        ],
     ],
 
     // Null-tolerant: invoice-data serializes each key as null, never omitted, when unset.

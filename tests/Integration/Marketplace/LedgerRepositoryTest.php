@@ -255,7 +255,7 @@ final class LedgerRepositoryTest extends CommerceTestCase
 
         self::assertSame(
             [
-                'available' => 0, 'reserved' => 0, 'paid_out' => 0, 'gross_sales' => 0,
+                'available' => 0, 'pending' => 0, 'reserved' => 0, 'paid_out' => 0, 'gross_sales' => 0,
                 'commission' => 0, 'refunds' => 0, 'commission_reversed' => 0, 'adjustments' => 0,
             ],
             $components

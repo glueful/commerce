@@ -25,10 +25,14 @@ final class SellerBalanceService
 
     /**
      * The full §2.9 component set for a seller's `seller:{uuid}` account,
-     * scoped to a single currency. No `pending` component in MV3.
+     * scoped to a single currency. `pending` (MV4 §2.4) is the seller's
+     * in-flight payout holds -- `reserve_hold`/`reserve_release` entries
+     * carrying a `payout_uuid` -- distinct from `reserved` (MV5 risk holds,
+     * the same entry types with no `payout_uuid`).
      *
      * @return array{
      *     available: int,
+     *     pending: int,
      *     reserved: int,
      *     paid_out: int,
      *     gross_sales: int,
@@ -63,6 +67,7 @@ final class SellerBalanceService
      *
      * @return array{
      *     available: int,
+     *     pending: int,
      *     reserved: int,
      *     paid_out: int,
      *     gross_sales: int,
