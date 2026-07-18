@@ -10,11 +10,11 @@ use Glueful\Validation\Contracts\RequestData;
 final class FulfillSellerOrderData implements RequestData
 {
     public function __construct(
-        #[Rule('string')]
+        #[Rule('string|max:96')]
         public readonly ?string $carrier = null,
-        #[Rule('string')]
+        #[Rule('string|max:191')]
         public readonly ?string $tracking_number = null,
-        #[Rule('string')]
+        #[Rule('string|max:512')]
         public readonly ?string $tracking_url = null,
     ) {
     }
