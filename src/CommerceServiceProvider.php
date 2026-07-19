@@ -100,6 +100,10 @@ use Glueful\Extensions\Commerce\Marketplace\PayoutAccountService;
 use Glueful\Extensions\Commerce\Marketplace\PayoutRepository;
 use Glueful\Extensions\Commerce\Marketplace\PayoutService;
 use Glueful\Extensions\Commerce\Marketplace\ReconciliationService;
+use Glueful\Extensions\Commerce\Marketplace\ReservePolicyEventRepository;
+use Glueful\Extensions\Commerce\Marketplace\ReservePolicyService;
+use Glueful\Extensions\Commerce\Marketplace\ReserveRepository;
+use Glueful\Extensions\Commerce\Marketplace\ReserveService;
 use Glueful\Extensions\Commerce\Marketplace\SellerAttributionService;
 use Glueful\Extensions\Commerce\Marketplace\SellerBalanceService;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipRepository;
@@ -450,6 +454,23 @@ final class CommerceServiceProvider extends ServiceProvider
                 'factory' => [self::class, 'makeCommissionPolicyService'],
                 'shared' => true,
             ],
+            ReservePolicyEventRepository::class => [
+                'class' => ReservePolicyEventRepository::class,
+                'shared' => true,
+            ],
+            ReservePolicyService::class => [
+                'factory' => [self::class, 'makeReservePolicyService'],
+                'shared' => true,
+            ],
+            ReserveRepository::class => [
+                'class' => ReserveRepository::class,
+                'shared' => true,
+            ],
+            ReserveService::class => [
+                'class' => ReserveService::class,
+                'shared' => true,
+                'autowire' => true,
+            ],
             SellerService::class => [
                 'factory' => [self::class, 'makeSellerService'],
                 'shared' => true,
@@ -697,6 +718,15 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(SellerRepository::class),
             $container->get(MarketplaceWorkspaceLock::class),
             $container->get(CommissionPolicyEventRepository::class)
+        );
+    }
+
+    public static function makeReservePolicyService(ContainerInterface $container): ReservePolicyService
+    {
+        return new ReservePolicyService(
+            $container->get(SellerRepository::class),
+            $container->get(MarketplaceWorkspaceLock::class),
+            $container->get(ReservePolicyEventRepository::class)
         );
     }
 

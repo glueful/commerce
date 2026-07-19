@@ -374,4 +374,30 @@ final class LedgerRepository
             ->orderBy('id', 'ASC')
             ->get();
     }
+
+    /**
+     * The remaining amount of ONE reserve hold (design spec §2.3/§3.2, MV5a Task 8):
+     * `max(0, -Σ amount)` over every ledger row carrying this `reserve_uuid` -- by
+     * construction those rows are always `reserve_hold` (negative) and `reserve_release`
+     * (positive), so a plain unfiltered `SUM` already implements the design spec's
+     * `-Σ(reserve_hold + reserve_release)` formula. This is the SAME derive-from-ledger
+     * discipline {@see self::balanceComponents()} uses for the account-wide `reserved`
+     * component, scoped down to a single hold's own correlation id instead of an entire
+     * account -- {@see \Glueful\Extensions\Commerce\Marketplace\ReserveRepository}'s own
+     * class docblock is explicit that a hold's remaining amount is NEVER a second, mutable
+     * stored balance. {@see \Glueful\Extensions\Commerce\Marketplace\ReserveService::releaseDue()}
+     * (the scheduled release sweep) is the first caller; a later reserve-consumption task
+     * (chargebacks/refunds, design spec §2.5) reuses this exact method under the same
+     * seller/currency lock discipline.
+     */
+    public function remainingForReserve(ApplicationContext $context, string $tenant, string $reserveUuid): int
+    {
+        $row = db($context)->table('commerce_marketplace_ledger')
+            ->selectRaw('SUM(amount) as total')
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('reserve_uuid', '=', $reserveUuid)
+            ->first();
+
+        return max(0, -(int) ($row['total'] ?? 0));
+    }
 }

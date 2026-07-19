@@ -20,12 +20,20 @@ use Glueful\Bootstrap\ApplicationContext;
  * caller's own gate on its OWN `marketplace_partitioned` snapshot), so this
  * class issues zero queries in that case by construction, not by an
  * internal check here.
+ *
+ * `$reserves` is an APPENDED OPTIONAL collaborator (design spec §2.2, MV5a
+ * Task 7) -- the same convention {@see \Glueful\Extensions\Commerce\Orders\OrderPaymentService}
+ * uses for its own optional collaborators -- so every pre-MV5a direct
+ * construction call site (tests included) stays source-compatible. When
+ * `null`, {@see self::postOneSeller()} posts `sale_credit`/`commission_debit`
+ * exactly as before and never attempts a reserve hold.
  */
 final class LedgerPostingService
 {
     public function __construct(
         private LedgerRepository $ledger,
         private LedgerAccountLock $lock,
+        private ?ReserveService $reserves = null,
     ) {
     }
 
@@ -47,6 +55,15 @@ final class LedgerPostingService
      * zero-amount commission entry would be pure ledger noise the Task 10
      * reconciliation scan would then have to specially ignore, so it is
      * never written in the first place.
+     *
+     * When `$this->reserves` is wired (design spec §2.2, MV5a Task 7),
+     * {@see ReserveService::holdForSettlement()} runs immediately AFTER
+     * this seller's `sale_credit`/`commission_debit` above, still under the
+     * SAME claimed account lock -- it reads `subtotal`, `allocated_discount`,
+     * `allocated_shipping`, `allocated_tax`, and `confirmed_at` off the same
+     * `$sellerOrders` row in addition to the fields below, and posts its own
+     * `reserve_hold` entry (or nothing, per its own policy/zero-amount
+     * no-op rules) before moving on to the next seller.
      *
      * @param array<string,mixed> $order the parent order row (only `uuid` is read)
      * @param list<array{
@@ -117,6 +134,21 @@ final class LedgerPostingService
                 'seller_order_uuid' => $sellerOrderUuid,
                 'idempotency_key' => "{$orderUuid}:{$sellerUuid}:commission_debit",
             ]);
+        }
+
+        // Rolling reserve hold (design spec §2.2, MV5a Task 7): posted AFTER
+        // sale_credit/commission_debit above, still under the SAME
+        // seller/currency account lock claimed at the top of this method --
+        // `$orderUuid` (this method's own canonical value, never
+        // `$sellerOrder['order_uuid']`) is merged in so it is always the exact
+        // value sale_credit/commission_debit were posted under, regardless of
+        // whether the caller's own `$sellerOrder` array happens to carry that
+        // key. A `null` `$this->reserves` (pre-MV5a construction) skips this
+        // entirely.
+        if ($this->reserves !== null) {
+            $this->reserves->holdForSettlement($context, $tenant, array_merge($sellerOrder, [
+                'order_uuid' => $orderUuid,
+            ]));
         }
     }
 
