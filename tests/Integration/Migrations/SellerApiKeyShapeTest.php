@@ -884,29 +884,29 @@ final class SellerApiKeyShapeTest extends CommerceTestCase
         // Self-healing cleanup: real commits against the persistent PostgreSQL
         // test database, unlike every SQLite test in this file.
         $connection->table('commerce_seller_api_key_events')
-            ->where('tenant_uuid', '=', 'tntpgsellerak')->delete();
+            ->where('tenant_uuid', '=', 'tntpgselleak')->delete();
 
         $row = static fn (array $overrides): array => array_merge([
-            'tenant_uuid' => 'tntpgsellerak',
-            'lineage_uuid' => 'pglineageak01',
-            'seller_uuid' => 'pgsellerak001',
-            'subject_user_uuid' => 'pgsubjectak01',
+            'tenant_uuid' => 'tntpgselleak',
+            'lineage_uuid' => 'pglineagek01',
+            'seller_uuid' => 'pgselleak001',
+            'subject_user_uuid' => 'pgsubjectk01',
             'action' => 'created',
         ], $overrides);
 
         // Two permanent events, same lineage/action, null reason/bucket -- must coexist.
-        $connection->table('commerce_seller_api_key_events')->insert($row(['uuid' => 'pgeventak0001']));
-        $connection->table('commerce_seller_api_key_events')->insert($row(['uuid' => 'pgeventak0002']));
+        $connection->table('commerce_seller_api_key_events')->insert($row(['uuid' => 'pgeventak001']));
+        $connection->table('commerce_seller_api_key_events')->insert($row(['uuid' => 'pgeventak002']));
         self::assertSame(
             2,
             $connection->table('commerce_seller_api_key_events')
-                ->where('lineage_uuid', '=', 'pglineageak01')
+                ->where('lineage_uuid', '=', 'pglineagek01')
                 ->count()
         );
 
         // Two auth_denied rows in the SAME bucket -- must collide.
         $connection->table('commerce_seller_api_key_events')->insert($row([
-            'uuid' => 'pgeventak0003',
+            'uuid' => 'pgeventak003',
             'action' => 'auth_denied',
             'reason_code' => 'capability_denied',
             'bucket_start' => '2026-07-19 10:05:00',
@@ -915,7 +915,7 @@ final class SellerApiKeyShapeTest extends CommerceTestCase
         $rejected = false;
         try {
             $connection->table('commerce_seller_api_key_events')->insert($row([
-                'uuid' => 'pgeventak0004',
+                'uuid' => 'pgeventak004',
                 'action' => 'auth_denied',
                 'reason_code' => 'capability_denied',
                 'bucket_start' => '2026-07-19 10:05:00',
@@ -925,7 +925,7 @@ final class SellerApiKeyShapeTest extends CommerceTestCase
         }
 
         $connection->table('commerce_seller_api_key_events')
-            ->where('tenant_uuid', '=', 'tntpgsellerak')->delete();
+            ->where('tenant_uuid', '=', 'tntpgselleak')->delete();
 
         self::assertTrue(
             $rejected,
