@@ -49,6 +49,7 @@ use Glueful\Extensions\Commerce\Marketplace\ReservePolicyService;
 use Glueful\Extensions\Commerce\Marketplace\ReserveRepository;
 use Glueful\Extensions\Commerce\Marketplace\ReserveService;
 use Glueful\Extensions\Commerce\Marketplace\SellerBalanceService;
+use Glueful\Extensions\Commerce\Marketplace\SellerLifecycleEventRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerOrderPaymentConfirmation;
 use Glueful\Extensions\Commerce\Marketplace\SellerOrderRepository;
@@ -1608,7 +1609,11 @@ final class MarketplaceRegressionTest extends CommerceTestCase
 
     private function sellerService(): SellerService
     {
-        return new SellerService(new SellerRepository(), new SellerMembershipRepository());
+        return new SellerService(
+            new SellerRepository(),
+            new SellerMembershipRepository(),
+            new SellerLifecycleEventRepository()
+        );
     }
 
     private function productController(): ProductController

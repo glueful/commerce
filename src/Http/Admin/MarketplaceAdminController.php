@@ -10,6 +10,7 @@ use Glueful\Extensions\Commerce\Http\DTOs\AssignSellerData;
 use Glueful\Extensions\Commerce\Http\DTOs\ChangeSellerMembershipRoleData;
 use Glueful\Extensions\Commerce\Http\DTOs\CreateSellerData;
 use Glueful\Extensions\Commerce\Http\DTOs\GrantSellerMembershipData;
+use Glueful\Extensions\Commerce\Http\DTOs\SellerLifecycleListQuery;
 use Glueful\Extensions\Commerce\Http\DTOs\SellerListQuery;
 use Glueful\Extensions\Commerce\Http\DTOs\SellerMembershipListQuery;
 use Glueful\Extensions\Commerce\Http\DTOs\UpdateSellerData;
@@ -20,6 +21,7 @@ use Glueful\Extensions\Commerce\Marketplace\MarketplaceActivationService;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceMode;
 use Glueful\Extensions\Commerce\Marketplace\SellerAttributionException;
 use Glueful\Extensions\Commerce\Marketplace\SellerAttributionService;
+use Glueful\Extensions\Commerce\Marketplace\SellerLifecycleEventRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerLifecycleException;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipException;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipService;
@@ -63,6 +65,7 @@ final class MarketplaceAdminController
         private ?SellerAttributionService $attribution = null,
         private ?CommissionPolicyService $commissionPolicy = null,
         private ?MarketplaceMode $marketplaceMode = null,
+        private ?SellerLifecycleEventRepository $lifecycleEvents = null,
     ) {
         $this->sellers ??= app($context, SellerService::class);
         $this->memberships ??= app($context, SellerMembershipService::class);
@@ -73,6 +76,7 @@ final class MarketplaceAdminController
         $this->attribution ??= app($context, SellerAttributionService::class);
         $this->commissionPolicy ??= app($context, CommissionPolicyService::class);
         $this->marketplaceMode ??= app($context, MarketplaceMode::class);
+        $this->lifecycleEvents ??= app($context, SellerLifecycleEventRepository::class);
     }
 
     #[ApiOperation(summary: 'List marketplace sellers', tags: ['Commerce Admin', 'Marketplace'])]
@@ -160,32 +164,50 @@ final class MarketplaceAdminController
     }
 
     #[ApiOperation(summary: 'Suspend a marketplace seller', tags: ['Commerce Admin', 'Marketplace'])]
-    #[ApiResponse(200, description: 'Seller suspended')]
+    #[ApiResponse(200, description: 'Seller suspended (or already suspended -- a stable no-op)')]
     #[ApiResponse(404, description: 'Seller not found')]
     #[ApiResponse(409, description: 'Seller cannot be suspended from its current status')]
+    #[ApiResponse(422, description: 'reason is required')]
     public function suspendSeller(Request $request, string $uuid): Response
     {
         try {
             $tenant = $this->tenants->tenantUuid($this->context);
-            $seller = $this->sellers->suspend($this->context, $tenant, $uuid, $this->actorUuid($request));
+            $seller = $this->sellers->suspend(
+                $this->context,
+                $tenant,
+                $uuid,
+                $this->reasonInput($request),
+                (string) ($this->actorUuid($request) ?? '')
+            );
 
             return Response::success($seller, 'Seller suspended');
+        } catch (ValidationException $e) {
+            return Response::validation($e->firstErrors());
         } catch (SellerLifecycleException $e) {
             return Response::error($e->getMessage(), 409);
         }
     }
 
     #[ApiOperation(summary: 'Reactivate a suspended marketplace seller', tags: ['Commerce Admin', 'Marketplace'])]
-    #[ApiResponse(200, description: 'Seller reactivated')]
+    #[ApiResponse(200, description: 'Seller reactivated (or already active -- a stable no-op)')]
     #[ApiResponse(404, description: 'Seller not found')]
     #[ApiResponse(409, description: 'Seller cannot be reactivated from its current status')]
+    #[ApiResponse(422, description: 'reason is required')]
     public function reactivateSeller(Request $request, string $uuid): Response
     {
         try {
             $tenant = $this->tenants->tenantUuid($this->context);
-            $seller = $this->sellers->reactivate($this->context, $tenant, $uuid, $this->actorUuid($request));
+            $seller = $this->sellers->reactivate(
+                $this->context,
+                $tenant,
+                $uuid,
+                $this->reasonInput($request),
+                (string) ($this->actorUuid($request) ?? '')
+            );
 
             return Response::success($seller, 'Seller reactivated');
+        } catch (ValidationException $e) {
+            return Response::validation($e->firstErrors());
         } catch (SellerLifecycleException $e) {
             return Response::error($e->getMessage(), 409);
         }
@@ -195,16 +217,65 @@ final class MarketplaceAdminController
     #[ApiResponse(200, description: 'Seller closed')]
     #[ApiResponse(404, description: 'Seller not found')]
     #[ApiResponse(409, description: 'Seller still owns products, or is already closed')]
+    #[ApiResponse(422, description: 'reason is required')]
     public function closeSeller(Request $request, string $uuid): Response
     {
         try {
             $tenant = $this->tenants->tenantUuid($this->context);
-            $seller = $this->sellers->close($this->context, $tenant, $uuid, $this->actorUuid($request));
+            $seller = $this->sellers->close(
+                $this->context,
+                $tenant,
+                $uuid,
+                $this->reasonInput($request),
+                (string) ($this->actorUuid($request) ?? '')
+            );
 
             return Response::success($seller, 'Seller closed');
+        } catch (ValidationException $e) {
+            return Response::validation($e->firstErrors());
         } catch (SellerLifecycleException $e) {
             return Response::error($e->getMessage(), 409);
         }
+    }
+
+    #[ApiOperation(summary: "A seller's lifecycle audit history", tags: ['Commerce Admin', 'Marketplace'])]
+    #[ApiResponse(200, description: 'Seller lifecycle history retrieved')]
+    #[ApiResponse(404, description: 'Seller not found')]
+    public function sellerLifecycle(SellerLifecycleListQuery $query, Request $request, string $uuid): Response
+    {
+        $tenant = $this->tenants->tenantUuid($this->context);
+        // Re-read the seller through the tenant-scoped SellerService FIRST
+        // (design spec §4): an unknown OR cross-tenant uuid is the SAME
+        // non-revealing 404, mirroring every other seller-scoped operator
+        // read (e.g. AdminReserveController::requireSeller()).
+        $this->sellers->show($this->context, $tenant, $uuid);
+
+        $page = max(1, $query->page ?? 1);
+        $perPage = max(1, min(100, $query->per_page ?? 24));
+
+        $result = $this->lifecycleEvents->paginatedForSeller($this->context, $tenant, $uuid, $page, $perPage);
+
+        return Response::paginated(
+            $result['items'],
+            $result['total'],
+            $page,
+            $perPage,
+            null,
+            'Seller lifecycle history retrieved'
+        );
+    }
+
+    /**
+     * `reason` read from the JSON/form body -- never trusted as a string
+     * without checking (a non-string value, e.g. an array, is treated as
+     * blank so {@see SellerService}'s own guard rejects it with a 422
+     * instead of a TypeError).
+     */
+    private function reasonInput(Request $request): string
+    {
+        $reason = $this->input($request)['reason'] ?? null;
+
+        return is_string($reason) ? $reason : '';
     }
 
     #[ApiOperation(summary: "List a seller's memberships", tags: ['Commerce Admin', 'Marketplace'])]

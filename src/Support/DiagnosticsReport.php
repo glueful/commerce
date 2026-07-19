@@ -226,6 +226,10 @@ final class DiagnosticsReport
             // deactivation (design spec §2.4/§7).
             'commerce_chargebacks',
             'commerce_chargeback_lines',
+            // Marketplace MV5b seller-lifecycle audit trail (design spec §3.2).
+            // Marketplace-aware REGARDLESS of `commerce.marketplace.enabled` for the
+            // same reason as the MV1-MV5a tables above.
+            'commerce_seller_lifecycle_events',
         ];
     }
 

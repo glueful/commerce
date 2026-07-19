@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Commerce\Tests\Integration\Marketplace;
 
 use Glueful\Extensions\Commerce\Marketplace\FixedSellerRoleAuthority;
+use Glueful\Extensions\Commerce\Marketplace\SellerLifecycleEventRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipException;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipService;
@@ -36,7 +37,11 @@ final class SellerMembershipTest extends CommerceTestCase
 
         $this->sellers = new SellerRepository();
         $this->memberships = new SellerMembershipRepository();
-        $this->sellerService = new SellerService($this->sellers, $this->memberships);
+        $this->sellerService = new SellerService(
+            $this->sellers,
+            $this->memberships,
+            new SellerLifecycleEventRepository()
+        );
         $this->membershipService = new SellerMembershipService(
             $this->sellers,
             $this->memberships,
@@ -130,7 +135,7 @@ final class SellerMembershipTest extends CommerceTestCase
     public function testGrantWhileTheSellerIsSuspendedFailsClosedWith409(): void
     {
         $seller = $this->createSeller('grant-suspended', 'ownerUserA5');
-        $this->sellerService->suspend($this->context, self::TENANT, $seller['uuid']);
+        $this->sellerService->suspend($this->context, self::TENANT, $seller['uuid'], 'Under review.', 'operator01');
 
         $this->expectException(SellerMembershipException::class);
         $this->membershipService->grant($this->context, self::TENANT, $seller['uuid'], 'staffUserA05', 'seller_staff');
@@ -233,7 +238,7 @@ final class SellerMembershipTest extends CommerceTestCase
     {
         $seller = $this->createSeller('change-closed', 'ownerUserB6');
         $this->membershipService->grant($this->context, self::TENANT, $seller['uuid'], 'staffUserB06', 'seller_staff');
-        $this->sellerService->close($this->context, self::TENANT, $seller['uuid']);
+        $this->sellerService->close($this->context, self::TENANT, $seller['uuid'], 'Shutting down.', 'operator01');
 
         $this->expectException(SellerMembershipException::class);
         $this->membershipService->changeRole(
@@ -307,7 +312,7 @@ final class SellerMembershipTest extends CommerceTestCase
     {
         $seller = $this->createSeller('revoke-suspended', 'ownerUserC5');
         $this->membershipService->grant($this->context, self::TENANT, $seller['uuid'], 'staffUserC05', 'seller_staff');
-        $this->sellerService->suspend($this->context, self::TENANT, $seller['uuid']);
+        $this->sellerService->suspend($this->context, self::TENANT, $seller['uuid'], 'Under review.', 'operator01');
 
         $this->expectException(SellerMembershipException::class);
         $this->membershipService->revoke($this->context, self::TENANT, $seller['uuid'], 'staffUserC05');
@@ -321,7 +326,7 @@ final class SellerMembershipTest extends CommerceTestCase
     {
         $seller = $this->createSeller('read-while-suspended', 'ownerUserD1');
         $this->membershipService->grant($this->context, self::TENANT, $seller['uuid'], 'staffUserD01', 'seller_staff');
-        $this->sellerService->suspend($this->context, self::TENANT, $seller['uuid']);
+        $this->sellerService->suspend($this->context, self::TENANT, $seller['uuid'], 'Under review.', 'operator01');
 
         $result = $this->membershipService->list($this->context, self::TENANT, $seller['uuid'], 1, 24);
 

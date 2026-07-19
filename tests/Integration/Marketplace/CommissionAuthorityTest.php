@@ -15,6 +15,7 @@ use Glueful\Extensions\Commerce\Marketplace\CommissionPolicyException;
 use Glueful\Extensions\Commerce\Marketplace\CommissionPolicyService;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceMode;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceWorkspaceLock;
+use Glueful\Extensions\Commerce\Marketplace\SellerLifecycleEventRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerService;
@@ -414,6 +415,7 @@ final class CommissionAuthorityTest extends CommerceRouterTestCase
         $service = new SellerService(
             new SellerRepository(),
             new SellerMembershipRepository(),
+            new SellerLifecycleEventRepository(),
             null,
             $this->commissionService()
         );

@@ -297,6 +297,12 @@ if ($marketplaceEnabled) {
         )->middleware($write);
         $router->post('/marketplace/sellers/{uuid}/close', [MarketplaceAdminController::class, 'closeSeller'])
             ->middleware($write);
+        // MV5b lifecycle-audit history (design spec §2.2/§4, Task 2): read-only,
+        // gated the SAME way as every other seller read in this group.
+        $router->get(
+            '/marketplace/sellers/{uuid}/lifecycle',
+            [MarketplaceAdminController::class, 'sellerLifecycle']
+        )->middleware($read);
 
         $router->get(
             '/marketplace/sellers/{uuid}/memberships',

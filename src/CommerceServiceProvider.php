@@ -111,6 +111,7 @@ use Glueful\Extensions\Commerce\Marketplace\ReserveRepository;
 use Glueful\Extensions\Commerce\Marketplace\ReserveService;
 use Glueful\Extensions\Commerce\Marketplace\SellerAttributionService;
 use Glueful\Extensions\Commerce\Marketplace\SellerBalanceService;
+use Glueful\Extensions\Commerce\Marketplace\SellerLifecycleEventRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipService;
 use Glueful\Extensions\Commerce\Marketplace\SellerOrderFulfillmentService;
@@ -378,6 +379,10 @@ final class CommerceServiceProvider extends ServiceProvider
             ],
             SellerMembershipRepository::class => [
                 'class' => SellerMembershipRepository::class,
+                'shared' => true,
+            ],
+            SellerLifecycleEventRepository::class => [
+                'class' => SellerLifecycleEventRepository::class,
                 'shared' => true,
             ],
             SellerOrderRepository::class => [
@@ -1430,6 +1435,7 @@ final class CommerceServiceProvider extends ServiceProvider
         return new SellerService(
             $container->get(SellerRepository::class),
             $container->get(SellerMembershipRepository::class),
+            $container->get(SellerLifecycleEventRepository::class),
             null,
             $container->get(CommissionPolicyService::class)
         );
@@ -1473,7 +1479,8 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(MarketplaceActivationService::class),
             $container->get(SellerAttributionService::class),
             $container->get(CommissionPolicyService::class),
-            $container->get(MarketplaceMode::class)
+            $container->get(MarketplaceMode::class),
+            $container->get(SellerLifecycleEventRepository::class)
         );
     }
 

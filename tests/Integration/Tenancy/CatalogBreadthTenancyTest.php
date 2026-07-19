@@ -22,6 +22,7 @@ use Glueful\Extensions\Commerce\Catalog\VariantRepository;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceActivationService;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceMode;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceWorkspaceLock;
+use Glueful\Extensions\Commerce\Marketplace\SellerLifecycleEventRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerService;
@@ -383,7 +384,11 @@ final class CatalogBreadthTenancyTest extends CommerceTestCase
 
     private function sellers(): SellerService
     {
-        return new SellerService(new SellerRepository(), new SellerMembershipRepository());
+        return new SellerService(
+            new SellerRepository(),
+            new SellerMembershipRepository(),
+            new SellerLifecycleEventRepository()
+        );
     }
 
     // -----------------------------------------------------------------
@@ -397,9 +402,11 @@ final class CatalogBreadthTenancyTest extends CommerceTestCase
         // three Marketplace MV1 foundation tables added in migration 010, the
         // MV2 `commerce_seller_orders` table added in migration 011, the four
         // MV3 settlement-ledger tables added in migrations 012/013, the MV4
-        // `commerce_seller_payout_accounts` table added in migration 014, and the
-        // four MV5a reserve/chargeback tables added in migrations 015/016), so a
-        // future accidental removal/addition is caught here as well as locally.
+        // `commerce_seller_payout_accounts` table added in migration 014, the
+        // four MV5a reserve/chargeback tables added in migrations 015/016, and
+        // the MV5b `commerce_seller_lifecycle_events` audit table added in
+        // migration 017), so a future accidental removal/addition is caught
+        // here as well as locally.
         self::assertSame([
             'commerce_products',
             'commerce_variants',
@@ -437,6 +444,7 @@ final class CatalogBreadthTenancyTest extends CommerceTestCase
             'commerce_reserve_policy_events',
             'commerce_chargebacks',
             'commerce_chargeback_lines',
+            'commerce_seller_lifecycle_events',
         ], DiagnosticsReport::tenantTables());
 
         // The join/child tables added alongside the six must never be treated as

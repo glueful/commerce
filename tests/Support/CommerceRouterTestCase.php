@@ -24,6 +24,7 @@ use Glueful\Extensions\Commerce\Marketplace\MarketplaceWorkspaceLock;
 use Glueful\Extensions\Commerce\Marketplace\PayoutAccountRepository;
 use Glueful\Extensions\Commerce\Marketplace\PayoutRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerBalanceService;
+use Glueful\Extensions\Commerce\Marketplace\SellerLifecycleEventRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipService;
 use Glueful\Extensions\Commerce\Marketplace\SellerOrderFulfillmentService;
@@ -212,7 +213,11 @@ abstract class CommerceRouterTestCase extends CommerceTestCase
 
     protected function sellerService(): SellerService
     {
-        return new SellerService(new SellerRepository(), new SellerMembershipRepository());
+        return new SellerService(
+            new SellerRepository(),
+            new SellerMembershipRepository(),
+            new SellerLifecycleEventRepository()
+        );
     }
 
     protected function membershipService(): SellerMembershipService

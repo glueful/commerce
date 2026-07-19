@@ -10,6 +10,7 @@ use Glueful\Extensions\Commerce\Catalog\ProductRepository;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceActivationException;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceWorkspaceLock;
 use Glueful\Extensions\Commerce\Marketplace\SellerAttributionException;
+use Glueful\Extensions\Commerce\Marketplace\SellerLifecycleEventRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipException;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipService;
@@ -583,7 +584,11 @@ final class MarketplacePgsqlTest extends CommerceTestCase
         string $slug,
         string $ownerUserUuid
     ): array {
-        return (new SellerService(new SellerRepository(), new SellerMembershipRepository()))->create(
+        return (new SellerService(
+            new SellerRepository(),
+            new SellerMembershipRepository(),
+            new SellerLifecycleEventRepository()
+        ))->create(
             $context,
             $tenant,
             $slug,

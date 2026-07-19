@@ -6,6 +6,7 @@ namespace Glueful\Extensions\Commerce\Tests\Integration\Marketplace;
 
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Database\Connection;
+use Glueful\Extensions\Commerce\Marketplace\SellerLifecycleEventRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerOrderPaymentConfirmation;
 use Glueful\Extensions\Commerce\Marketplace\SellerOrderRepository;
@@ -321,7 +322,11 @@ final class FulfillmentPgsqlTest extends CommerceTestCase
         string $slug,
         string $ownerUserUuid
     ): array {
-        return (new SellerService(new SellerRepository(), new SellerMembershipRepository()))->create(
+        return (new SellerService(
+            new SellerRepository(),
+            new SellerMembershipRepository(),
+            new SellerLifecycleEventRepository()
+        ))->create(
             $context,
             $tenant,
             $slug,

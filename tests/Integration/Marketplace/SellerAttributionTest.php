@@ -13,6 +13,7 @@ use Glueful\Extensions\Commerce\Inventory\StockRepository;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceWorkspaceLock;
 use Glueful\Extensions\Commerce\Marketplace\SellerAttributionException;
 use Glueful\Extensions\Commerce\Marketplace\SellerAttributionService;
+use Glueful\Extensions\Commerce\Marketplace\SellerLifecycleEventRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerService;
@@ -142,7 +143,7 @@ final class SellerAttributionTest extends CommerceTestCase
     {
         $product = $this->seedProduct('suspended-target');
         $seller = $this->seedActiveSeller('suspended-target-seller');
-        $this->sellerService()->suspend($this->context, self::TENANT, $seller['uuid']);
+        $this->sellerService()->suspend($this->context, self::TENANT, $seller['uuid'], 'Under review.', 'operator01');
 
         $this->expectException(SellerAttributionException::class);
         $this->service()->assign($this->context, self::TENANT, $product['uuid'], $seller['uuid']);
@@ -172,7 +173,11 @@ final class SellerAttributionTest extends CommerceTestCase
 
     private function sellerService(): SellerService
     {
-        return new SellerService(new SellerRepository(), new SellerMembershipRepository());
+        return new SellerService(
+            new SellerRepository(),
+            new SellerMembershipRepository(),
+            new SellerLifecycleEventRepository()
+        );
     }
 
     /** @return array<string,mixed> */

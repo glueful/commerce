@@ -8,6 +8,7 @@ use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Database\Connection;
 use Glueful\Extensions\Commerce\Catalog\ProductRepository;
 use Glueful\Extensions\Commerce\Marketplace\CheckoutConflictException;
+use Glueful\Extensions\Commerce\Marketplace\SellerLifecycleEventRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerLifecycleException;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerOrderRepository;
@@ -365,7 +366,8 @@ final class CheckoutClaimPgsqlTest extends CommerceTestCase
         $handle = $this->launchRaceChild($pgConfig, 'close', [
             'tenant' => $tenant,
             'sellerUuid' => $seller['uuid'],
-            'actor' => null,
+            'reason' => 'Live-product close race probe.',
+            'actor' => 'raceCloser01',
         ]);
 
         usleep(300_000);
@@ -513,7 +515,11 @@ final class CheckoutClaimPgsqlTest extends CommerceTestCase
         string $slug,
         string $ownerUserUuid
     ): array {
-        return (new SellerService(new SellerRepository(), new SellerMembershipRepository()))->create(
+        return (new SellerService(
+            new SellerRepository(),
+            new SellerMembershipRepository(),
+            new SellerLifecycleEventRepository()
+        ))->create(
             $context,
             $tenant,
             $slug,

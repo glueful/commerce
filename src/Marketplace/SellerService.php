@@ -28,16 +28,31 @@ use Glueful\Validation\ValidationException;
  * {@see \Glueful\Extensions\Commerce\Catalog\CatalogService} uses for
  * `commerce_products.catalog_revision`.
  *
- * Lifecycle: create always lands directly on `active` (`onboarding` is
- * reserved for MV4, unused here). suspend requires the current status to be
- * `active`; reactivate requires `suspended`; both raise
- * {@see SellerLifecycleException} (409) otherwise. close is blocked (409)
- * while the seller owns any non-deleted product
+ * Lifecycle (design spec §2.1/§2.2, MV5b Task 2): create always lands
+ * directly on `active` (`onboarding` is reserved for MV4, unused here).
+ * suspend/reactivate/close now REQUIRE a non-empty `$reason` and a
+ * non-empty `$actor` -- validated FIRST, before any claim or write
+ * ({@see self::guardReasonAndActor()}, a 422 {@see ValidationException}).
+ * suspend requires the current status to be `active`; reactivate requires
+ * `suspended`. Re-suspending an already-`suspended` seller (or
+ * re-activating an already-`active` one) is a STABLE NO-OP -- it returns
+ * the current row, writes NO status change and NO audit event, and is
+ * checked BEFORE the `allowedFrom` guard so a same-state call never 409s.
+ * Any other incompatible transition (a terminally `closed` seller, or
+ * `onboarding -> suspended`) raises {@see SellerLifecycleException} (409).
+ * close is blocked (409) while the seller owns any non-deleted product
  * ({@see SellerRepository::hasLiveProducts()}); once clear it is the ONLY
  * transition allowed to retire the seller's final owner -- it atomically
  * marks the seller `closed` AND revokes every currently-active membership
  * via {@see SellerMembershipRepository::deactivateAllForSeller()}, in the
  * SAME transaction as the claim.
+ *
+ * Every successful suspend/reactivate/close writes an append-only
+ * {@see SellerLifecycleEventRepository} row (`from_status`, `to_status`,
+ * `actor_uuid`, `reason`) in the SAME transaction as the `status` write
+ * (design spec §2.2) -- a failure appending that row (e.g. a forced
+ * audit-uuid collision) rolls back the status change too. There is no
+ * such thing as an unaudited lifecycle transition.
  */
 final class SellerService
 {
@@ -46,14 +61,17 @@ final class SellerService
 
     /**
      * @param (callable(): string)|null $uuidGenerator Injectable seam for tests
-     *     forcing a create()-time uuid collision on the membership insert (see
-     *     {@see MarketplaceWorkspaceLock}'s identical convention) -- proves the
-     *     seller+first-owner-membership write is atomic. Defaults to the house
+     *     forcing a create()-time uuid collision on the membership insert, or a
+     *     lifecycle-transition-time uuid collision on the audit-event insert
+     *     (see {@see MarketplaceWorkspaceLock}'s identical convention) -- proves
+     *     both the seller+first-owner-membership write and the
+     *     status+audit-event write are atomic. Defaults to the house
      *     {@see Utils::generateNanoID()} generator.
      */
     public function __construct(
         private SellerRepository $sellers,
         private SellerMembershipRepository $memberships,
+        private SellerLifecycleEventRepository $lifecycleEvents,
         ?callable $uuidGenerator = null,
         private ?CommissionPolicyService $commissionPolicy = null,
     ) {
@@ -225,30 +243,41 @@ final class SellerService
     }
 
     /** @return array<string,mixed> */
-    public function suspend(ApplicationContext $c, string $tenant, string $uuid, ?string $actor = null): array
+    public function suspend(ApplicationContext $c, string $tenant, string $uuid, string $reason, string $actor): array
     {
-        return $this->transition($c, $tenant, $uuid, ['active'], 'suspended');
+        return $this->transition($c, $tenant, $uuid, 'active', 'suspended', $reason, $actor);
     }
 
     /** @return array<string,mixed> */
-    public function reactivate(ApplicationContext $c, string $tenant, string $uuid, ?string $actor = null): array
-    {
-        return $this->transition($c, $tenant, $uuid, ['suspended'], 'active');
+    public function reactivate(
+        ApplicationContext $c,
+        string $tenant,
+        string $uuid,
+        string $reason,
+        string $actor
+    ): array {
+        return $this->transition($c, $tenant, $uuid, 'suspended', 'active', $reason, $actor);
     }
 
     /**
      * The only transition allowed to retire the seller's final owner (design
      * spec §2.4): blocked with 409 while the seller owns any non-deleted
-     * product; once clear, atomically marks the seller `closed` AND revokes
-     * every currently-active membership -- both writes in the SAME
-     * transaction as the claim, so a failure on either leaves the seller and
-     * its memberships exactly as they were.
+     * product; once clear, atomically marks the seller `closed`, revokes
+     * every currently-active membership, AND appends the lifecycle-audit row
+     * (design spec §2.2) -- all three writes in the SAME transaction as the
+     * claim, so a failure on any of them leaves the seller, its memberships,
+     * and its audit trail exactly as they were.
+     *
+     * `$reason`/`$actor` are validated FIRST via
+     * {@see self::guardReasonAndActor()} -- a 422 before any claim.
      *
      * @return array<string,mixed>
      */
-    public function close(ApplicationContext $c, string $tenant, string $uuid, ?string $actor = null): array
+    public function close(ApplicationContext $c, string $tenant, string $uuid, string $reason, string $actor): array
     {
-        return db($c)->transaction(function () use ($c, $tenant, $uuid): array {
+        $this->guardReasonAndActor($reason, $actor);
+
+        return db($c)->transaction(function () use ($c, $tenant, $uuid, $reason, $actor): array {
             if (!$this->sellers->claimRevision($c, $tenant, $uuid)) {
                 throw new NotFoundException('Resource not found.');
             }
@@ -258,7 +287,9 @@ final class SellerService
                 throw new NotFoundException('Resource not found.');
             }
 
-            if ((string) $current['status'] === 'closed') {
+            $currentStatus = (string) $current['status'];
+
+            if ($currentStatus === 'closed') {
                 throw new SellerLifecycleException('Seller is already closed.');
             }
 
@@ -271,6 +302,15 @@ final class SellerService
             $this->sellers->update($c, $tenant, $uuid, ['status' => 'closed']);
             $this->memberships->deactivateAllForSeller($c, $tenant, $uuid);
 
+            $this->lifecycleEvents->insert($c, $tenant, [
+                'uuid' => ($this->uuidGenerator)(),
+                'seller_uuid' => $uuid,
+                'from_status' => $currentStatus,
+                'to_status' => 'closed',
+                'actor_uuid' => $actor,
+                'reason' => $reason,
+            ]);
+
             $seller = $this->sellers->findByUuid($c, $tenant, $uuid);
             if ($seller === null) {
                 throw new \RuntimeException('Closed seller could not be reloaded.');
@@ -281,22 +321,51 @@ final class SellerService
     }
 
     /**
+     * `$reason`/`$actor` are non-empty, or this throws a 422
+     * {@see ValidationException} -- design spec §2.1, checked BEFORE the
+     * caller opens any transaction or claims any row.
+     */
+    private function guardReasonAndActor(string $reason, string $actor): void
+    {
+        if (trim($reason) === '') {
+            throw ValidationException::forField('reason', 'reason is required.');
+        }
+        if (trim($actor) === '') {
+            throw ValidationException::forField('actor', 'actor is required.');
+        }
+    }
+
+    /**
      * Shared claim -> post-claim-re-read -> status-guarded transition body
      * for suspend()/reactivate(): the SAME `claimRevision()` primitive
      * close() uses, applied to a two-state transition instead of the
      * products/memberships compound write.
      *
-     * @param list<string> $allowedFrom
+     * Design spec §2.1: `$reason`/`$actor` are validated FIRST (422 before
+     * any claim). Once claimed, a seller ALREADY at `$to` is a STABLE NO-OP
+     * -- returned as-is, no status write, no audit event -- checked BEFORE
+     * the `$from` guard so a same-state call never 409s. Any other status
+     * (including `$to`'s own reverse-direction terminal states, e.g. a
+     * `closed` seller) is an incompatible transition -- 409. A successful
+     * transition writes the new status AND appends the lifecycle-audit row
+     * in the SAME transaction as the claim (design spec §2.2) -- a failure
+     * appending that row (e.g. a forced audit-uuid collision) rolls back the
+     * status write too.
+     *
      * @return array<string,mixed>
      */
     private function transition(
         ApplicationContext $c,
         string $tenant,
         string $uuid,
-        array $allowedFrom,
-        string $to
+        string $from,
+        string $to,
+        string $reason,
+        string $actor
     ): array {
-        return db($c)->transaction(function () use ($c, $tenant, $uuid, $allowedFrom, $to): array {
+        $this->guardReasonAndActor($reason, $actor);
+
+        return db($c)->transaction(function () use ($c, $tenant, $uuid, $from, $to, $reason, $actor): array {
             if (!$this->sellers->claimRevision($c, $tenant, $uuid)) {
                 throw new NotFoundException('Resource not found.');
             }
@@ -306,13 +375,28 @@ final class SellerService
                 throw new NotFoundException('Resource not found.');
             }
 
-            if (!in_array((string) $current['status'], $allowedFrom, true)) {
+            $currentStatus = (string) $current['status'];
+
+            if ($currentStatus === $to) {
+                return $current;
+            }
+
+            if ($currentStatus !== $from) {
                 throw new SellerLifecycleException(
-                    "Seller is '{$current['status']}'; cannot transition to '{$to}'."
+                    "Seller is '{$currentStatus}'; cannot transition to '{$to}'."
                 );
             }
 
             $this->sellers->update($c, $tenant, $uuid, ['status' => $to]);
+
+            $this->lifecycleEvents->insert($c, $tenant, [
+                'uuid' => ($this->uuidGenerator)(),
+                'seller_uuid' => $uuid,
+                'from_status' => $currentStatus,
+                'to_status' => $to,
+                'actor_uuid' => $actor,
+                'reason' => $reason,
+            ]);
 
             $seller = $this->sellers->findByUuid($c, $tenant, $uuid);
             if ($seller === null) {

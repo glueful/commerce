@@ -40,10 +40,12 @@ use Glueful\Extensions\Commerce\Marketplace\MarketplaceActivationService;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceMode;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceWorkspaceLock;
 use Glueful\Extensions\Commerce\Marketplace\SellerAttributionService;
+use Glueful\Extensions\Commerce\Marketplace\SellerLifecycleEventRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipService;
 use Glueful\Extensions\Commerce\Marketplace\SellerOrderRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerService;
 use Glueful\Extensions\Commerce\Orders\CheckoutService;
 use Glueful\Extensions\Commerce\Orders\OrderNumberGenerator;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
@@ -172,11 +174,18 @@ try {
             break;
 
         case 'close':
-            $sellers = new \Glueful\Extensions\Commerce\Marketplace\SellerService(
+            $sellers = new SellerService(
                 new SellerRepository(),
-                new SellerMembershipRepository()
+                new SellerMembershipRepository(),
+                new SellerLifecycleEventRepository()
             );
-            $seller = $sellers->close($context, $tenant, (string) $args['sellerUuid'], $args['actor'] ?? null);
+            $seller = $sellers->close(
+                $context,
+                $tenant,
+                (string) $args['sellerUuid'],
+                (string) $args['reason'],
+                (string) $args['actor']
+            );
             $out = ['ok' => true, 'closed' => true, 'status' => $seller['status'], 'exceptionClass' => null];
             break;
 

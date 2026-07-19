@@ -130,6 +130,95 @@ final class TenantAdopterTest extends CommerceTestCase
         );
     }
 
+    /**
+     * Design spec §3: `commerce_seller_lifecycle_events` (MV5b, migration 017)
+     * is marketplace-aware regardless of the master switch, exactly like the
+     * MV1-MV5a tables above -- {@see \Glueful\Extensions\Commerce\Support\DiagnosticsReport::tenantTables()}
+     * lists it unconditionally, so `TenantAdopter` rekeys it too, switch off
+     * or on.
+     */
+    public function testAdoptRekeysSellerLifecycleEventsTableEvenWhenTheMasterSwitchIsOff(): void
+    {
+        self::assertFalse(
+            (bool) config($this->context, 'commerce.marketplace.enabled', false),
+            'this test relies on the master switch being off (the default)'
+        );
+
+        $this->connection->table('commerce_seller_lifecycle_events')->insert([
+            'uuid' => 'mktadoptlev1',
+            'tenant_uuid' => '',
+            'seller_uuid' => 'mktadoptsel1',
+            'from_status' => 'active',
+            'to_status' => 'suspended',
+            'actor_uuid' => 'operatoradopt1',
+            'reason' => 'Sentinel adoption fixture.',
+        ]);
+
+        $result = (new TenantAdopter())->adopt($this->context, 'tenantMKT0003');
+
+        self::assertSame(1, $result['tables']['commerce_seller_lifecycle_events']);
+        self::assertSame(
+            0,
+            $this->connection->table('commerce_seller_lifecycle_events')
+                ->where('tenant_uuid', '=', '')->count(),
+            'commerce_seller_lifecycle_events must have no sentinel rows left behind'
+        );
+        self::assertSame(
+            1,
+            $this->connection->table('commerce_seller_lifecycle_events')
+                ->where('tenant_uuid', '=', 'tenantMKT0003')->count(),
+            'commerce_seller_lifecycle_events row must be rekeyed to the adopted tenant'
+        );
+    }
+
+    /**
+     * Cross-tenant isolation safety net (design spec §5/§6, mirroring
+     * {@see testAdoptRekeysSentinelRowsAndRefusesMixedData}'s "refuses mixed
+     * data" proof for `commerce_products`): a `commerce_seller_lifecycle_events`
+     * row already keyed to a DIFFERENT, already-resolved tenant must never be
+     * silently rekeyed by a later `adopt()` call targeting a new tenant --
+     * the shared mixed-data guard must refuse, and the row must stay exactly
+     * as it was.
+     */
+    public function testAdoptRefusesAndLeavesCrossTenantSellerLifecycleEventsRowIsolated(): void
+    {
+        $this->connection->table('commerce_seller_lifecycle_events')->insert([
+            'uuid' => 'mktadoptlev2',
+            'tenant_uuid' => 'tenantOTHER01',
+            'seller_uuid' => 'mktadoptsel2',
+            'from_status' => 'active',
+            'to_status' => 'suspended',
+            'actor_uuid' => 'operatoradopt2',
+            'reason' => 'Cross-tenant control row.',
+        ]);
+
+        // The assertion is made OUTSIDE the try/catch on purpose: PHPUnit's
+        // own self::fail() throws AssertionFailedError, which extends
+        // \RuntimeException, so a self::fail() call placed inside a
+        // `catch (\RuntimeException)` block would be silently swallowed by
+        // that same catch and falsely reported as a pass.
+        $refused = false;
+        try {
+            (new TenantAdopter())->adopt($this->context, 'tenantMKT0004');
+        } catch (\RuntimeException) {
+            $refused = true;
+        }
+        self::assertTrue(
+            $refused,
+            'adopt() must refuse when commerce_seller_lifecycle_events already contains another tenant\'s row'
+        );
+
+        $row = $this->connection->table('commerce_seller_lifecycle_events')
+            ->where('uuid', '=', 'mktadoptlev2')
+            ->first();
+        self::assertNotNull($row);
+        self::assertSame(
+            'tenantOTHER01',
+            $row['tenant_uuid'],
+            'a row already keyed to another tenant must remain untouched by a refused adoption'
+        );
+    }
+
     private function seedSentinelCatalog(): void
     {
         (new CatalogService(

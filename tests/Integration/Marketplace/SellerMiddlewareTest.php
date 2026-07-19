@@ -262,7 +262,7 @@ final class SellerMiddlewareTest extends CommerceRouterTestCase
     {
         $seller = $this->seedSeller('suspended-gate', 'ownerUser11');
         $product = $this->seedProduct($seller['uuid'], 'suspended-gate-p');
-        $this->sellerService()->suspend($this->context, $this->tenant, $seller['uuid']);
+        $this->sellerService()->suspend($this->context, $this->tenant, $seller['uuid'], 'Under review.', 'operator01');
 
         $router = $this->freshRouter();
 

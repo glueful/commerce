@@ -15,6 +15,7 @@ use Glueful\Extensions\Commerce\Inventory\StockRepository;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceMode;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceWorkspaceLock;
 use Glueful\Extensions\Commerce\Marketplace\SellerAttributionException;
+use Glueful\Extensions\Commerce\Marketplace\SellerLifecycleEventRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerService;
@@ -144,7 +145,7 @@ final class CatalogOwnershipTest extends CommerceTestCase
         $this->enableMarketplace();
         $this->activateWorkspace(self::TENANT);
         $seller = $this->seedActiveSeller('suspended-goods');
-        $this->sellerService()->suspend($this->context, self::TENANT, $seller['uuid']);
+        $this->sellerService()->suspend($this->context, self::TENANT, $seller['uuid'], 'Under review.', 'operator01');
 
         $this->expectException(SellerAttributionException::class);
         $this->marketplaceCatalog()->createProduct(
@@ -159,7 +160,7 @@ final class CatalogOwnershipTest extends CommerceTestCase
         $this->enableMarketplace();
         $this->activateWorkspace(self::TENANT);
         $seller = $this->seedActiveSeller('closed-goods');
-        $this->sellerService()->close($this->context, self::TENANT, $seller['uuid']);
+        $this->sellerService()->close($this->context, self::TENANT, $seller['uuid'], 'Shutting down.', 'operator01');
 
         $this->expectException(SellerAttributionException::class);
         $this->marketplaceCatalog()->createProduct(
@@ -370,7 +371,11 @@ final class CatalogOwnershipTest extends CommerceTestCase
 
     private function sellerService(): SellerService
     {
-        return new SellerService(new SellerRepository(), new SellerMembershipRepository());
+        return new SellerService(
+            new SellerRepository(),
+            new SellerMembershipRepository(),
+            new SellerLifecycleEventRepository()
+        );
     }
 
     private function legacyCatalog(): CatalogService

@@ -9,6 +9,7 @@ use Glueful\Extensions\Commerce\Marketplace\MarketplaceActivationException;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceActivationService;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceWorkspaceLock;
 use Glueful\Extensions\Commerce\Marketplace\SellerAttributionException;
+use Glueful\Extensions\Commerce\Marketplace\SellerLifecycleEventRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerService;
@@ -145,7 +146,7 @@ final class ActivationTest extends CommerceTestCase
     public function testActivateWithSuspendedDefaultSellerIs409(): void
     {
         $seller = $this->seedActiveSeller('suspended-default');
-        $this->sellerService()->suspend($this->context, self::TENANT, $seller['uuid']);
+        $this->sellerService()->suspend($this->context, self::TENANT, $seller['uuid'], 'Under review.', 'operator01');
 
         $this->expectException(SellerAttributionException::class);
         $this->service()->activate($this->context, self::TENANT, $seller['uuid']);
@@ -174,7 +175,11 @@ final class ActivationTest extends CommerceTestCase
 
     private function sellerService(): SellerService
     {
-        return new SellerService(new SellerRepository(), new SellerMembershipRepository());
+        return new SellerService(
+            new SellerRepository(),
+            new SellerMembershipRepository(),
+            new SellerLifecycleEventRepository()
+        );
     }
 
     /** @return array<string,mixed> */
