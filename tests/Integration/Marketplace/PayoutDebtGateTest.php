@@ -14,6 +14,7 @@ use Glueful\Extensions\Commerce\Marketplace\PayoutException;
 use Glueful\Extensions\Commerce\Marketplace\PayoutRepository;
 use Glueful\Extensions\Commerce\Marketplace\PayoutService;
 use Glueful\Extensions\Commerce\Marketplace\SellerBalanceService;
+use Glueful\Extensions\Commerce\Marketplace\SellerRepository;
 use Glueful\Extensions\Commerce\Tests\Support\CommerceTestCase;
 use Glueful\Extensions\Contracts\Payments\DestinationStatus;
 use Glueful\Extensions\Contracts\Payments\PayoutCollector;
@@ -59,6 +60,7 @@ final class PayoutDebtGateTest extends CommerceTestCase
             $this->ledger,
             new LedgerAccountLock(),
             $this->balances,
+            new SellerRepository(),
             null,
             $collector,
             new PayoutAccountService($this->payoutAccounts)

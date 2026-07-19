@@ -669,7 +669,8 @@ final class ReconciliationTest extends CommerceTestCase
             new PayoutRepository(),
             $ledger,
             new LedgerAccountLock(),
-            new SellerBalanceService($ledger)
+            new SellerBalanceService($ledger),
+            new SellerRepository()
         );
     }
 

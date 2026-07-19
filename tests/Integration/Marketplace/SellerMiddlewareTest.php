@@ -13,9 +13,19 @@ use Symfony\Component\HttpFoundation\Request;
  * non-revealing 404 for unknown seller / no membership / cross-seller /
  * revoked membership (all four must be the SAME response, never
  * distinguishable from one another), body-supplied `seller_uuid` smuggling,
- * the suspended/closed mutation-409-but-read-OK posture, the workspace-
+ * the `closed` seller's mutation-409-but-read-OK posture, the workspace-
  * inactive 409, and the `auth -> tenant -> commerce_seller` (tenancy
  * enabled) / `auth -> commerce_seller` (sentinel) ordering.
+ *
+ * A `suspended` seller's own posture -- stable 409 on EVERY unmarked route
+ * regardless of HTTP method, and the `allow_suspended` opt-in for the
+ * minimum order-fulfillment + financial-read surface -- is design spec
+ * §2.6 (MV5b Task 5), exhaustively covered by
+ * {@see \Glueful\Extensions\Commerce\Tests\Integration\Marketplace\SuspendedSellerAuthorizationTest}.
+ * This file keeps only the single representative case below (an unmarked
+ * route on a suspended seller is 409 on BOTH a read and a mutation) to
+ * prove it didn't regress the rest of this file's ordering/non-revealing
+ * assertions.
  */
 final class SellerMiddlewareTest extends CommerceRouterTestCase
 {
@@ -255,10 +265,13 @@ final class SellerMiddlewareTest extends CommerceRouterTestCase
     }
 
     // -----------------------------------------------------------------
-    // Suspended / closed seller: mutations 409, reads OK.
+    // Suspended seller: EVERY unmarked route is 409, regardless of method
+    // (design spec §2.6, MV5b Task 5 -- see SuspendedSellerAuthorizationTest
+    // for the exhaustive coverage of the `allow_suspended` opt-in surface).
+    // Closed seller: mutations 409, reads OK (unchanged).
     // -----------------------------------------------------------------
 
-    public function testSuspendedSellerBlocksMutationsButAllowsReads(): void
+    public function testSuspendedSellerBlocksBothReadsAndMutationsOnAnUnmarkedRoute(): void
     {
         $seller = $this->seedSeller('suspended-gate', 'ownerUser11');
         $product = $this->seedProduct($seller['uuid'], 'suspended-gate-p');
@@ -271,7 +284,11 @@ final class SellerMiddlewareTest extends CommerceRouterTestCase
             'GET',
             "/commerce/seller/{$seller['uuid']}/products/{$product['uuid']}"
         ));
-        self::assertSame(200, $readResponse->getStatusCode(), 'reads stay available while suspended');
+        self::assertSame(
+            409,
+            $readResponse->getStatusCode(),
+            'an unmarked route is fail-closed on reads too while suspended -- no more method-based allowance'
+        );
 
         $writeResponse = $this->dispatch($router, $this->requestAs(
             'ownerUser11',

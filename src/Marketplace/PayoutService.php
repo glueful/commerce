@@ -61,6 +61,30 @@ use Glueful\Http\Exceptions\Client\NotFoundException;
  * {@see \Glueful\Extensions\Commerce\Tests\Integration\Marketplace\PayoutTest})
  * stays source-compatible; `record()` (the MV3 manual path) never reads
  * either.
+ *
+ * MV5b Task 6 (design spec §2.7) adds a REQUIRED {@see SellerRepository}
+ * dependency and, with it, a suspended-seller payout freeze -- NEW payout
+ * creation only, never in-flight continuation. Inside BOTH {@see self::record()}'s
+ * and {@see self::reserve()}'s transaction, the order is strict: **claim the
+ * seller revision ({@see SellerRepository::claimRevision()}) -> re-read the
+ * seller -> [record() only: repeat the idempotency lookup and return a
+ * verified replay if found, even for a non-active seller] -> refuse a
+ * non-active seller -> THEN claim the seller/currency ledger account lock**.
+ * `claimRevision()` is the SAME primitive {@see SellerService::suspend()}/
+ * `reactivate()` claims for the identical seller row, so a new-payout
+ * transaction and a concurrent suspend()/reactivate() are strictly
+ * serialized against one another -- never interleaved: whichever commits
+ * first is authoritative, and since the revision claim happens BEFORE the
+ * account lock, a suspended seller is refused (or, for a batch derive-in-lock
+ * candidate, silently skipped) WITHOUT ever claiming that lock or posting
+ * anything. A `seller_uuid` with NO matching `commerce_sellers` row --
+ * `claimRevision()` affects zero rows -- is untracked by the marketplace
+ * lifecycle and is never gated by this check, which keeps every pre-MV5b
+ * caller that never registered a seller entity (raw ledger-account payouts,
+ * marketplace-off paths) byte-identical. `retry()`/`reconcile()` never enter
+ * this gate at all -- an already-reserved/committed payout continues
+ * regardless of the seller's CURRENT status (design spec §2.7: suspension is
+ * prospective, never cancels or strands in-flight money).
  */
 final class PayoutService
 {
@@ -74,6 +98,12 @@ final class PayoutService
      *     {@see LedgerException} that proves atomicity); defaults to the house
      *     {@see Utils::generateNanoID()} generator, the same idiom
      *     {@see MarketplaceWorkspaceLock} already establishes.
+     * @param SellerRepository $sellers REQUIRED (MV5b Task 6, design spec §2.7) -- the shared
+     *     revision-claim serialization primitive against a concurrent suspend()/reactivate(),
+     *     and the source of the seller's CURRENT status for the new-payout freeze gate. Placed
+     *     BEFORE the optional seams below (never hidden behind a container lookup or a
+     *     nullable fallback): every direct constructor call site, test or production, must
+     *     supply one.
      * @param ?PayoutCollector $collector soft-bound provider-payout port (design spec §2.9);
      *     null keeps `execute()` unavailable (422) while `record()`/ledger semantics stay
      *     fully functional.
@@ -86,6 +116,7 @@ final class PayoutService
         private readonly LedgerRepository $ledger,
         private readonly LedgerAccountLock $lock,
         private readonly SellerBalanceService $balances,
+        private readonly SellerRepository $sellers,
         ?callable $uuidGenerator = null,
         private readonly ?PayoutCollector $collector = null,
         private readonly ?PayoutAccountService $payoutAccounts = null,
@@ -142,6 +173,48 @@ final class PayoutService
                 $note,
                 $actorUuid
             ): array {
+                // MV5b Task 6 (design spec §2.7): claim the seller revision FIRST -- strictly
+                // before the account lock below -- the SAME primitive SellerService::suspend()/
+                // reactivate() claims for this exact seller row, so this transaction and a
+                // concurrent lifecycle transition are strictly serialized (never interleaved).
+                // A seller_uuid with no commerce_sellers row (claimRevision() affects zero rows)
+                // is untracked by the marketplace lifecycle and is never gated below -- every
+                // pre-MV5b caller with no registered seller entity stays byte-identical.
+                $this->sellers->claimRevision($context, $tenant, $sellerUuid);
+                $seller = $this->sellers->findByUuid($context, $tenant, $sellerUuid);
+
+                // The concurrent preflight-miss/suspension/replay race (design spec §2.7): this
+                // call's OWN up-front findByIdempotencyKey() (above, outside this transaction)
+                // may have missed because the request that actually WON this exact idempotency
+                // key had not committed yet. Repeating the lookup now -- AFTER the revision claim
+                // just serialized against any concurrent suspend() -- catches that already-
+                // committed row and returns its VERIFIED replay even when the seller is now
+                // non-active: an already-paid manual payout is honored no matter when suspension
+                // lands, never re-refused as a fresh-payout lifecycle error.
+                $existingInTxn = $this->payouts->findByIdempotencyKey($context, $tenant, $idempotencyKey);
+                if ($existingInTxn !== null) {
+                    return $this->verifyReplay(
+                        $context,
+                        $tenant,
+                        $existingInTxn,
+                        $sellerUuid,
+                        $currency,
+                        $amount,
+                        $externalRef,
+                        $note,
+                        $actorUuid
+                    );
+                }
+
+                if ($seller !== null && (string) $seller['status'] !== 'active') {
+                    throw new PayoutException(sprintf(
+                        "Payout refused: seller %s is '%s', not active; new payouts are frozen while a "
+                            . 'seller is not active.',
+                        $sellerUuid,
+                        (string) $seller['status']
+                    ));
+                }
+
                 $accountKey = LedgerRepository::accountKeyForSeller($sellerUuid);
                 $this->lock->claim($context, $tenant, $accountKey, $currency);
 
@@ -526,6 +599,29 @@ final class PayoutService
             $actorUuid,
             $account
         ): ?array {
+            // MV5b Task 6 (design spec §2.7): same revision-claim-first serialization as
+            // record() -- strictly before the account lock below. A non-active seller is
+            // refused (an explicit provider payout, $amount !== null) or silently SKIPPED
+            // (the batch derive-in-lock path, $amount === null -- an independent-per-candidate
+            // skip, exactly like the debt/below-minimum skips further down, never a failure).
+            // A seller_uuid with no commerce_sellers row is untracked and never gated, same as
+            // record().
+            $this->sellers->claimRevision($context, $tenant, $sellerUuid);
+            $seller = $this->sellers->findByUuid($context, $tenant, $sellerUuid);
+
+            if ($seller !== null && (string) $seller['status'] !== 'active') {
+                if ($amount === null) {
+                    return null;
+                }
+
+                throw new PayoutException(sprintf(
+                    "Payout refused: seller %s is '%s', not active; new payouts are frozen while a "
+                        . 'seller is not active.',
+                    $sellerUuid,
+                    (string) $seller['status']
+                ));
+            }
+
             $accountKey = LedgerRepository::accountKeyForSeller($sellerUuid);
             $this->lock->claim($context, $tenant, $accountKey, $currency);
 

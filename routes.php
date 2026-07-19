@@ -465,6 +465,15 @@ if ($marketplaceEnabled) {
         $ordersFulfill = 'commerce_seller:commerce.seller.orders.fulfill';
         $reportsRead = 'commerce_seller:commerce.seller.reports.read';
         $payoutsRead = 'commerce_seller:commerce.seller.payouts.read';
+        // Suspended-seller minimum fulfillment + financial-read surface
+        // (design spec §2.6, MV5b Task 5): the explicit `allow_suspended`
+        // second middleware parameter -- see SellerMemberMiddleware's own
+        // docblock for the exact Router::resolveMiddleware() parsing this
+        // relies on. ONLY these 5 routes opt in; every other seller route
+        // stays fail-closed (409) for a suspended seller, including reads.
+        $ordersReadAllowSuspended = 'commerce_seller:commerce.seller.orders.read,allow_suspended';
+        $ordersFulfillAllowSuspended = 'commerce_seller:commerce.seller.orders.fulfill,allow_suspended';
+        $reportsReadAllowSuspended = 'commerce_seller:commerce.seller.reports.read,allow_suspended';
 
         $router->get('/mine', [SellerMembershipController::class, 'mine']);
 
@@ -500,27 +509,32 @@ if ($marketplaceEnabled) {
         // SellerOrderService/SellerOrderFulfillmentService layer, never here --
         // this middleware only authorizes the caller against the route
         // {sellerUuid}, exactly like every other seller-scoped route above.
+        // `allow_suspended` (design spec §2.6, MV5b Task 5): list/detail/
+        // fulfill (incl. tracking) are part of the minimum surface a
+        // suspended seller's member may still reach.
         $router->get('/{sellerUuid}/orders', [SellerOrderController::class, 'index'])
-            ->middleware($ordersRead);
+            ->middleware($ordersReadAllowSuspended);
         $router->get('/{sellerUuid}/orders/{sellerOrderUuid}', [SellerOrderController::class, 'show'])
-            ->middleware($ordersRead);
+            ->middleware($ordersReadAllowSuspended);
         $router->post('/{sellerUuid}/orders/{sellerOrderUuid}/fulfill', [SellerOrderController::class, 'fulfill'])
-            ->middleware($ordersFulfill);
+            ->middleware($ordersFulfillAllowSuspended);
 
         // Seller financial surfaces (design spec §6.2, MV3 Task 11): windowed
         // report, live balance + components, payouts, and the effective
         // commission policy -- all read-only, own seller only. `reports.read`
         // gates report/balance/commission-policy; `payouts.read` gates payouts
         // (design spec §6.2 -- commission-policy read folds into `reports.read`).
+        // Only balance/reserves carry `allow_suspended` (design spec §2.6,
+        // MV5b Task 5) -- the windowed report and commission-policy do NOT.
         $router->get('/{sellerUuid}/financials/report', [SellerFinancialController::class, 'report'])
             ->middleware($reportsRead);
         $router->get('/{sellerUuid}/financials/balance', [SellerFinancialController::class, 'balance'])
-            ->middleware($reportsRead);
+            ->middleware($reportsReadAllowSuspended);
         // Reserves + upcoming releases + debt (design spec §6, MV5a Task 16): SANITIZED
         // allow-list projection, own seller only -- same gate as the balance/report
         // reads above.
         $router->get('/{sellerUuid}/financials/reserves', [SellerFinancialController::class, 'reserves'])
-            ->middleware($reportsRead);
+            ->middleware($reportsReadAllowSuspended);
         $router->get('/{sellerUuid}/payouts', [SellerFinancialController::class, 'payouts'])
             ->middleware($payoutsRead);
         // Payout-DESTINATION readiness (design spec §6.2/§2.7, MV4 Task 10): provider/state/

@@ -979,7 +979,7 @@ final class MarketplaceRegressionTest extends CommerceTestCase
         // No PayoutCollector, no PayoutAccountService -- exactly the "marketplace off,
         // provider unbound" host configuration this whole file proves invariance under;
         // the manual path never reads either collaborator.
-        $service = new PayoutService($payouts, $ledger, new LedgerAccountLock(), $balances);
+        $service = new PayoutService($payouts, $ledger, new LedgerAccountLock(), $balances, new SellerRepository());
 
         $seller = 'regressplr001';
         $ledger->post($this->context, self::TENANT, [
@@ -1036,7 +1036,7 @@ final class MarketplaceRegressionTest extends CommerceTestCase
         $ledger = new LedgerRepository();
         $payouts = new PayoutRepository();
         $balances = new SellerBalanceService($ledger);
-        $service = new PayoutService($payouts, $ledger, new LedgerAccountLock(), $balances);
+        $service = new PayoutService($payouts, $ledger, new LedgerAccountLock(), $balances, new SellerRepository());
 
         $seller = 'regressplr002';
         $ledger->post($this->context, self::TENANT, [
@@ -1222,7 +1222,8 @@ final class MarketplaceRegressionTest extends CommerceTestCase
             new PayoutRepository(),
             $ledger,
             new LedgerAccountLock(),
-            new SellerBalanceService($ledger)
+            new SellerBalanceService($ledger),
+            new SellerRepository()
         );
         $payoutService->record(
             $this->context,
@@ -1343,7 +1344,8 @@ final class MarketplaceRegressionTest extends CommerceTestCase
             new PayoutRepository(),
             $ledger,
             new LedgerAccountLock(),
-            new SellerBalanceService($ledger)
+            new SellerBalanceService($ledger),
+            new SellerRepository()
         );
 
         $payout = $payoutService->record(

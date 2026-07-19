@@ -34,6 +34,7 @@ use Glueful\Extensions\Commerce\Marketplace\PayoutService;
 use Glueful\Extensions\Commerce\Marketplace\SellerBalanceService;
 use Glueful\Extensions\Commerce\Marketplace\SellerOrderPaymentConfirmation;
 use Glueful\Extensions\Commerce\Marketplace\SellerOrderRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerRepository;
 use Glueful\Extensions\Commerce\Orders\OrderPaymentService;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
 use Psr\Container\ContainerInterface;
@@ -94,7 +95,8 @@ try {
                 new PayoutRepository(),
                 new LedgerRepository(),
                 new LedgerAccountLock(),
-                new SellerBalanceService(new LedgerRepository())
+                new SellerBalanceService(new LedgerRepository()),
+                new SellerRepository()
             );
             $payout = $payoutService->record(
                 $context,

@@ -38,12 +38,31 @@ use Symfony\Component\HttpFoundation\Request;
  *    unknown seller, a cross-tenant seller (the tenant predicate is baked
  *    into every read), no membership row at all, and a `revoked` membership
  *    are ALL the exact same non-revealing 404 -- same message, same shape.
- * 3. A `suspended`/`closed` seller fails closed on a MUTATION (any method
- *    other than GET/HEAD) with 409; reads pass through unchanged ("reads
- *    stay, so staff can see state" -- design spec §2.4).
+ * 3. Lifecycle eligibility (design spec §2.6, MV5b Task 5):
+ *    - A `suspended` seller fails closed with a stable 409 on EVERY route,
+ *      regardless of HTTP method, UNLESS the route opts in via an explicit
+ *      SECOND middleware parameter, `allow_suspended` (e.g.
+ *      `commerce_seller:commerce.seller.orders.read,allow_suspended`) --
+ *      {@see \Glueful\Routing\Router::resolveMiddleware()}'s own
+ *      `name:param1,param2` parsing splits this into `$params[1]`. Only the
+ *      minimum order-fulfillment + financial-read surface is marked (see
+ *      routes.php): order list/detail, fulfill (incl. tracking), balance,
+ *      and reserves. This REPLACES the prior method-based rule that allowed
+ *      every GET/HEAD while suspended.
+ *    - A `closed` seller NEVER qualifies for `allow_suspended` -- its
+ *      pre-existing posture (409 on a MUTATION, i.e. any method other than
+ *      GET/HEAD; reads pass through unchanged -- "reads stay, so staff can
+ *      see state", design spec §2.4/§2.9) is untouched by this change. In
+ *      practice a real `close()` also revokes every membership (so a closed
+ *      seller's member never reaches this branch at all -- see step 2
+ *      above); this branch exists to fail closed even for the
+ *      unreachable-in-production case of a status flipped without a
+ *      membership revoke.
  * 4. The capability, checked via the injected {@see SellerRoleAuthority}
  *    (never a hard-coded role list) against the membership's role -> 403
- *    when denied.
+ *    when denied. This runs AFTER lifecycle eligibility and unconditionally
+ *    on an `allow_suspended` route too -- the marker only relaxes the
+ *    lifecycle gate, it never grants a capability.
  *
  * On success the resolved seller/membership rows are attached to the
  * request (`commerce_seller` / `commerce_seller_membership`) so downstream
@@ -64,6 +83,7 @@ final class SellerMemberMiddleware implements RouteMiddleware
     public function handle(Request $request, callable $next, mixed ...$params): mixed
     {
         $capability = (string) ($params[0] ?? '');
+        $allowSuspended = isset($params[1]) && (string) $params[1] === 'allow_suspended';
 
         /** @var array<string,mixed> $routeParams */
         $routeParams = (array) $request->attributes->get('_route_params', []);
@@ -109,10 +129,16 @@ final class SellerMemberMiddleware implements RouteMiddleware
             return Response::notFound('Resource not found.');
         }
 
-        $isMutation = !in_array($request->getMethod(), ['GET', 'HEAD'], true);
         $sellerStatus = (string) $seller['status'];
-        if ($isMutation && in_array($sellerStatus, ['suspended', 'closed'], true)) {
-            return Response::error("Seller is '{$sellerStatus}'; this action is unavailable.", 409);
+        if ($sellerStatus === 'suspended') {
+            if (!$allowSuspended) {
+                return Response::error("Seller is 'suspended'; this action is unavailable.", 409);
+            }
+        } elseif ($sellerStatus === 'closed') {
+            $isMutation = !in_array($request->getMethod(), ['GET', 'HEAD'], true);
+            if ($isMutation) {
+                return Response::error("Seller is 'closed'; this action is unavailable.", 409);
+            }
         }
 
         if (!$this->roles->allows((string) $membership['role'], $capability)) {

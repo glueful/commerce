@@ -16,6 +16,7 @@ use Glueful\Extensions\Commerce\Marketplace\PayoutService;
 use Glueful\Extensions\Commerce\Marketplace\SellerBalanceService;
 use Glueful\Extensions\Commerce\Marketplace\SellerOrderPaymentConfirmation;
 use Glueful\Extensions\Commerce\Marketplace\SellerOrderRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerRepository;
 use Glueful\Extensions\Commerce\Orders\OrderPaymentService;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
 use Glueful\Extensions\Commerce\Tests\Support\CommerceTestCase;
@@ -53,8 +54,14 @@ use Psr\Container\ContainerInterface;
  * row: every settlement primitive under test here (`LedgerAccountLock`,
  * `LedgerRepository`, `PayoutService`, `AdjustmentService`,
  * `LedgerPostingService`) is keyed purely by string `seller_uuid`/
- * `account_key` -- none of them join against `commerce_sellers` or
- * `commerce_marketplace_settings` (design spec §2.5-§2.10). Only the
+ * `account_key`, and none of them JOIN against `commerce_sellers` or
+ * `commerce_marketplace_settings` (design spec §2.5-§2.10). MV5b Task 6
+ * (design spec §2.7) does add a `PayoutService::record()` seller-revision
+ * claim + status re-read, but {@see SellerRepository::claimRevision()}
+ * affects zero rows for a `seller_uuid` with no `commerce_sellers` row --
+ * every seller_uuid literal in this file stays untracked by the marketplace
+ * lifecycle and therefore never gated, so these lanes remain byte-identical
+ * without seeding one. Only the
  * `markPaid()` lane needs real `commerce_orders`/`commerce_seller_orders`
  * rows, seeded directly (mirroring
  * `CheckoutClaimPgsqlTest::manuallyPlaceMinimalPartitionedOrder()`) rather
@@ -527,7 +534,8 @@ final class SettlementPgsqlTest extends CommerceTestCase
             new PayoutRepository(),
             new LedgerRepository(),
             new LedgerAccountLock(),
-            $this->balances()
+            $this->balances(),
+            new SellerRepository()
         );
     }
 

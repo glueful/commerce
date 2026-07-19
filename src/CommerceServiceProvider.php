@@ -770,6 +770,7 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(LedgerRepository::class),
             $container->get(LedgerAccountLock::class),
             $container->get(SellerBalanceService::class),
+            $container->get(SellerRepository::class),
             null,
             self::makePayoutCollector($container),
             $container->get(PayoutAccountService::class)

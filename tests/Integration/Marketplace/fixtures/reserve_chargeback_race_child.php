@@ -87,7 +87,8 @@ try {
                 new PayoutRepository(),
                 $ledger,
                 new LedgerAccountLock(),
-                new SellerBalanceService($ledger)
+                new SellerBalanceService($ledger),
+                new SellerRepository()
             );
             $payout = $payoutService->record(
                 $context,

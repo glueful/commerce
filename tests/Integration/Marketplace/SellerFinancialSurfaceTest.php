@@ -9,6 +9,7 @@ use Glueful\Extensions\Commerce\Marketplace\LedgerRepository;
 use Glueful\Extensions\Commerce\Marketplace\PayoutRepository;
 use Glueful\Extensions\Commerce\Marketplace\PayoutService;
 use Glueful\Extensions\Commerce\Marketplace\SellerBalanceService;
+use Glueful\Extensions\Commerce\Marketplace\SellerRepository;
 use Glueful\Extensions\Commerce\Tests\Support\CommerceRouterTestCase;
 use Glueful\Helpers\Utils;
 use Symfony\Component\HttpFoundation\Request;
@@ -445,7 +446,8 @@ final class SellerFinancialSurfaceTest extends CommerceRouterTestCase
             new PayoutRepository(),
             $ledger,
             new LedgerAccountLock(),
-            new SellerBalanceService($ledger)
+            new SellerBalanceService($ledger),
+            new SellerRepository()
         );
     }
 

@@ -17,6 +17,7 @@ use Glueful\Extensions\Commerce\Marketplace\PayoutAccountService;
 use Glueful\Extensions\Commerce\Marketplace\PayoutRepository;
 use Glueful\Extensions\Commerce\Marketplace\PayoutService;
 use Glueful\Extensions\Commerce\Marketplace\SellerBalanceService;
+use Glueful\Extensions\Commerce\Marketplace\SellerRepository;
 use Glueful\Extensions\Commerce\Reports\SellerFinancialReportRepository;
 use Glueful\Extensions\Commerce\Tests\Support\CommerceRouterTestCase;
 use Glueful\Extensions\Contracts\Payments\DestinationStatus;
@@ -642,6 +643,7 @@ final class PayoutSurfaceTest extends CommerceRouterTestCase
             $this->ledger,
             new LedgerAccountLock(),
             $this->balances,
+            new SellerRepository(),
             null,
             $collector,
             new PayoutAccountService($this->payoutAccountsRepo, null, $collector)
@@ -696,6 +698,7 @@ final class PayoutSurfaceTest extends CommerceRouterTestCase
             $this->ledger,
             new LedgerAccountLock(),
             $this->balances,
+            new SellerRepository(),
             null,
             $collector,
             $accountService
