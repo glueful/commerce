@@ -23,6 +23,8 @@ use Glueful\Extensions\Commerce\Marketplace\MarketplaceMode;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceWorkspaceLock;
 use Glueful\Extensions\Commerce\Marketplace\PayoutAccountRepository;
 use Glueful\Extensions\Commerce\Marketplace\PayoutRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerApiKeyAuthorizer;
+use Glueful\Extensions\Commerce\Marketplace\SellerApiKeyRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerBalanceService;
 use Glueful\Extensions\Commerce\Marketplace\SellerLifecycleEventRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipRepository;
@@ -323,7 +325,8 @@ abstract class CommerceRouterTestCase extends CommerceTestCase
             new SellerMembershipRepository(),
             new FixedSellerRoleAuthority(),
             new MarketplaceMode(),
-            $this->fixedTenant()
+            $this->fixedTenant(),
+            new SellerApiKeyAuthorizer(new SellerApiKeyRepository())
         );
     }
 

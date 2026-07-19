@@ -7,6 +7,8 @@ namespace Glueful\Extensions\Commerce\Http\Middleware;
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Marketplace\Contracts\SellerRoleAuthority;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceMode;
+use Glueful\Extensions\Commerce\Marketplace\SellerApiKeyAuthorizationContext;
+use Glueful\Extensions\Commerce\Marketplace\SellerApiKeyAuthorizer;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerRepository;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
@@ -34,10 +36,25 @@ use Symfony\Component\HttpFoundation\Request;
  *    unconditionally (design spec §2.3) -- this is a tenant-wide check, not
  *    seller-specific, so answering it first leaks nothing about a
  *    particular seller.
+ * 1a. **Seller-API-key authorization (design spec §2.3/§2.4/§2.6/§2.10,
+ *    MV5c-1 Task 4):** the injected {@see SellerApiKeyAuthorizer} runs here,
+ *    AFTER the workspace check but BEFORE the seller/membership lookup
+ *    below. It is a true no-op (`null`, zero key-table queries) for a
+ *    session/non-key request; for an API-key request it resolves the exact
+ *    credential -> lineage binding, validates principal integrity, exact
+ *    scope match, one-seller, and the effective-scope gate, and either
+ *    returns a `Response` (denial, returned immediately, unchanged) or a
+ *    typed {@see SellerApiKeyAuthorizationContext} carried through the rest
+ *    of THIS method as `$keyContext`. See that class's own docblock for the
+ *    full per-check contract.
  * 2. Seller lookup + membership lookup are combined into ONE outcome: an
  *    unknown seller, a cross-tenant seller (the tenant predicate is baked
  *    into every read), no membership row at all, and a `revoked` membership
  *    are ALL the exact same non-revealing 404 -- same message, same shape.
+ *    When `$keyContext` is non-null, this outcome ALSO calls
+ *    {@see SellerApiKeyAuthorizer::recordDenied()} with `membership_inactive`
+ *    before returning -- the SINGLE audit call site for this branch, never
+ *    duplicated inside the authorizer itself.
  * 3. Lifecycle eligibility (design spec §2.6, MV5b Task 5):
  *    - A `suspended` seller fails closed with a stable 409 on EVERY route,
  *      regardless of HTTP method, UNLESS the route opts in via an explicit
@@ -57,16 +74,24 @@ use Symfony\Component\HttpFoundation\Request;
  *      seller's member never reaches this branch at all -- see step 2
  *      above); this branch exists to fail closed even for the
  *      unreachable-in-production case of a status flipped without a
- *      membership revoke.
+ *      membership revoke. When `$keyContext` is non-null, EITHER a
+ *      suspended-and-not-`allow_suspended` refusal OR a closed-mutation
+ *      refusal calls {@see SellerApiKeyAuthorizer::recordDenied()} with
+ *      `seller_inactive` before returning.
  * 4. The capability, checked via the injected {@see SellerRoleAuthority}
  *    (never a hard-coded role list) against the membership's role -> 403
  *    when denied. This runs AFTER lifecycle eligibility and unconditionally
  *    on an `allow_suspended` route too -- the marker only relaxes the
- *    lifecycle gate, it never grants a capability.
+ *    lifecycle gate, it never grants a capability. When `$keyContext` is
+ *    non-null, a denial here calls {@see SellerApiKeyAuthorizer::recordDenied()}
+ *    with `capability_denied`.
  *
  * On success the resolved seller/membership rows are attached to the
  * request (`commerce_seller` / `commerce_seller_membership`) so downstream
- * controllers never need to re-query them.
+ * controllers never need to re-query them. A request that reaches THIS
+ * point with a non-null `$keyContext` has passed BOTH the authorizer's own
+ * key-scope gate (step 1a) AND this method's live-role gate (step 4) --
+ * the full three-way intersection design spec §2.4 requires.
  */
 final class SellerMemberMiddleware implements RouteMiddleware
 {
@@ -77,6 +102,7 @@ final class SellerMemberMiddleware implements RouteMiddleware
         private SellerRoleAuthority $roles,
         private MarketplaceMode $marketplaceMode,
         private CurrentTenantResolver $tenants,
+        private SellerApiKeyAuthorizer $apiKeyAuthorizer,
     ) {
     }
 
@@ -112,6 +138,20 @@ final class SellerMemberMiddleware implements RouteMiddleware
             return Response::error('Marketplace mode is not active for this workspace.', 409);
         }
 
+        // MV5c-1 Task 4 (design spec §2.3): the seller-API-key authorizer
+        // runs BEFORE the seller/membership lookup below. `null` means "not
+        // an API-key request" (zero key-table queries, session flow
+        // untouched below); a `Response` is a denial the authorizer has
+        // ALREADY audited (where applicable) and is returned immediately,
+        // unchanged. Only a passed {@see SellerApiKeyAuthorizationContext}
+        // continues into this method's own checks.
+        $keyResult = $this->apiKeyAuthorizer->authorize($this->context, $request, $tenant, $sellerUuid, $capability);
+        if ($keyResult instanceof Response) {
+            return $keyResult;
+        }
+        /** @var SellerApiKeyAuthorizationContext|null $keyContext */
+        $keyContext = $keyResult;
+
         $userAttribute = $request->attributes->get('user');
         $principalUuid = is_array($userAttribute) ? trim((string) ($userAttribute['uuid'] ?? '')) : '';
 
@@ -126,22 +166,34 @@ final class SellerMemberMiddleware implements RouteMiddleware
             // Non-revealing (design spec §5): unknown seller, cross-tenant
             // seller, no membership, and a revoked membership are all this
             // SAME response -- never distinguished.
+            if ($keyContext !== null) {
+                $this->apiKeyAuthorizer->recordDenied($this->context, $keyContext, 'membership_inactive');
+            }
             return Response::notFound('Resource not found.');
         }
 
         $sellerStatus = (string) $seller['status'];
         if ($sellerStatus === 'suspended') {
             if (!$allowSuspended) {
+                if ($keyContext !== null) {
+                    $this->apiKeyAuthorizer->recordDenied($this->context, $keyContext, 'seller_inactive');
+                }
                 return Response::error("Seller is 'suspended'; this action is unavailable.", 409);
             }
         } elseif ($sellerStatus === 'closed') {
             $isMutation = !in_array($request->getMethod(), ['GET', 'HEAD'], true);
             if ($isMutation) {
+                if ($keyContext !== null) {
+                    $this->apiKeyAuthorizer->recordDenied($this->context, $keyContext, 'seller_inactive');
+                }
                 return Response::error("Seller is 'closed'; this action is unavailable.", 409);
             }
         }
 
         if (!$this->roles->allows((string) $membership['role'], $capability)) {
+            if ($keyContext !== null) {
+                $this->apiKeyAuthorizer->recordDenied($this->context, $keyContext, 'capability_denied');
+            }
             return Response::forbidden('Insufficient seller role for this action.');
         }
 

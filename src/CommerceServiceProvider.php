@@ -109,6 +109,7 @@ use Glueful\Extensions\Commerce\Marketplace\ReservePolicyEventRepository;
 use Glueful\Extensions\Commerce\Marketplace\ReservePolicyService;
 use Glueful\Extensions\Commerce\Marketplace\ReserveRepository;
 use Glueful\Extensions\Commerce\Marketplace\ReserveService;
+use Glueful\Extensions\Commerce\Marketplace\SellerApiKeyAuthorizer;
 use Glueful\Extensions\Commerce\Marketplace\SellerApiKeyRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerApiKeyScopeValidator;
 use Glueful\Extensions\Commerce\Marketplace\SellerApiKeyService;
@@ -398,6 +399,10 @@ final class CommerceServiceProvider extends ServiceProvider
             ],
             SellerApiKeyService::class => [
                 'factory' => [self::class, 'makeSellerApiKeyService'],
+                'shared' => true,
+            ],
+            SellerApiKeyAuthorizer::class => [
+                'factory' => [self::class, 'makeSellerApiKeyAuthorizer'],
                 'shared' => true,
             ],
             SellerOrderRepository::class => [
@@ -1482,6 +1487,11 @@ final class CommerceServiceProvider extends ServiceProvider
         );
     }
 
+    public static function makeSellerApiKeyAuthorizer(ContainerInterface $container): SellerApiKeyAuthorizer
+    {
+        return new SellerApiKeyAuthorizer($container->get(SellerApiKeyRepository::class));
+    }
+
     public static function makeSellerAttributionService(ContainerInterface $container): SellerAttributionService
     {
         return new SellerAttributionService(
@@ -1524,7 +1534,8 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(SellerMembershipRepository::class),
             $container->get(SellerRoleAuthority::class),
             $container->get(MarketplaceMode::class),
-            self::tenantResolver($container)
+            self::tenantResolver($container),
+            $container->get(SellerApiKeyAuthorizer::class)
         );
     }
 

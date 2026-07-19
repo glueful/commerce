@@ -28,6 +28,11 @@ use Glueful\Bootstrap\ApplicationContext;
  * before Task 5 added nothing further to IT specifically (a correction is a
  * NEW audit row, never an edit to history -- no `update()`/`delete()` here
  * either).
+ *
+ * Task 4 adds exactly one more surface: {@see self::recordAuthDenied()},
+ * the BOUNDED `auth_denied` write {@see SellerApiKeyAuthorizer::recordDenied()}
+ * calls on every per-request authorization denial (design spec §2.10) --
+ * still append-only, still no `update()`/`delete()`.
  */
 final class SellerApiKeyRepository
 {
@@ -103,6 +108,67 @@ final class SellerApiKeyRepository
             'grace_expires_at' => $row['grace_expires_at'] ?? null,
             'detail' => $row['detail'] ?? null,
         ]);
+    }
+
+    /**
+     * The BOUNDED `auth_denied` audit write (design spec §2.10, MV5c-1 Task
+     * 4): always attempts the insert directly -- the house duplicate-key
+     * probe idiom ({@see LedgerRepository::post()},
+     * {@see ReserveRepository::insertRollingHold()}) -- never a
+     * check-then-insert race. The migration-018
+     * `commerce_seller_api_key_events_dedupe_unique` constraint
+     * (`tenant_uuid, lineage_uuid, action, reason_code, bucket_start`) caps
+     * this at ONE row per lineage/reason/UTC-minute.
+     *
+     * On a caught `\PDOException`, RE-READS for a row matching this EXACT
+     * tuple: found means a genuine dedupe-backstop collision (a repeat
+     * denial within the same minute -- expected under a hammering
+     * stolen/misused key, not a fault, so nothing is logged); NOT found
+     * means the exception had some OTHER cause (e.g. an unrelated uuid
+     * collision) -- a genuine write failure, which IS error-logged. Either
+     * way this method NEVER rethrows and NEVER inserts a second row:
+     * {@see SellerApiKeyAuthorizer::recordDenied()}'s contract is
+     * fail-closed regardless of whether this write succeeds -- the caller
+     * has already decided to deny access before calling this method, and a
+     * persistence failure here must never propagate and risk being
+     * mishandled into an accidental allow.
+     *
+     * @param array{
+     *     uuid: string,
+     *     lineage_uuid: string,
+     *     seller_uuid: string,
+     *     subject_user_uuid: string,
+     *     reason_code: string,
+     *     bucket_start: string
+     * } $row
+     */
+    public function recordAuthDenied(ApplicationContext $context, string $tenant, array $row): void
+    {
+        try {
+            $this->insertEvent($context, $tenant, [
+                'uuid' => $row['uuid'],
+                'lineage_uuid' => $row['lineage_uuid'],
+                'seller_uuid' => $row['seller_uuid'],
+                'subject_user_uuid' => $row['subject_user_uuid'],
+                'action' => 'auth_denied',
+                'reason_code' => $row['reason_code'],
+                'bucket_start' => $row['bucket_start'],
+            ]);
+        } catch (\PDOException $e) {
+            $existing = db($context)->table('commerce_seller_api_key_events')
+                ->where('tenant_uuid', '=', $tenant)
+                ->where('lineage_uuid', '=', $row['lineage_uuid'])
+                ->where('action', '=', 'auth_denied')
+                ->where('reason_code', '=', $row['reason_code'])
+                ->where('bucket_start', '=', $row['bucket_start'])
+                ->first();
+
+            if ($existing === null) {
+                error_log('[Commerce] Failed to record seller API key auth_denied event: ' . $e->getMessage());
+            }
+        } catch (\Throwable $e) {
+            error_log('[Commerce] Failed to record seller API key auth_denied event: ' . $e->getMessage());
+        }
     }
 
     /**
