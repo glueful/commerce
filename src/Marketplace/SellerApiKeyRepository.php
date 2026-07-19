@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Commerce\Marketplace;
 
 use Glueful\Bootstrap\ApplicationContext;
+use Glueful\Extensions\Commerce\Support\UtcNowSql;
 
 /**
  * Seller-API-key lineage/credential/audit persistence (design spec
@@ -20,19 +21,29 @@ use Glueful\Bootstrap\ApplicationContext;
  * "thin repository, service owns the transaction/claim discipline"
  * convention.
  *
- * Only the surface {@see SellerApiKeyService::create()} needs is
- * implemented here (lineage insert/find, credential insert/find-by-
- * framework-key-uuid, event insert) -- rotation's demote/revoke-all
- * primitives land with MV5c-1 Task 5, mirroring how
- * {@see SellerLifecycleEventRepository} shipped insert/read-only in MV5b
- * before Task 5 added nothing further to IT specifically (a correction is a
- * NEW audit row, never an edit to history -- no `update()`/`delete()` here
- * either).
+ * {@see SellerApiKeyService::create()} (Task 3) needs lineage insert/find,
+ * credential insert/find-by-framework-key-uuid, and event insert. Task 4
+ * adds {@see self::recordAuthDenied()}, the BOUNDED `auth_denied` write
+ * {@see SellerApiKeyAuthorizer::recordDenied()} calls on every per-request
+ * authorization denial (design spec §2.10).
  *
- * Task 4 adds exactly one more surface: {@see self::recordAuthDenied()},
- * the BOUNDED `auth_denied` write {@see SellerApiKeyAuthorizer::recordDenied()}
- * calls on every per-request authorization denial (design spec §2.10) --
- * still append-only, still no `update()`/`delete()`.
+ * Task 5 (design spec §2.9) adds the rotation/revocation primitives: the
+ * active-lineage revision claim ({@see self::claimActiveLineageRevision()},
+ * the SAME "affected-row-checked UPDATE, 0 rows means re-read to classify"
+ * idiom as {@see SellerRepository::claimRevision()}, scoped to
+ * `status = 'active'` so an already-revoked lineage is never claimable), a
+ * direct credential lookup by ITS OWN uuid
+ * ({@see self::findCredentialByUuid()}, resolving `current_credential_uuid`
+ * -- distinct from {@see self::findCredentialByFrameworkKeyUuid()}, which
+ * resolves the AUTHENTICATED framework key instead), the whole-lineage
+ * credential enumeration whole-lineage revocation needs
+ * ({@see self::findCredentialsForLineage()}), and the demote/advance/revoke
+ * mutations ({@see self::demoteCredentialToPredecessor()},
+ * {@see self::advanceLineageCurrentCredential()},
+ * {@see self::markCredentialRevoked()}, {@see self::markLineageRevoked()}).
+ * `commerce_seller_api_key_events` stays append-only throughout -- no
+ * `update()`/`delete()` on that table, ever; a correction is always a NEW
+ * audit row.
  */
 final class SellerApiKeyRepository
 {
@@ -86,6 +97,142 @@ final class SellerApiKeyRepository
     }
 
     /**
+     * Resolves a credential by ITS OWN uuid -- used by
+     * {@see SellerApiKeyService::rotate()} to re-read the lineage's
+     * `current_credential_uuid` (design spec §2.9), distinct from
+     * {@see self::findCredentialByFrameworkKeyUuid()}, which resolves by the
+     * framework's AUTHENTICATED key uuid on the per-request read path.
+     *
+     * @return array<string,mixed>|null
+     */
+    public function findCredentialByUuid(ApplicationContext $context, string $tenant, string $uuid): ?array
+    {
+        return db($context)->table('commerce_seller_api_key_credentials')
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('uuid', '=', $uuid)
+            ->first();
+    }
+
+    /**
+     * EVERY credential row recorded for a lineage -- current, any grace
+     * predecessor, and any already-revoked generation -- the whole-lineage
+     * enumeration {@see SellerApiKeyService::revoke()} needs (design spec
+     * §2.9: "enumerates every credential row for the lineage, making
+     * whole-lineage revocation explicit and deterministic").
+     *
+     * @return list<array<string,mixed>>
+     */
+    public function findCredentialsForLineage(ApplicationContext $context, string $tenant, string $lineageUuid): array
+    {
+        return db($context)->table('commerce_seller_api_key_credentials')
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('lineage_uuid', '=', $lineageUuid)
+            ->get();
+    }
+
+    /**
+     * The claimable active-lineage revision (design spec §2.9 lock order:
+     * `... -> lineage revision -> framework/credential writes`) -- the SAME
+     * affected-row-checked `UPDATE ... SET revision = revision + 1` idiom as
+     * {@see SellerRepository::claimRevision()}, scoped to `status = 'active'`
+     * so an already-revoked lineage is NEVER claimable: a 0-row result means
+     * either the lineage doesn't exist for this tenant, belongs to a
+     * different seller, or is already revoked -- {@see SellerApiKeyService}
+     * re-reads (never claims) to classify which, rather than collapsing
+     * these into one outcome.
+     */
+    public function claimActiveLineageRevision(ApplicationContext $context, string $tenant, string $lineageUuid): bool
+    {
+        $utcNow = UtcNowSql::expression(db($context)->getDriverName());
+
+        $affected = db($context)->table('commerce_seller_api_keys')->executeModification(
+            <<<SQL
+UPDATE commerce_seller_api_keys
+SET revision = revision + 1, updated_at = {$utcNow}
+WHERE tenant_uuid = ? AND uuid = ? AND status = 'active'
+SQL,
+            [$tenant, $lineageUuid]
+        );
+
+        return $affected === 1;
+    }
+
+    /**
+     * Demotes the predecessor credential (design spec §2.9): `relationship`
+     * moves to `predecessor` and `grace_expires_at` is set to the EXACT
+     * value {@see \Glueful\Auth\ApiKey\ApiKeyService::rotate()} applied to
+     * the framework key's own `expires_at` (the earlier of its prior expiry
+     * and the grace deadline) -- carried here verbatim, never recomputed.
+     */
+    public function demoteCredentialToPredecessor(
+        ApplicationContext $context,
+        string $tenant,
+        string $uuid,
+        string $graceExpiresAt
+    ): void {
+        db($context)->table('commerce_seller_api_key_credentials')
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('uuid', '=', $uuid)
+            ->update(['relationship' => 'predecessor', 'grace_expires_at' => $graceExpiresAt]);
+    }
+
+    /**
+     * Advances the lineage's current-credential pointer and `last_rotated_at`
+     * after a successful rotation (design spec §2.9) -- issued AFTER the
+     * revision claim already serialized this lineage against concurrent
+     * rotate/revoke attempts, so a plain conditional UPDATE (no further
+     * affected-row check) is safe here.
+     */
+    public function advanceLineageCurrentCredential(
+        ApplicationContext $context,
+        string $tenant,
+        string $lineageUuid,
+        string $newCredentialUuid,
+        string $rotatedAt
+    ): void {
+        db($context)->table('commerce_seller_api_keys')
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('uuid', '=', $lineageUuid)
+            ->update([
+                'current_credential_uuid' => $newCredentialUuid,
+                'last_rotated_at' => $rotatedAt,
+                'updated_at' => $rotatedAt,
+            ]);
+    }
+
+    /**
+     * Marks ONE credential row `revoked` -- part of the whole-lineage sweep
+     * in {@see SellerApiKeyService::revoke()}.
+     */
+    public function markCredentialRevoked(
+        ApplicationContext $context,
+        string $tenant,
+        string $uuid,
+        string $revokedAt
+    ): void {
+        db($context)->table('commerce_seller_api_key_credentials')
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('uuid', '=', $uuid)
+            ->update(['relationship' => 'revoked', 'revoked_at' => $revokedAt]);
+    }
+
+    /**
+     * Marks the lineage itself `revoked` -- the final write in
+     * {@see SellerApiKeyService::revoke()}'s sweep.
+     */
+    public function markLineageRevoked(
+        ApplicationContext $context,
+        string $tenant,
+        string $lineageUuid,
+        string $revokedAt
+    ): void {
+        db($context)->table('commerce_seller_api_keys')
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('uuid', '=', $lineageUuid)
+            ->update(['status' => 'revoked', 'revoked_at' => $revokedAt, 'updated_at' => $revokedAt]);
+    }
+
+    /**
      * Append-only (design spec §2.10) -- deliberately no `update()`/
      * `delete()` method on this class.
      *
@@ -133,6 +280,17 @@ final class SellerApiKeyRepository
      * persistence failure here must never propagate and risk being
      * mishandled into an accidental allow.
      *
+     * The classification RE-READ itself is wrapped in its OWN nested
+     * try/catch (MV5c-1 Task 5 hardening): if the re-read query itself
+     * throws (e.g. a connection blip on the SAME failing connection that
+     * just raised the outer `\PDOException`), that failure is swallowed and
+     * error-logged too, never left to propagate out of this method. Without
+     * this, a re-read failure would defeat the "NEVER throws" contract this
+     * docblock promises -- the caller has ALREADY decided to deny access
+     * (see {@see SellerApiKeyAuthorizer::authorize()}), so the request stays
+     * fail-closed (a clean 404, never a 500) regardless of whether either
+     * the write OR the classification re-read succeeds.
+     *
      * @param array{
      *     uuid: string,
      *     lineage_uuid: string,
@@ -155,13 +313,21 @@ final class SellerApiKeyRepository
                 'bucket_start' => $row['bucket_start'],
             ]);
         } catch (\PDOException $e) {
-            $existing = db($context)->table('commerce_seller_api_key_events')
-                ->where('tenant_uuid', '=', $tenant)
-                ->where('lineage_uuid', '=', $row['lineage_uuid'])
-                ->where('action', '=', 'auth_denied')
-                ->where('reason_code', '=', $row['reason_code'])
-                ->where('bucket_start', '=', $row['bucket_start'])
-                ->first();
+            try {
+                $existing = db($context)->table('commerce_seller_api_key_events')
+                    ->where('tenant_uuid', '=', $tenant)
+                    ->where('lineage_uuid', '=', $row['lineage_uuid'])
+                    ->where('action', '=', 'auth_denied')
+                    ->where('reason_code', '=', $row['reason_code'])
+                    ->where('bucket_start', '=', $row['bucket_start'])
+                    ->first();
+            } catch (\Throwable $reReadError) {
+                error_log(
+                    '[Commerce] Failed to classify seller API key auth_denied write failure '
+                        . '(re-read itself failed): ' . $reReadError->getMessage()
+                );
+                return;
+            }
 
             if ($existing === null) {
                 error_log('[Commerce] Failed to record seller API key auth_denied event: ' . $e->getMessage());
