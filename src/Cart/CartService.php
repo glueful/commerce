@@ -310,6 +310,21 @@ final class CartService
      * landed may still finish -- soft delete is not retroactive order
      * cancellation.
      *
+     * Buyer-context product read (design spec §2.3/§2.4, MV5b): uses
+     * {@see ProductRepository::findBuyerAvailableByUuid()}, NOT
+     * `findLiveByUuid()` -- a seller-backed line whose seller is
+     * `suspended`/`closed`/`onboarding` collapses to the SAME "no longer
+     * available" 422 a tombstoned product produces, both in cart pricing
+     * (this method) and in `CheckoutService::placeOrderAttempt()` (which
+     * calls this method to resolve the lines it prices/writes). This is a
+     * natural consequence of centralizing the buyer-availability predicate,
+     * not a duplicate of `CheckoutService::claimMarketplaceOwnership()`'s
+     * OWN claimed seller-status guard -- that guard remains the sole
+     * defense against a suspension landing mid-transaction, AFTER this
+     * method already read the line as available (see
+     * `SuspendedSellerCheckoutTest`/`CheckoutPartitionTest`'s hook-based
+     * race coverage).
+     *
      * @param array<string,mixed> $cart
      * @return list<array<string,mixed>>
      */
@@ -322,7 +337,7 @@ final class CartService
             if ($variant === null) {
                 continue;
             }
-            $product = $this->products->findLiveByUuid($context, $tenant, (string) $variant['product_uuid']);
+            $product = $this->products->findBuyerAvailableByUuid($context, $tenant, (string) $variant['product_uuid']);
             if ($product === null) {
                 throw ValidationException::forField(
                     "lines.{$index}",
@@ -423,7 +438,15 @@ final class CartService
      * adding such a line outright with a controlled 422, rather than defaulting
      * to `'physical'` and letting an unavailable product be added silently --
      * {@see self::pricedLines()} is the symmetric guard for a line added before
-     * its product was deleted.
+     * its product was deleted. Called from both `addLine()` (cart ADD) and
+     * `setLineQuantity()` (cart UPDATE), so both share this one guard.
+     *
+     * Buyer-context read (design spec §2.3/§2.4, MV5b): uses
+     * {@see ProductRepository::findBuyerAvailableByUuid()} -- adding or
+     * increasing a line for a product whose seller is `suspended`/`closed`/
+     * `onboarding` is rejected with the SAME stable "no longer available"
+     * error a tombstoned product produces, even when the line already
+     * existed in the cart from before the seller was suspended.
      */
     private function assertVariantCanSupply(
         ApplicationContext $context,
@@ -436,7 +459,7 @@ final class CartService
             throw ValidationException::forField('variant_uuid', 'Variant not found.');
         }
 
-        $product = $this->products->findLiveByUuid($context, $tenant, (string) $variant['product_uuid']);
+        $product = $this->products->findBuyerAvailableByUuid($context, $tenant, (string) $variant['product_uuid']);
         if ($product === null) {
             throw ValidationException::forField('variant_uuid', 'This product is no longer available.');
         }

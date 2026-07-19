@@ -248,8 +248,27 @@ final class CheckoutPartitionTest extends CommerceTestCase
 
         // installEnabled() is true here, so activeFor() legitimately reads
         // commerce_marketplace_settings ONCE to learn the workspace is
-        // inactive -- but no seller/seller-order table is ever touched.
-        foreach (['commerce_sellers', 'commerce_seller_memberships', 'commerce_seller_orders'] as $table) {
+        // inactive -- and (MV5b Task 4) CartService::pricedLines() now reads
+        // the product via ProductRepository::findBuyerAvailableByUuid(),
+        // whose buyer-availability correlated EXISTS subquery (design spec
+        // §2.3) is gated on installEnabled() alone -- mirroring
+        // CheckoutService's OWN master-off fast path -- NOT on activeFor().
+        // So `commerce_sellers` legitimately appears embedded INSIDE the
+        // product-read query text while installed-but-inactive; it must
+        // never appear as a SEPARATE round trip (a standalone query against
+        // commerce_sellers), and neither seller-membership nor seller-order
+        // tables are ever touched.
+        foreach (QueryLoggingPdoStatement::$queries as $sql) {
+            if (str_contains($sql, 'commerce_sellers')) {
+                self::assertStringContainsString(
+                    'commerce_products',
+                    $sql,
+                    'commerce_sellers may only appear as the buyer-availability correlated subquery '
+                        . 'embedded in a commerce_products read -- never a standalone seller-table query'
+                );
+            }
+        }
+        foreach (['commerce_seller_memberships', 'commerce_seller_orders'] as $table) {
             foreach (QueryLoggingPdoStatement::$queries as $sql) {
                 self::assertStringNotContainsString($table, $sql, "must never query {$table} while inactive");
             }
@@ -338,12 +357,24 @@ final class CheckoutPartitionTest extends CommerceTestCase
 
     // -----------------------------------------------------------------
     // 8. Inactive participating seller: immediate 409, never retried.
+    //
+    // MV5b Task 4: CartService's ADD/pricing paths now reject a non-active
+    // seller's product outright (buyer-availability predicate) -- so a
+    // seller already suspended at cart-build time never reaches checkout at
+    // all (that scenario is covered by `SuspendedSellerCheckoutTest`
+    // instead). These two cases pin `claimMarketplaceOwnership()`'s OWN
+    // claimed seller-status guard specifically: the seller is still ACTIVE
+    // when the line is added, and the hook simulates a suspend landing
+    // AFTER the pre-claim ownership snapshot (so cart pricing already saw
+    // it as available) but BEFORE the seller/product revision claim --
+    // the same single-connection stand-in convention the ownership-drift
+    // hooks above use.
     // -----------------------------------------------------------------
 
     public function testInactiveParticipatingSellerReturns409Immediately(): void
     {
         $this->activateMarketplace();
-        $this->seedSeller('sellerAAAA01', 'Seller A', 'suspended');
+        $this->seedSeller('sellerAAAA01', 'Seller A');
         $product = $this->seedProduct('inactive-seller-x', 1000, 'sellerAAAA01');
 
         ['cart' => $cart, 'token' => $token] = $this->cart()->create($this->context);
@@ -352,6 +383,9 @@ final class CheckoutPartitionTest extends CommerceTestCase
         $calls = 0;
         $hook = function () use (&$calls): void {
             $calls++;
+            $this->connection->table('commerce_sellers')
+                ->where('uuid', '=', 'sellerAAAA01')
+                ->update(['status' => 'suspended']);
         };
 
         try {
@@ -377,13 +411,23 @@ final class CheckoutPartitionTest extends CommerceTestCase
     public function testInactiveSellerSurfacesAsHttp409ThroughCheckoutController(): void
     {
         $this->activateMarketplace();
-        $this->seedSeller('sellerAAAA01', 'Seller A', 'suspended');
+        $this->seedSeller('sellerAAAA01', 'Seller A');
         $product = $this->seedProduct('inactive-seller-http', 1000, 'sellerAAAA01');
 
         ['cart' => $cart, 'token' => $token] = $this->cart()->create($this->context);
         $this->cart()->addLine($this->context, $cart, (string) $product['variants'][0]['uuid'], 1);
 
-        $controller = new CheckoutController($this->context, $this->cart(), $this->checkout($this->aggregateTax()));
+        $hook = function (): void {
+            $this->connection->table('commerce_sellers')
+                ->where('uuid', '=', 'sellerAAAA01')
+                ->update(['status' => 'suspended']);
+        };
+
+        $controller = new CheckoutController(
+            $this->context,
+            $this->cart(),
+            $this->checkout($this->aggregateTax(), $hook)
+        );
         $request = \Symfony\Component\HttpFoundation\Request::create('/commerce/checkout', 'POST');
         $request->headers->set('X-Cart-Token', $token);
 

@@ -6,12 +6,60 @@ namespace Glueful\Extensions\Commerce\Catalog;
 
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Database\QueryBuilder;
+use Glueful\Extensions\Commerce\Marketplace\MarketplaceMode;
 use Glueful\Extensions\Commerce\Support\JsonStringArrayContainsSql;
 use Glueful\Extensions\Commerce\Support\LiteralLike;
 use Glueful\Extensions\Commerce\Support\UtcNowSql;
 
 final class ProductRepository
 {
+    /**
+     * Task 3 centralized buyer-availability predicate (design spec §2.3,
+     * MV5b): a product is buyer-visible/buyable only when it carries NO
+     * seller (`seller_uuid IS NULL` -- an ordinary, non-marketplace-store
+     * product, ALWAYS allowed by this predicate) OR its seller CURRENTLY has
+     * `status = 'active'`. A correlated `EXISTS`, never an inner `JOIN`
+     * (which would silently drop every sellerless row) and never a
+     * per-status deny-list (`onboarding`/`suspended`/`closed` are excluded
+     * simply by not being `active`). Shared verbatim by
+     * {@see self::findBuyerAvailableByUuid()}, {@see self::findBuyerAvailableBySlug()},
+     * and {@see self::activeFilteredQuery()} -- exactly ONE reusable
+     * predicate string, so a suspended/reinstated seller's products
+     * disappear/reappear across every buyer read in lockstep, WITHOUT ever
+     * mutating this product row. {@see self::findLiveByUuid()} /
+     * {@see self::findLiveBySlug()} deliberately do NOT carry this predicate
+     * -- admin and internal mutation services must keep reaching a suspended
+     * seller's products.
+     */
+    private const BUYER_SELLER_ACTIVE_SQL = <<<'SQL'
+(seller_uuid IS NULL OR EXISTS (
+    SELECT 1 FROM commerce_sellers
+    WHERE commerce_sellers.uuid = commerce_products.seller_uuid
+    AND commerce_sellers.tenant_uuid = ?
+    AND commerce_sellers.status = 'active'
+))
+SQL;
+
+    /**
+     * Applies {@see self::BUYER_SELLER_ACTIVE_SQL} to $query, but ONLY when
+     * the marketplace INSTALL master switch is on (design spec §2.1's
+     * MASTER-OFF FAST PATH, mirrored from {@see MarketplaceMode::installEnabled()}
+     * -- a config-only, zero-database-query check). With the switch off, a
+     * plain/legacy install (or a tenant that ran the marketplace before
+     * later switching it off, leaving a stray `seller_uuid` behind) must stay
+     * byte-identical to a pre-MV5b (indeed pre-MV1) read: no `commerce_sellers`
+     * reference in the SQL at all, and no product ever excluded by a seller
+     * row this install no longer consults. Switch on: the predicate is a
+     * genuine no-op for sellerless/active-seller products and only excludes
+     * a non-active seller's rows.
+     */
+    private function applyBuyerAvailability(QueryBuilder $query, ApplicationContext $context, string $tenant): void
+    {
+        if ((new MarketplaceMode())->installEnabled($context)) {
+            $query->whereRaw(self::BUYER_SELLER_ACTIVE_SQL, [$tenant]);
+        }
+    }
+
     /** @param array<string,mixed> $row */
     public function insert(ApplicationContext $context, array $row): void
     {
@@ -48,6 +96,44 @@ final class ProductRepository
             ->where('slug', '=', $slug)
             ->whereRaw('deleted_at IS NULL')
             ->first();
+
+        return $row === null ? null : $this->decodeJson($row);
+    }
+
+    /**
+     * Dedicated buyer-availability read (design spec §2.3, MV5b): the exact
+     * SAME tombstone-only predicate {@see self::findLiveByUuid()} applies,
+     * PLUS {@see self::BUYER_SELLER_ACTIVE_SQL}. This is the read every
+     * buyer-context storefront direct-read and public-review path must use
+     * -- {@see self::findLiveByUuid()} stays unchanged and tombstone-only
+     * for admin/catalog-mutation/importer/relationship/inventory/media/
+     * download/commission/attribution callers.
+     *
+     * @return array<string,mixed>|null
+     */
+    public function findBuyerAvailableByUuid(ApplicationContext $context, string $tenant, string $uuid): ?array
+    {
+        $query = db($context)->table('commerce_products')
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('uuid', '=', $uuid)
+            ->whereRaw('deleted_at IS NULL');
+        $this->applyBuyerAvailability($query, $context, $tenant);
+
+        $row = $query->first();
+
+        return $row === null ? null : $this->decodeJson($row);
+    }
+
+    /** @see self::findBuyerAvailableByUuid() @return array<string,mixed>|null */
+    public function findBuyerAvailableBySlug(ApplicationContext $context, string $tenant, string $slug): ?array
+    {
+        $query = db($context)->table('commerce_products')
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('slug', '=', $slug)
+            ->whereRaw('deleted_at IS NULL');
+        $this->applyBuyerAvailability($query, $context, $tenant);
+
+        $row = $query->first();
 
         return $row === null ? null : $this->decodeJson($row);
     }
@@ -174,6 +260,16 @@ SQL,
      * so at most one candidate row per pair per product), testing value-slug
      * membership via {@see JsonStringArrayContainsSql} rather than a
      * substring-unsafe `LIKE`. Every filter composes with AND semantics.
+     *
+     * Also carries {@see self::applyBuyerAvailability()} (design spec §2.3,
+     * MV5b) -- this is the storefront listing/search query, a buyer-context
+     * read by construction, so `listActive()`'s count/row queries and every
+     * category/tag/attribute semijoin above all inherit buyer availability
+     * the same way {@see self::findBuyerAvailableByUuid()} does (subject to
+     * the SAME master-off fast path: a no-op, zero `commerce_sellers`
+     * reference, while the marketplace install switch is off). Switch on: a
+     * no-op for active/sellerless products; a suspended/onboarding/closed
+     * seller's products drop out of listing/search without a separate query.
      */
     public function activeFilteredQuery(
         ApplicationContext $context,
@@ -184,6 +280,7 @@ SQL,
             ->where('tenant_uuid', '=', $tenant)
             ->where('status', '=', 'active')
             ->whereRaw('deleted_at IS NULL');
+        $this->applyBuyerAvailability($query, $context, $tenant);
 
         if ($filters === null || $filters->isEmpty()) {
             return $query;
