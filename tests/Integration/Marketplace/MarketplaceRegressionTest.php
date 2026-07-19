@@ -152,6 +152,9 @@ final class MarketplaceRegressionTest extends CommerceTestCase
         'commerce_chargeback_lines',
     ];
 
+    /** MV5b Task 7 (design spec §3): the brand-new lifecycle-audit table. */
+    private const MV5B_LIFECYCLE_TABLE = 'commerce_seller_lifecycle_events';
+
     // =====================================================================
     // 1. Route manifest: flag off == pre-MV1, byte for byte.
     // =====================================================================
@@ -441,7 +444,11 @@ final class MarketplaceRegressionTest extends CommerceTestCase
         // table or its retry/reconcile sweep indexes either. MV5a Task 17
         // (GATES) adds the FOUR new risk/chargeback tables: no ordinary
         // (non-payout/non-chargeback/non-reserve) request path may ever
-        // touch a reserve or chargeback table either.
+        // touch a reserve or chargeback table either. MV5b Task 7 (GATES)
+        // adds the new lifecycle-audit table: no ordinary storefront/cart/
+        // checkout/admin/report/payment/refund/fulfill/cancel/projection
+        // path may ever touch it either -- it is written ONLY by an explicit
+        // operator suspend/reactivate/close call, never incidentally.
         $marketplaceTables = [
             'commerce_marketplace_settings',
             'commerce_sellers',
@@ -453,6 +460,7 @@ final class MarketplaceRegressionTest extends CommerceTestCase
             'commerce_payouts',
             self::MV4_PAYOUT_ACCOUNTS_TABLE,
             ...self::MV5A_TABLES,
+            self::MV5B_LIFECYCLE_TABLE,
         ];
         foreach (QueryLoggingPdoStatement::$queries as $sql) {
             foreach ($marketplaceTables as $table) {
@@ -1485,6 +1493,269 @@ final class MarketplaceRegressionTest extends CommerceTestCase
                 "{$table} row must be rekeyed to the adopted tenant"
             );
         }
+    }
+
+    // =====================================================================
+    // 9. MV5b Task 7 GATES (design spec §5/§7): no suspension ⇒ byte-identical
+    //    storefront listing/search/direct-read + cart + payout behavior; the
+    //    centralized buyer-availability predicate (§2.3) is a genuine no-op
+    //    for a sellerless product and a product owned by an ACTIVE seller;
+    //    the shared findLive*() admin/internal reads stay unfiltered even
+    //    for a SUSPENDED seller's product; the new lifecycle-audit table
+    //    joins the SAME maintenance guarantees the MV1-MV5a tables already
+    //    have (§4); the lifecycle-history read is tenant-bound and paginated
+    //    (§4/§6). The zero-new-query half of this gate is closed above --
+    //    self::MV5B_LIFECYCLE_TABLE now joins assertNoMarketplaceQueries()'s
+    //    table list, so every ordinary path exercised in sections 2/2b above
+    //    is ALSO proven to never touch it.
+    // =====================================================================
+
+    /**
+     * Design spec §2.3: the centralized buyer-availability predicate
+     * (`seller_uuid IS NULL OR seller.status = 'active'`) never excludes a
+     * sellerless (ordinary, non-marketplace-store) product, and never
+     * excludes a product owned by a seller that is currently `active` --
+     * with marketplace GENUINELY enabled and the predicate GENUINELY
+     * reachable (never merely a missing collaborator), both products stay
+     * present across storefront listing, direct read, and cart add, exactly
+     * as pre-MV5b.
+     */
+    public function testSellerActivePredicateIsANoOpForSellerlessAndActiveSellerProductsAcrossStorefrontAndCart(): void
+    {
+        $this->enableMarketplace();
+        $this->activateWorkspace(self::TENANT);
+        $seller = $this->seedActiveSeller('regress-mv5b-noop-seller');
+        // seedLegacyProduct() already stocks its variant (100 units); seedAttributedProduct() does not.
+        $sellerlessProduct = $this->seedLegacyProduct('regress-mv5b-noop-sellerless');
+        $sellerProduct = $this->seedAttributedProduct('regress-mv5b-noop-attributed', $seller['uuid']);
+        (new StockRepository())->increment(
+            $this->context,
+            self::TENANT,
+            (string) $sellerProduct['variants'][0]['uuid'],
+            10
+        );
+
+        $controller = $this->productController();
+
+        $indexBody = json_decode((string) $controller->index(new ProductListQuery())->getContent(), true);
+        $slugs = array_column($indexBody['data'], 'slug');
+        self::assertContains('regress-mv5b-noop-sellerless', $slugs, 'a sellerless product must never be excluded');
+        self::assertContains(
+            'regress-mv5b-noop-attributed',
+            $slugs,
+            "an ACTIVE seller's product must never be excluded"
+        );
+
+        self::assertSame(
+            200,
+            $controller->show(Request::create('/x'), 'regress-mv5b-noop-sellerless')->getStatusCode()
+        );
+        self::assertSame(
+            200,
+            $controller->show(Request::create('/x'), 'regress-mv5b-noop-attributed')->getStatusCode()
+        );
+
+        $cartService = $this->cartService();
+        ['cart' => $cart, 'token' => $token] = $cartService->create($this->context);
+        $cartService->addLine($this->context, $cart, (string) $sellerlessProduct['variants'][0]['uuid'], 1);
+        $cartService->addLine($this->context, $cart, (string) $sellerProduct['variants'][0]['uuid'], 1);
+
+        self::assertSame(
+            2,
+            $this->connection->table('commerce_cart_lines')->where('cart_uuid', '=', $cart['uuid'])->count(),
+            'both lines must add successfully -- the predicate never rejects a sellerless or active-seller product'
+        );
+    }
+
+    /**
+     * Design spec §2.3: `findLiveByUuid()`/`findLiveBySlug()` stay
+     * tombstone-only and deliberately carry NO seller-status predicate --
+     * they remain the shared read for admin/catalog-mutation/importer/
+     * relationship/inventory/media/download/attribution paths, which must
+     * keep reaching a SUSPENDED seller's products. Only the dedicated
+     * buyer-availability reads exclude them.
+     */
+    public function testFindLiveReadsStayUnfilteredForASuspendedSellersProductWhileBuyerReadsExcludeIt(): void
+    {
+        $this->enableMarketplace();
+        $this->activateWorkspace(self::TENANT);
+        $seller = $this->seedActiveSeller('regress-mv5b-findlive-seller');
+        $product = $this->seedAttributedProduct('regress-mv5b-findlive-prod', $seller['uuid']);
+
+        $this->sellerService()->suspend(
+            $this->context,
+            self::TENANT,
+            $seller['uuid'],
+            'Regression findLive* probe.',
+            'operatorregr6'
+        );
+
+        $products = new ProductRepository();
+
+        $byUuid = $products->findLiveByUuid($this->context, self::TENANT, (string) $product['uuid']);
+        self::assertNotNull($byUuid, 'findLiveByUuid() must remain unfiltered for a suspended seller\'s product');
+        $bySlug = $products->findLiveBySlug($this->context, self::TENANT, (string) $product['slug']);
+        self::assertNotNull($bySlug, 'findLiveBySlug() must remain unfiltered for a suspended seller\'s product');
+
+        self::assertNull(
+            $products->findBuyerAvailableByUuid($this->context, self::TENANT, (string) $product['uuid']),
+            'the dedicated buyer-availability read must exclude a suspended seller\'s product'
+        );
+        self::assertNull(
+            $products->findBuyerAvailableBySlug($this->context, self::TENANT, (string) $product['slug'])
+        );
+    }
+
+    /**
+     * The manual payout row shape (design spec §2.7's new revision-claim gate
+     * sits in front of, but never alters) must stay byte-identical to its
+     * pre-MV5b field set for a REAL, currently-`active` seller -- not merely
+     * the "untracked seller_uuid" case {@see testManualPayoutResponseRowStaysByteIdenticalToItsPreMv5aFieldSetWithNoDebt()}
+     * already proves.
+     */
+    public function testManualPayoutRecordStaysByteIdenticalWhenARealActiveSellerExists(): void
+    {
+        $seller = $this->seedActiveSeller('regress-mv5b-payout-seller');
+
+        $ledger = new LedgerRepository();
+        $ledger->post($this->context, self::TENANT, [
+            'account_kind' => 'seller',
+            'account_key' => LedgerRepository::accountKeyForSeller($seller['uuid']),
+            'seller_uuid' => $seller['uuid'],
+            'currency' => 'USD',
+            'entry_type' => 'sale_credit',
+            'amount' => 5000,
+            'order_uuid' => 'regressmv5border',
+            'idempotency_key' => 'regressmv5border:' . $seller['uuid'] . ':sale_credit',
+        ]);
+        $payoutService = new PayoutService(
+            new PayoutRepository(),
+            $ledger,
+            new LedgerAccountLock(),
+            new SellerBalanceService($ledger),
+            new SellerRepository()
+        );
+
+        $payout = $payoutService->record(
+            $this->context,
+            self::TENANT,
+            $seller['uuid'],
+            'USD',
+            1000,
+            'idem-regress-mv5b-payout',
+            'ext-regress-mv5b-payout',
+            null,
+            'operatorregr7'
+        );
+
+        self::assertSame(
+            [
+                'uuid', 'tenant_uuid', 'seller_uuid', 'currency', 'amount', 'external_ref', 'note', 'created_by',
+                'idempotency_key', 'method', 'status', 'completed_at',
+            ],
+            array_keys($payout),
+            'the manual payout row shape must stay byte-identical for a real, active seller too -- no new field'
+        );
+        self::assertSame('paid', $payout['status']);
+        self::assertSame('manual', $payout['method']);
+    }
+
+    public function testDiagnosticsReportListsSellerLifecycleEventsTableAsPresentWithTheSwitchOff(): void
+    {
+        self::assertFalse((bool) config($this->context, 'commerce.marketplace.enabled', false));
+
+        $present = DiagnosticsReport::build($this->context)['database']['commerce_tables_present'];
+
+        self::assertArrayHasKey(self::MV5B_LIFECYCLE_TABLE, $present);
+        self::assertTrue(
+            $present[self::MV5B_LIFECYCLE_TABLE],
+            'DiagnosticsReport must list commerce_seller_lifecycle_events as present regardless of the switch'
+        );
+    }
+
+    /**
+     * MV5b Task 7: `commerce:tenancy:adopt` rekeys the new lifecycle-audit
+     * table too -- {@see DiagnosticsReport::tenantTables()} already lists it
+     * unconditionally (design spec §3), so {@see TenantAdopter} picks it up
+     * mechanically; this pins that behaviorally, mirroring the MV3/MV4/MV5a
+     * siblings above exactly, switch off (the default).
+     */
+    public function testTenantAdoptRekeysSellerLifecycleEventsEvenWhenTheMasterSwitchIsOff(): void
+    {
+        self::assertFalse(
+            (bool) config($this->context, 'commerce.marketplace.enabled', false),
+            'this test relies on the master switch being off (the default)'
+        );
+
+        $this->connection->table(self::MV5B_LIFECYCLE_TABLE)->insert([
+            'uuid' => 'mv5badoptev1',
+            'tenant_uuid' => '',
+            'seller_uuid' => 'mv5badoptsl1',
+            'from_status' => 'active',
+            'to_status' => 'suspended',
+            'actor_uuid' => 'mv5badoptop1',
+            'reason' => 'Regression adopt probe.',
+        ]);
+
+        $result = (new TenantAdopter())->adopt($this->context, 'tenantMV5b099');
+
+        self::assertSame(1, $result['tables'][self::MV5B_LIFECYCLE_TABLE], 'exactly 1 rekeyed row');
+        self::assertSame(
+            0,
+            $this->connection->table(self::MV5B_LIFECYCLE_TABLE)->where('tenant_uuid', '=', '')->count(),
+            'no sentinel rows left behind'
+        );
+        self::assertSame(
+            1,
+            $this->connection->table(self::MV5B_LIFECYCLE_TABLE)
+                ->where('tenant_uuid', '=', 'tenantMV5b099')
+                ->count(),
+            'row must be rekeyed to the adopted tenant'
+        );
+    }
+
+    /**
+     * Design spec §4/§6: the operator lifecycle-history read is tenant-bound
+     * and paginated, newest-first -- a repository-level pin of the SAME
+     * guarantee {@see SellerLifecycleSurfaceTest} already proves end to end
+     * over a real route, closing the loop within this file's own regression
+     * harness.
+     */
+    public function testSellerLifecycleHistoryIsPaginatedNewestFirstAndTenantBound(): void
+    {
+        $seller = $this->seedActiveSeller('regress-mv5b-history-seller');
+        $events = new SellerLifecycleEventRepository();
+
+        for ($i = 1; $i <= 3; $i++) {
+            $events->insert($this->context, self::TENANT, [
+                'uuid' => 'regressmv5bh' . $i,
+                'seller_uuid' => $seller['uuid'],
+                'from_status' => 'active',
+                'to_status' => 'suspended',
+                'actor_uuid' => 'operatorregr8',
+                'reason' => "Regression history event {$i}.",
+            ]);
+        }
+        // A different-tenant event for the SAME seller uuid must never leak in.
+        $events->insert($this->context, 'otherTenantMV5b', [
+            'uuid' => 'regressmv5bhx',
+            'seller_uuid' => $seller['uuid'],
+            'from_status' => 'active',
+            'to_status' => 'suspended',
+            'actor_uuid' => 'operatorregr9',
+            'reason' => 'Cross-tenant event that must never leak in.',
+        ]);
+
+        $page1 = $events->paginatedForSeller($this->context, self::TENANT, $seller['uuid'], 1, 2);
+        self::assertSame(3, $page1['total'], 'total must be tenant-bound (excludes the cross-tenant row)');
+        self::assertCount(2, $page1['items']);
+        self::assertSame('Regression history event 3.', $page1['items'][0]['reason'], 'newest first');
+        self::assertSame('Regression history event 2.', $page1['items'][1]['reason']);
+
+        $page2 = $events->paginatedForSeller($this->context, self::TENANT, $seller['uuid'], 2, 2);
+        self::assertSame(3, $page2['total']);
+        self::assertCount(1, $page2['items']);
+        self::assertSame('Regression history event 1.', $page2['items'][0]['reason']);
     }
 
     // -----------------------------------------------------------------

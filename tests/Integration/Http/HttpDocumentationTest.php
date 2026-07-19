@@ -149,6 +149,13 @@ final class HttpDocumentationTest extends CommerceTestCase
         self::assertContains('/commerce/admin/marketplace/sellers/{uuid}/reserves', $paths);
         self::assertContains('/commerce/seller/{sellerUuid}/financials/reserves', $paths);
 
+        // MV5b Task 2/7 (GATES): the seller-lifecycle audit history read. Already
+        // flows through the fully generic walk below with zero changes -- this
+        // `assertContains` only pins that the route is genuinely present in this
+        // pass, so a future regression that drops it from `routes.php` fails
+        // loudly here rather than silently shrinking the walked set.
+        self::assertContains('/commerce/admin/marketplace/sellers/{uuid}/lifecycle', $paths);
+
         $this->assertEveryCommerceRouteActionIsDocumented($router, $actions);
     }
 

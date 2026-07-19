@@ -3,18 +3,20 @@
 declare(strict_types=1);
 
 /**
- * Standalone subprocess for MarketplacePgsqlTest/CheckoutClaimPgsqlTest's
- * real-pgsql race lanes: runs ONE real marketplace service call in a
- * genuinely separate OS process (and therefore a genuinely separate database
- * connection), so its lock claims really block on PostgreSQL row-lock
- * contention held by the parent test process's own connection A. Mirrors
+ * Standalone subprocess for MarketplacePgsqlTest/CheckoutClaimPgsqlTest/
+ * SellerSuspensionPgsqlTest's real-pgsql race lanes: runs ONE real
+ * marketplace service call in a genuinely separate OS process (and
+ * therefore a genuinely separate database connection), so its lock claims
+ * really block on PostgreSQL row-lock contention held by the parent test
+ * process's own connection A. Mirrors
  * `tests/Integration/Http/fixtures/product_delete_race_child.php`'s shape
  * exactly; a single multiplexed script (rather than one file per action)
  * because every action here shares the identical bootstrap and only differs
  * in which service method it calls and how it reports the outcome.
  *
  * argv: 1=pgConfig JSON, 2=action, 3=args JSON
- * actions: create | activate | assign | close | changeRole | checkout
+ * actions: create | activate | assign | close | changeRole | checkout |
+ *     suspend | payoutRecord
  * stdout: JSON, shape depends on action (see each branch below)
  */
 
@@ -35,11 +37,16 @@ use Glueful\Extensions\Commerce\Discounts\DiscountRepository;
 use Glueful\Extensions\Commerce\Discounts\DiscountService;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
 use Glueful\Extensions\Commerce\Marketplace\FixedSellerRoleAuthority;
+use Glueful\Extensions\Commerce\Marketplace\LedgerAccountLock;
+use Glueful\Extensions\Commerce\Marketplace\LedgerRepository;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceActivationException;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceActivationService;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceMode;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceWorkspaceLock;
+use Glueful\Extensions\Commerce\Marketplace\PayoutRepository;
+use Glueful\Extensions\Commerce\Marketplace\PayoutService;
 use Glueful\Extensions\Commerce\Marketplace\SellerAttributionService;
+use Glueful\Extensions\Commerce\Marketplace\SellerBalanceService;
 use Glueful\Extensions\Commerce\Marketplace\SellerLifecycleEventRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipService;
@@ -249,6 +256,56 @@ try {
                 'partitioned' => (bool) $placed['order']['marketplace_partitioned'],
                 'sellerUuid' => $line['seller_uuid'] ?? null,
                 'exceptionClass' => null,
+            ];
+            break;
+
+        // MV5b Task 7 (design spec §2.1/§2.4/§2.7): the REAL SellerService::suspend()
+        // -- claims the seller revision FIRST, the SAME primitive a concurrent
+        // checkout/payout-reservation claims for the identical seller row.
+        case 'suspend':
+            $sellers = new SellerService(
+                new SellerRepository(),
+                new SellerMembershipRepository(),
+                new SellerLifecycleEventRepository()
+            );
+            $seller = $sellers->suspend(
+                $context,
+                $tenant,
+                (string) $args['sellerUuid'],
+                (string) $args['reason'],
+                (string) $args['actor']
+            );
+            $out = ['ok' => true, 'suspended' => true, 'status' => $seller['status'], 'exceptionClass' => null];
+            break;
+
+        // MV5b Task 7 (design spec §2.7): the REAL PayoutService::record() manual
+        // operator payout -- claims the seller revision FIRST, strictly before the
+        // account lock, the SAME primitive a concurrent suspend() claims.
+        case 'payoutRecord':
+            $ledger = new LedgerRepository();
+            $payoutService = new PayoutService(
+                new PayoutRepository(),
+                $ledger,
+                new LedgerAccountLock(),
+                new SellerBalanceService($ledger),
+                new SellerRepository()
+            );
+            $payout = $payoutService->record(
+                $context,
+                $tenant,
+                (string) $args['sellerUuid'],
+                (string) $args['currency'],
+                (int) $args['amount'],
+                (string) $args['idempotencyKey'],
+                (string) $args['externalRef'],
+                null,
+                (string) $args['actorUuid']
+            );
+            $out = [
+                'ok' => true,
+                'exceptionClass' => null,
+                'payoutUuid' => $payout['uuid'],
+                'amount' => (int) $payout['amount'],
             ];
             break;
 
