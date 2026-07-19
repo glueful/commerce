@@ -119,6 +119,16 @@ return [
             // (soft `PayoutCollector`, design spec §2.9).
             'default_provider' => env('COMMERCE_PAYOUTS_DEFAULT_PROVIDER'),
         ],
+
+        // Rolling-reserve release sweep (MV5a, design spec §2.3/§3-config).
+        // Operational settings ONLY -- the reserve POLICY itself
+        // (`reserve_bps`/`reserve_days`, default 0 = off) lives exclusively in
+        // `commerce_marketplace_settings`/`commerce_sellers`, never here.
+        'reserves' => [
+            // Max `commerce_seller_reserves` rows the release-sweep CLI claims
+            // per invocation.
+            'release_sweep_batch_size' => (int) env('COMMERCE_RESERVES_RELEASE_SWEEP_BATCH_SIZE', 100),
+        ],
     ],
 
     // Null-tolerant: invoice-data serializes each key as null, never omitted, when unset.

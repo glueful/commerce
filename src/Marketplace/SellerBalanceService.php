@@ -39,7 +39,8 @@ final class SellerBalanceService
      *     commission: int,
      *     refunds: int,
      *     commission_reversed: int,
-     *     adjustments: int
+     *     adjustments: int,
+     *     debt: int
      * }
      */
     public function balance(ApplicationContext $context, string $tenant, string $sellerUuid, string $currency): array
@@ -74,7 +75,8 @@ final class SellerBalanceService
      *     commission: int,
      *     refunds: int,
      *     commission_reversed: int,
-     *     adjustments: int
+     *     adjustments: int,
+     *     debt: int
      * }
      */
     public function marketplaceBalance(ApplicationContext $context, string $tenant, string $currency): array

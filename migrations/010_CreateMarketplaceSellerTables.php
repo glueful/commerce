@@ -12,6 +12,15 @@ use Glueful\Database\Schema\Interfaces\SchemaBuilderInterface;
  * settings row, seller identity, and seller memberships. Commerce is a
  * PUBLISHED extension (1.1.0) -- this is a REAL new migration, never a fold
  * into an already-shipped one.
+ *
+ * MV5a (design spec §3.1) folds the rolling-reserve policy columns directly
+ * into these still-unreleased tables rather than adding a follow-up ALTER:
+ * `commerce_marketplace_settings.reserve_bps`/`reserve_days` is the
+ * workspace-default policy (NOT NULL, default 0 -- `0` on either means the
+ * feature is off for that workspace), and `commerce_sellers.reserve_bps`/
+ * `reserve_days` is the nullable per-seller override (null inherits the
+ * workspace default; an explicit `0` disables it for that seller without
+ * inheriting).
  */
 final class CreateMarketplaceSellerTables implements MigrationInterface
 {
@@ -34,6 +43,13 @@ final class CreateMarketplaceSellerTables implements MigrationInterface
                 $table->bigInteger('commission_fixed')->nullable();
                 $table->string('activated_by', 12)->nullable();
                 $table->timestamp('activated_at')->nullable();
+                // Rolling-reserve workspace policy (MV5a, design spec §2.1/§3.1): the
+                // fallback level in the per-seller-override -> workspace-default
+                // resolution chain. NOT NULL with a `0` default -- `0` bps OR `0`
+                // days means no rolling reserve, so an unconfigured workspace is
+                // inert by construction.
+                $table->integer('reserve_bps')->default(0);
+                $table->integer('reserve_days')->default(0);
                 $table->integer('revision')->default(0);
                 $table->timestamp('created_at')->default('CURRENT_TIMESTAMP');
                 $table->timestamp('updated_at')->nullable();
@@ -57,6 +73,12 @@ final class CreateMarketplaceSellerTables implements MigrationInterface
                 $table->string('commission_kind', 16)->nullable();
                 $table->integer('commission_bps')->nullable();
                 $table->bigInteger('commission_fixed')->nullable();
+                // Rolling-reserve per-seller override (MV5a, design spec §2.1/§3.1):
+                // null inherits the workspace default above; an explicit `0` on
+                // either column disables the reserve for this seller WITHOUT
+                // inheriting (mirrors the commission override nullability idiom).
+                $table->integer('reserve_bps')->nullable();
+                $table->integer('reserve_days')->nullable();
                 $table->string('status', 16)->default('active');
                 $table->integer('revision')->default(0);
                 $table->timestamp('created_at')->default('CURRENT_TIMESTAMP');

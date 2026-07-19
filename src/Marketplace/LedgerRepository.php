@@ -31,7 +31,13 @@ final class LedgerRepository
     /** design spec §2.5: the marketplace account's canonical, literal key. */
     public const MARKETPLACE_ACCOUNT_KEY = 'marketplace';
 
-    /** Every immutable semantic field a duplicate idempotency-key insert must match exactly. */
+    /**
+     * Every immutable semantic field a duplicate idempotency-key insert must
+     * match exactly. MV5a (design spec §2.5/§2.9/§3.4) expands this from 12
+     * to 14 fields with `reserve_uuid`/`chargeback_uuid`: a replay whose
+     * correlation id disagrees with the persisted row is an integrity
+     * failure like any other field mismatch, never a silent skip.
+     */
     private const VERIFIED_FIELDS = [
         'amount',
         'currency',
@@ -43,6 +49,8 @@ final class LedgerRepository
         'seller_order_uuid',
         'refund_uuid',
         'payout_uuid',
+        'reserve_uuid',
+        'chargeback_uuid',
         'reason',
         'created_by',
     ];
@@ -95,6 +103,8 @@ final class LedgerRepository
      *     seller_order_uuid?: string|null,
      *     refund_uuid?: string|null,
      *     payout_uuid?: string|null,
+     *     reserve_uuid?: string|null,
+     *     chargeback_uuid?: string|null,
      *     idempotency_key: string,
      *     reason?: string|null,
      *     created_by?: string|null
@@ -127,6 +137,8 @@ final class LedgerRepository
             'seller_order_uuid' => $entry['seller_order_uuid'] ?? null,
             'refund_uuid' => $entry['refund_uuid'] ?? null,
             'payout_uuid' => $entry['payout_uuid'] ?? null,
+            'reserve_uuid' => $entry['reserve_uuid'] ?? null,
+            'chargeback_uuid' => $entry['chargeback_uuid'] ?? null,
             'idempotency_key' => $entry['idempotency_key'],
             'reason' => $entry['reason'] ?? null,
             'created_by' => $entry['created_by'] ?? null,
@@ -206,6 +218,14 @@ final class LedgerRepository
      * `available` (SUM over every entry, hold included) and `paid_out` are
      * unaffected by the split.
      *
+     * MV5a (design spec §2.6/§2.9): `debt = max(0, -available)` -- there is
+     * no separate mutable "debt balance", it is purely the surfaced
+     * magnitude of a negative `available`, derived from the SAME
+     * `$available` accumulator computed below, so it costs neither a second
+     * query nor a second scan. `available` itself is never clamped -- it
+     * stays negative when the seller is in debt; `debt` is just the
+     * surfaced positive magnitude.
+     *
      * @return array{
      *     available: int,
      *     pending: int,
@@ -215,7 +235,8 @@ final class LedgerRepository
      *     commission: int,
      *     refunds: int,
      *     commission_reversed: int,
-     *     adjustments: int
+     *     adjustments: int,
+     *     debt: int
      * }
      */
     public function balanceComponents(
@@ -266,6 +287,7 @@ final class LedgerRepository
             'refunds' => -$s('refund_debit'),
             'commission_reversed' => $s('commission_reversal'),
             'adjustments' => $s('adjustment'),
+            'debt' => max(0, -$available),
         ];
     }
 

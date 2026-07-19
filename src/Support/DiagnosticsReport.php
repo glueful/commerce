@@ -214,6 +214,18 @@ final class DiagnosticsReport
             // §3.2). Marketplace-aware REGARDLESS of `commerce.marketplace.enabled`
             // for the same reason as the MV1-MV3 tables above.
             'commerce_seller_payout_accounts',
+            // Marketplace MV5a rolling reserves + policy audit (design spec §3.2).
+            // Marketplace-aware REGARDLESS of `commerce.marketplace.enabled` for the
+            // same reason as the MV1-MV4 tables above.
+            'commerce_seller_reserves',
+            'commerce_reserve_policy_events',
+            // Marketplace MV5a chargebacks + attribution lines (design spec §3.3).
+            // Marketplace-aware REGARDLESS of `commerce.marketplace.enabled` for the
+            // same reason as the MV1-MV4 tables above. An already-partitioned
+            // historical order's chargeback still processes after workspace
+            // deactivation (design spec §2.4/§7).
+            'commerce_chargebacks',
+            'commerce_chargeback_lines',
         ];
     }
 

@@ -70,6 +70,7 @@ final class BalanceTest extends CommerceTestCase
             'refunds' => 1000,
             'commission_reversed' => 100,
             'adjustments' => 20,
+            'debt' => 0,
         ], $balance);
     }
 
@@ -143,10 +144,114 @@ final class BalanceTest extends CommerceTestCase
         $balance = $this->service->balance($this->context, self::TENANT, self::SELLER, 'USD');
 
         self::assertSame(-5000, $balance['available']);
+        self::assertSame(5000, $balance['debt'], 'debt = max(0, -available)');
         self::assertSame(
             -5000,
             $this->service->available($this->context, self::TENANT, self::SELLER, 'USD')
         );
+    }
+
+    // -----------------------------------------------------------------
+    // MV5a §2.6/§2.9: `debt` is the derived, surfaced magnitude of a
+    // negative `available` -- never a separate mutable balance, never
+    // clamping `available` itself. `debt = max(0, -available)`.
+    // -----------------------------------------------------------------
+
+    /**
+     * A chargeback that exceeds the seller's sale proceeds drives `available`
+     * negative (design spec §2.6: "post the remaining debit in FULL, allowing
+     * `available` to go negative"). `debt` surfaces the exact positive
+     * magnitude while `available` itself stays negative, unclamped.
+     */
+    public function testDebtSurfacesTheExactMagnitudeOfANegativeAvailableFromAChargeback(): void
+    {
+        $this->postAll(self::SELLER, 'orderBAL00011', [
+            ['entry_type' => 'sale_credit', 'amount' => 2000],
+            ['entry_type' => 'chargeback_debit', 'amount' => -3500, 'suffix' => 'cb1'],
+        ]);
+
+        $balance = $this->service->balance($this->context, self::TENANT, self::SELLER, 'USD');
+
+        self::assertSame(-1500, $balance['available'], 'available is NOT clamped -- stays negative');
+        self::assertSame(1500, $balance['debt'], 'debt == -available (positive magnitude)');
+    }
+
+    /**
+     * Same derivation via a large `refund_debit` that exceeds credits
+     * (design spec §2.6 example) -- `debt` is not tied to any one entry_type,
+     * it is purely `max(0, -available)` over the whole account.
+     */
+    public function testDebtSurfacesTheExactMagnitudeOfANegativeAvailableFromAnOversizedRefund(): void
+    {
+        $this->postAll(self::SELLER, 'orderBAL00012', [
+            ['entry_type' => 'sale_credit', 'amount' => 1000],
+            ['entry_type' => 'refund_debit', 'amount' => -4000, 'suffix' => 'rf1'],
+        ]);
+
+        $balance = $this->service->balance($this->context, self::TENANT, self::SELLER, 'USD');
+
+        self::assertSame(-3000, $balance['available']);
+        self::assertSame(3000, $balance['debt']);
+    }
+
+    /**
+     * A solvent seller (`available >= 0`) always has `debt == 0` -- both the
+     * exact zero-crossing boundary and a comfortably positive balance.
+     */
+    public function testDebtIsZeroForASolventSellerIncludingExactlyZeroAvailable(): void
+    {
+        $this->postAll(self::SELLER, 'orderBAL00013', [
+            ['entry_type' => 'sale_credit', 'amount' => 4200],
+        ]);
+        $solvent = $this->service->balance($this->context, self::TENANT, self::SELLER, 'USD');
+        self::assertSame(4200, $solvent['available']);
+        self::assertSame(0, $solvent['debt']);
+
+        $this->postAll(self::OTHER_SELLER, 'orderBAL00014', [
+            ['entry_type' => 'sale_credit', 'amount' => 900],
+            ['entry_type' => 'refund_debit', 'amount' => -900, 'suffix' => 'rf1'],
+        ]);
+        $zero = $this->service->balance($this->context, self::TENANT, self::OTHER_SELLER, 'USD');
+        self::assertSame(0, $zero['available'], 'sanity: exactly zero, the debt/solvent boundary');
+        self::assertSame(0, $zero['debt']);
+    }
+
+    /**
+     * Additive-only guardrail (design spec §2.9): adding `debt` must never
+     * disturb the pre-existing `available`/`pending`/`reserved`/`paid_out`
+     * semantics for a seller who is simultaneously in debt AND has payout
+     * holds/reserves/paid_out history -- every prior key keeps its exact
+     * pre-MV5a value alongside the new `debt` key.
+     */
+    public function testDebtIsAdditiveAndLeavesEveryExistingBalanceKeyUnchanged(): void
+    {
+        $accountKey = LedgerRepository::accountKeyForSeller(self::SELLER);
+
+        $this->postAll(self::SELLER, 'orderBAL00015', [
+            ['entry_type' => 'sale_credit', 'amount' => 1000],
+            ['entry_type' => 'commission_debit', 'amount' => -100],
+            ['entry_type' => 'chargeback_debit', 'amount' => -2000, 'suffix' => 'cb1'],
+            ['entry_type' => 'payout_debit', 'amount' => -50],
+        ]);
+        $this->ledger->post($this->context, self::TENANT, $this->reserveEntry(
+            $accountKey,
+            amount: -75,
+            payoutUuid: null,
+            idempotencyKey: 'riskBAL00099:' . self::SELLER . ':reserve_hold'
+        ));
+
+        $balance = $this->service->balance($this->context, self::TENANT, self::SELLER, 'USD');
+
+        $expectedAvailable = 1000 - 100 - 2000 - 50 - 75;
+        self::assertSame(-1225, $expectedAvailable, 'sanity: hand-computed expectation');
+
+        self::assertSame($expectedAvailable, $balance['available'], 'available unchanged by the debt addition');
+        self::assertSame(0, $balance['pending'], 'pending unchanged');
+        self::assertSame(75, $balance['reserved'], 'reserved unchanged');
+        self::assertSame(50, $balance['paid_out'], 'paid_out unchanged');
+        self::assertSame(1000, $balance['gross_sales'], 'gross_sales unchanged');
+        self::assertSame(100, $balance['commission'], 'commission unchanged');
+        self::assertSame(1225, $balance['debt'], 'debt == -available, the new additive key');
     }
 
     // -----------------------------------------------------------------
@@ -270,6 +375,7 @@ final class BalanceTest extends CommerceTestCase
             'refunds' => 0,
             'commission_reversed' => 0,
             'adjustments' => 0,
+            'debt' => 0,
         ], $balance);
 
         self::assertSame(0, $this->service->available($this->context, self::TENANT, 'sellerEMPTY001', 'USD'));

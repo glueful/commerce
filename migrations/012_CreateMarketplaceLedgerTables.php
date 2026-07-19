@@ -20,6 +20,15 @@ use Glueful\Database\Schema\Interfaces\SchemaBuilderInterface;
  * (design spec §3.7): `TenantAdopter` rekeys rows `WHERE tenant_uuid = ''`,
  * so without the empty-string default the adopt sweep would silently match
  * nothing.
+ *
+ * MV5a (design spec §2.5/§2.9/§3.4) folds nullable `reserve_uuid`/
+ * `chargeback_uuid` correlation columns directly into the still-unreleased
+ * `commerce_marketplace_ledger`: every rolling/manual risk `reserve_hold`/
+ * `reserve_release` entry carries `reserve_uuid`, and every chargeback
+ * `chargeback_debit`/`chargeback_credit` (plus its paired commission entry)
+ * carries `chargeback_uuid`. {@see \Glueful\Extensions\Commerce\Marketplace\LedgerRepository}'s
+ * insert row and replay-verify allowlist are expanded from 12 to 14
+ * immutable fields in the same task -- see `LedgerRepository::VERIFIED_FIELDS`.
  */
 final class CreateMarketplaceLedgerTables implements MigrationInterface
 {
@@ -53,6 +62,12 @@ final class CreateMarketplaceLedgerTables implements MigrationInterface
                 $table->string('seller_order_uuid', 12)->nullable();
                 $table->string('refund_uuid', 12)->nullable();
                 $table->string('payout_uuid', 12)->nullable();
+                // MV5a correlation columns (design spec §2.5/§2.9/§3.4), folded in
+                // ahead of release -- see class docblock. Both nullable: the vast
+                // majority of entry types (sale_credit, commission_debit,
+                // refund_debit, payout_debit, adjustment, ...) carry neither.
+                $table->string('reserve_uuid', 12)->nullable();
+                $table->string('chargeback_uuid', 12)->nullable();
                 // Deterministic idempotency identity (design spec §2.5): a duplicate
                 // (tenant_uuid, idempotency_key) insert is a verify, never a new row.
                 $table->string('idempotency_key', 191);
@@ -72,6 +87,8 @@ final class CreateMarketplaceLedgerTables implements MigrationInterface
                 $table->index('order_uuid');
                 $table->index('refund_uuid');
                 $table->index('payout_uuid');
+                $table->index('reserve_uuid');
+                $table->index('chargeback_uuid');
             });
         }
 

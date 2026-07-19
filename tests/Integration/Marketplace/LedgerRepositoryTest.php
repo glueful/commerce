@@ -15,6 +15,11 @@ use Glueful\Extensions\Commerce\Tests\Support\CommerceTestCase;
  * balance-component sign formulas, reconciliation scans, and the
  * `(tenant_uuid, account_key, currency)` account-posting lock every
  * balance-affecting posting (Tasks 6-10) claims before writing.
+ *
+ * MV5a (design spec §2.5/§2.9/§3.4, Task 4) expands the idempotency VERIFY
+ * from 12 to 14 immutable fields with `reserve_uuid`/`chargeback_uuid` --
+ * {@see self::testVerifiedFieldsAllowlistCoversExactlyFourteenImmutableFields()}
+ * and the two new {@see self::mismatchedFieldProvider()} cases below.
  */
 final class LedgerRepositoryTest extends CommerceTestCase
 {
@@ -170,9 +175,80 @@ final class LedgerRepositoryTest extends CommerceTestCase
             'seller_order_uuid' => [['seller_order_uuid' => 'selordDIFFER1']],
             'refund_uuid' => [['refund_uuid' => 'refundDIFFR01']],
             'payout_uuid' => [['payout_uuid' => 'payoutDIFFR01']],
+            'reserve_uuid' => [['reserve_uuid' => 'reserveDIFFR1']],
+            'chargeback_uuid' => [['chargeback_uuid' => 'chargebckDF1']],
             'reason' => [['reason' => 'a different reason']],
             'created_by' => [['created_by' => 'operatorDIFF1']],
         ];
+    }
+
+    /**
+     * Locks the MV5a expansion (design spec §2.5/§2.9/§3.4): a correlation-id
+     * mismatch on replay is an integrity failure like any other immutable
+     * field, and the allowlist itself is exactly 14 fields -- neither a
+     * silent no-op regression (a field dropped back out) nor an accidental
+     * narrowing.
+     */
+    public function testVerifiedFieldsAllowlistCoversExactlyFourteenImmutableFields(): void
+    {
+        $fields = (new \ReflectionClass(LedgerRepository::class))->getConstant('VERIFIED_FIELDS');
+
+        self::assertCount(14, $fields);
+        self::assertContains('reserve_uuid', $fields);
+        self::assertContains('chargeback_uuid', $fields);
+    }
+
+    // -----------------------------------------------------------------
+    // MV5a: reserve_uuid/chargeback_uuid round-trip and replay like every
+    // other correlation column (design spec §2.5/§2.9/§3.4).
+    // -----------------------------------------------------------------
+
+    public function testReserveUuidRoundTripsAndReplaysIdempotentlyWhenSet(): void
+    {
+        $entry = $this->baseEntry([
+            'entry_type' => 'reserve_hold',
+            'amount' => -800,
+            'reserve_uuid' => 'reserveuuid01',
+            'idempotency_key' => 'orderRSV00001:' . self::SELLER . ':reserve_hold',
+        ]);
+
+        $this->ledger->post($this->context, self::TENANT, $entry);
+        // Exact replay -- idempotent no-op, never a second row.
+        $this->ledger->post($this->context, self::TENANT, $entry);
+
+        $rows = $this->connection()->table('commerce_marketplace_ledger')
+            ->where('tenant_uuid', '=', self::TENANT)
+            ->where('idempotency_key', '=', $entry['idempotency_key'])
+            ->get();
+
+        self::assertCount(1, $rows);
+        self::assertSame('reserveuuid01', $rows[0]['reserve_uuid']);
+        self::assertNull($rows[0]['chargeback_uuid']);
+    }
+
+    public function testChargebackUuidRoundTripsAndReplaysIdempotentlyWhenSet(): void
+    {
+        $entry = $this->baseEntry([
+            'entry_type' => 'chargeback_debit',
+            'amount' => -400,
+            'order_uuid' => null,
+            'seller_order_uuid' => null,
+            'chargeback_uuid' => 'chargebckuu01',
+            'idempotency_key' => 'chargebackCB1:' . self::SELLER . ':chargeback_debit',
+        ]);
+
+        $this->ledger->post($this->context, self::TENANT, $entry);
+        // Exact replay -- idempotent no-op, never a second row.
+        $this->ledger->post($this->context, self::TENANT, $entry);
+
+        $rows = $this->connection()->table('commerce_marketplace_ledger')
+            ->where('tenant_uuid', '=', self::TENANT)
+            ->where('idempotency_key', '=', $entry['idempotency_key'])
+            ->get();
+
+        self::assertCount(1, $rows);
+        self::assertSame('chargebckuu01', $rows[0]['chargeback_uuid']);
+        self::assertNull($rows[0]['reserve_uuid']);
     }
 
     // -----------------------------------------------------------------
@@ -256,7 +332,7 @@ final class LedgerRepositoryTest extends CommerceTestCase
         self::assertSame(
             [
                 'available' => 0, 'pending' => 0, 'reserved' => 0, 'paid_out' => 0, 'gross_sales' => 0,
-                'commission' => 0, 'refunds' => 0, 'commission_reversed' => 0, 'adjustments' => 0,
+                'commission' => 0, 'refunds' => 0, 'commission_reversed' => 0, 'adjustments' => 0, 'debt' => 0,
             ],
             $components
         );
@@ -471,6 +547,8 @@ final class LedgerRepositoryTest extends CommerceTestCase
             'seller_order_uuid' => 'selordDEFAULT1',
             'refund_uuid' => null,
             'payout_uuid' => null,
+            'reserve_uuid' => null,
+            'chargeback_uuid' => null,
             'idempotency_key' => 'orderDEFAULT01:' . self::SELLER . ':sale_credit',
             'reason' => null,
             'created_by' => null,
