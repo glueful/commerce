@@ -16,9 +16,12 @@ use Glueful\Extensions\Commerce\Support\UtcNowSql;
  * `reserve_uuid` (Task 9/14 consumption/release); this repository only
  * ever persists/reads the immutable identity + policy-snapshot fields.
  *
- * `manual` holds (design spec §2.8, a LATER task) are out of scope here --
- * this class currently only knows how to write/find `source_kind=rolling`
- * rows.
+ * `manual` holds (design spec §2.8, MV5a Task 15): the operator-initiated
+ * sibling of a `rolling` hold -- {@see self::insertManualHold()}/
+ * {@see self::findManualByIdempotencyKey()} are the `manual`-scoped analogs
+ * of {@see self::insertRollingHold()}/{@see self::findRollingHold()}, keyed
+ * on the caller's own `idempotency_key` rather than `(seller_order_uuid,
+ * seller_uuid)` -- a manual hold has no seller order to key off of.
  */
 final class ReserveRepository
 {
@@ -118,6 +121,108 @@ final class ReserveRepository
             ->where('seller_order_uuid', '=', $sellerOrderUuid)
             ->where('seller_uuid', '=', $sellerUuid)
             ->where('source_kind', '=', 'rolling')
+            ->first();
+    }
+
+    /**
+     * ONE INSERT per operator-claimed `idempotency_key` (design spec §2.8, MV5a Task 15):
+     * the `manual`-hold sibling of {@see self::insertRollingHold()} -- SAME
+     * always-attempt-the-insert-first idiom, SAME nested-transaction (SAVEPOINT) contract
+     * (this method's caller, {@see ReserveService::manualHold()}, always runs it inside its
+     * own already-open transaction), SAME duplicate-key-race degrade-cleanly-and-return-the-
+     * pre-existing-row behavior. The ONLY unique constraint a `manual` row's insert can ever
+     * collide on is `(tenant_uuid, idempotency_key)` (its `seller_order_uuid` is always
+     * `NULL`, exempt from the rolling-hold's own unique pair) -- so a caught `\PDOException`
+     * here has exactly one possible legitimate cause, re-confirmed by re-reading via
+     * {@see self::findManualByIdempotencyKey()}.
+     *
+     * `source_kind=manual`, `seller_order_uuid=NULL`, policy snapshots `0`/`0`, `release_at
+     * =NULL` (indefinite -- design spec §2.8: a manual hold never auto-releases via
+     * {@see self::dueForRelease()}'s `whereNotNull('release_at')` filter) are ALL fixed here,
+     * never caller-supplied -- {@see ReserveService::manualHold()} never has the option to
+     * override them.
+     *
+     * @param array{
+     *     uuid: string,
+     *     seller_uuid: string,
+     *     currency: string,
+     *     amount: int,
+     *     idempotency_key: string,
+     *     created_by: string,
+     *     reason: string,
+     *     held_at: string
+     * } $row
+     * @return array<string,mixed> the persisted row (freshly inserted, or the pre-existing
+     *     row on a genuine duplicate-idempotency-key race) -- {@see ReserveService::manualHold()}
+     *     is responsible for verifying a race-recovered row's identity against the request
+     *     that raced it before trusting it as a legitimate replay.
+     */
+    public function insertManualHold(ApplicationContext $context, string $tenant, array $row): array
+    {
+        try {
+            db($context)->transaction(function () use ($context, $tenant, $row): void {
+                db($context)->table('commerce_seller_reserves')->insert([
+                    'uuid' => $row['uuid'],
+                    'tenant_uuid' => $tenant,
+                    'seller_uuid' => $row['seller_uuid'],
+                    'currency' => $row['currency'],
+                    'source_kind' => 'manual',
+                    'seller_order_uuid' => null,
+                    'idempotency_key' => $row['idempotency_key'],
+                    'amount' => $row['amount'],
+                    'reserve_bps_snapshot' => 0,
+                    'reserve_days_snapshot' => 0,
+                    'status' => 'held',
+                    'held_at' => $row['held_at'],
+                    'release_at' => null,
+                    'created_by' => $row['created_by'],
+                    'reason' => $row['reason'],
+                ]);
+            });
+        } catch (\PDOException $e) {
+            $existing = $this->findManualByIdempotencyKey($context, $tenant, $row['idempotency_key']);
+            if ($existing === null) {
+                // Unrelated failure -- never swallowed as a verified duplicate
+                // (mirrors insertRollingHold()'s identical discipline).
+                throw $e;
+            }
+
+            return $existing;
+        }
+
+        $inserted = $this->findManualByIdempotencyKey($context, $tenant, $row['idempotency_key']);
+        if ($inserted === null) {
+            // Unreachable given the insert above just committed -- defensive only.
+            throw new LedgerException(
+                "Manual reserve hold insert failure: row for idempotency_key '{$row['idempotency_key']}' "
+                    . 'not found immediately after insert.'
+            );
+        }
+
+        return $inserted;
+    }
+
+    /**
+     * The `manual`-hold identity lookup (design spec §3.2 unique `(tenant_uuid,
+     * idempotency_key)`, MV5a Task 15): the `manual`-scoped analog of
+     * {@see self::findRollingHold()} -- {@see ReserveService::manualHold()} calls this FIRST,
+     * before ever claiming a lock or attempting an insert, to detect a replay of an
+     * already-claimed `idempotency_key`. Scoped to `source_kind = 'manual'` even though the
+     * `(tenant_uuid, idempotency_key)` unique constraint alone would already be sufficient
+     * (a `rolling` row's `idempotency_key` is always `NULL`, so it could never collide) --
+     * explicit for clarity, and defense in depth against that invariant ever drifting.
+     *
+     * @return array<string,mixed>|null
+     */
+    public function findManualByIdempotencyKey(
+        ApplicationContext $context,
+        string $tenant,
+        string $idempotencyKey
+    ): ?array {
+        return db($context)->table('commerce_seller_reserves')
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('idempotency_key', '=', $idempotencyKey)
+            ->where('source_kind', '=', 'manual')
             ->first();
     }
 
@@ -260,5 +365,34 @@ final class ReserveRepository
             ]);
 
         return $affected === 1;
+    }
+
+    /**
+     * Reopens a `consumed`/`released` reserve row back to `held` (design spec
+     * §2.10, MV5a Task 14): a compensating reversal restoring money into a
+     * still-unexpired reserve's protection must undo whichever terminal state
+     * {@see self::markConsumed()}/{@see self::markReleased()} left the row in,
+     * clearing `closed_at` -- the row resumes its normal `held` lifecycle
+     * (still eligible for {@see self::dueForRelease()}/{@see self::heldForConsumption()}
+     * going forward). A row that never left `held` in the first place (only
+     * PARTIALLY consumed by the original chargeback) needs no repair -- the
+     * `whereIn` predicate naturally excludes it, and a `false` return is a
+     * legitimate no-op, never an error.
+     */
+    public function reopenToHeld(ApplicationContext $context, string $tenant, string $uuid): bool
+    {
+        $now = db($context)->getDriver()->formatDateTime();
+
+        $affected = db($context)->table('commerce_seller_reserves')
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('uuid', '=', $uuid)
+            ->whereIn('status', ['consumed', 'released'])
+            ->update([
+                'status' => 'held',
+                'closed_at' => null,
+                'updated_at' => $now,
+            ]);
+
+        return $affected >= 1;
     }
 }

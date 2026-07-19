@@ -171,6 +171,164 @@ final class ReserveConsumptionService
         return $totalConsumed;
     }
 
+    /**
+     * Reserve REINSTATEMENT (design spec §2.10, MV5a Task 14): the mirror-image
+     * sibling of {@see self::consume()}, called by
+     * {@see \Glueful\Extensions\Commerce\Marketplace\ChargebackService}'s
+     * compensating-reversal posting under the SAME precondition -- the caller's
+     * own already-claimed seller/currency {@see LedgerAccountLock} and open
+     * transaction; this method never claims a lock or opens one of its own.
+     *
+     * Walks {@see LedgerRepository::reserveReleasesForChargeback()} for the
+     * ORIGINAL chargeback, SCOPED TO THIS SELLER -- every reserve THIS
+     * seller's own liability drew from, in the SAME order it drew from them
+     * -- and for each STILL-UNEXPIRED one (a `release_at` that is null (an
+     * indefinite manual hold) or already elapsed is a permanent skip, design
+     * spec §2.10 "if the window has elapsed, nothing is re-held"), posts an
+     * idempotent `reserve_hold` back onto that SAME `reserve_uuid`, capped by
+     * THREE independent ceilings so a reinstatement can never overshoot in
+     * any dimension:
+     *
+     * **Seller-scoping (CRITICAL fix, MV5a Task 14 review):** a MULTI-seller
+     * original chargeback consumes MULTIPLE sellers' own reserves under the
+     * SAME `chargeback_uuid`, and `postReversalCompensation()` calls this
+     * method once PER credited seller. `reserveReleasesForChargeback()` is
+     * itself scoped to `$sellerUuid` (never a bare `chargeback_uuid` scan),
+     * and every candidate reserve is re-verified against `$sellerUuid`
+     * below, in DEFENSE IN DEPTH -- so seller A's call can NEVER re-hold
+     * seller B's reserve under seller A's already-claimed lock (a permanent
+     * cross-seller money transfer: A pays for B's re-hold, B's own liability
+     * silently vanishes).
+     *  1. `$consumedByOriginal` -- the reserve's own share of what the ORIGINAL
+     *     chargeback took from it (never restore more than was ever taken);
+     *  2. the reserve's own remaining ROOM (`amount - currently-derived
+     *     remaining`, freshly re-derived, never a stale value) -- so cumulative
+     *     reinstatement across however many separate reversal events never
+     *     pushes the reserve's derived remaining past its own original
+     *     `amount` (design spec §2.10's explicit cap);
+     *  3. the running `$creditAmount` pool -- THIS reversal's own posted
+     *     `chargeback_credit` for this seller. Without this cap a reversal
+     *     could re-hold MORE than it actually credited back, driving
+     *     `available` further negative than before the reversal ever landed
+     *     -- exactly the perverse outcome a "the seller won their dispute"
+     *     event must never cause. A full reversal (credit == the seller's
+     *     full original debit) is never credit-starved by this cap, since
+     *     `$consumedByOriginal` can never exceed that seller's net liability,
+     *     which is itself always <= the full debit (design spec §2.5/§2.6
+     *     "reserve-first consumption... up to the net liability").
+     *
+     * A reserve that reinstatement reopens (was `consumed` or `released`) is
+     * restored to `held` via {@see ReserveRepository::reopenToHeld()} in the
+     * SAME posting step. Idempotency key `{reversalUuid}:{reserveUuid}:reserve_reinstate`
+     * -- a duplicate reversal event never reaches here at all (the caller's own
+     * `received`-status gate is the primary guard, design spec §2.4's event-first
+     * discipline), but the key still gives {@see LedgerRepository::post()}'s own
+     * verify a defense-in-depth backstop.
+     *
+     * @return int total amount actually re-held (never more than `$creditAmount`)
+     */
+    public function reinstate(
+        ApplicationContext $c,
+        string $tenant,
+        string $sellerUuid,
+        string $currency,
+        int $creditAmount,
+        string $originalChargebackUuid,
+        string $reversalUuid
+    ): int {
+        if ($creditAmount <= 0) {
+            return 0;
+        }
+
+        $consumedByReserve = $this->ledger->reserveReleasesForChargeback(
+            $c,
+            $tenant,
+            $originalChargebackUuid,
+            $sellerUuid
+        );
+        if ($consumedByReserve === []) {
+            return 0;
+        }
+
+        $accountKey = LedgerRepository::accountKeyForSeller($sellerUuid);
+        $creditLeft = $creditAmount;
+        $totalReinstated = 0;
+
+        foreach ($consumedByReserve as $reserveUuid => $consumedByOriginal) {
+            if ($creditLeft <= 0) {
+                break;
+            }
+            if ($consumedByOriginal <= 0) {
+                continue;
+            }
+
+            $reserve = $this->reserves->findByUuid($c, $tenant, $reserveUuid);
+            if (
+                $reserve === null
+                || (string) ($reserve['seller_uuid'] ?? '') !== $sellerUuid
+                || !self::isStillUnexpired($reserve['release_at'] ?? null)
+            ) {
+                // No such reserve (defensive only), a reserve that somehow
+                // does not belong to THIS seller (defense in depth -- the
+                // query above is already seller-scoped, this is a second,
+                // cheap belt-and-suspenders check against ever re-holding
+                // another seller's reserve), an indefinite manual hold, or
+                // its window has already elapsed -- permanently skipped,
+                // never re-held (design spec §2.10).
+                continue;
+            }
+
+            $remaining = $this->ledger->remainingForReserve($c, $tenant, $reserveUuid);
+            $room = max(0, (int) $reserve['amount'] - $remaining);
+            $slice = min($consumedByOriginal, $room, $creditLeft);
+
+            if ($slice <= 0) {
+                continue;
+            }
+
+            $this->ledger->post($c, $tenant, [
+                'account_kind' => 'seller',
+                'account_key' => $accountKey,
+                'seller_uuid' => $sellerUuid,
+                'currency' => $currency,
+                'entry_type' => 'reserve_hold',
+                'amount' => -$slice,
+                'chargeback_uuid' => $originalChargebackUuid,
+                'payout_uuid' => null,
+                'reserve_uuid' => $reserveUuid,
+                'idempotency_key' => "{$reversalUuid}:{$reserveUuid}:reserve_reinstate",
+            ]);
+
+            $this->reserves->reopenToHeld($c, $tenant, $reserveUuid);
+
+            $creditLeft -= $slice;
+            $totalReinstated += $slice;
+        }
+
+        return $totalReinstated;
+    }
+
+    /**
+     * `true` only for a NON-null `release_at` that is still strictly in the
+     * future relative to wall-clock now (design spec §2.10) -- a null
+     * `release_at` (an indefinite manual hold) and an already-elapsed one are
+     * both `false`, the SAME "never re-hold" outcome for both, mirroring how
+     * {@see ReserveRepository::dueForRelease()}'s `whereNotNull('release_at')`
+     * already treats a manual hold as permanently outside the auto-release
+     * lifecycle.
+     */
+    private static function isStillUnexpired(?string $releaseAt): bool
+    {
+        if ($releaseAt === null || $releaseAt === '') {
+            return false;
+        }
+
+        $release = new \DateTimeImmutable($releaseAt, new \DateTimeZone('UTC'));
+        $now = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
+
+        return $release > $now;
+    }
+
     private static function correlationColumn(string $liabilityKind): string
     {
         return match ($liabilityKind) {

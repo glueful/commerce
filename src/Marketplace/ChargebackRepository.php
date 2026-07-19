@@ -35,11 +35,21 @@ final class ChargebackRepository
      * `provider` is technically tautological (it's part of the lookup key
      * {@see self::findByProviderEvent()} uses to fetch `$existing`), but is
      * listed for the same defense-in-depth completeness
-     * {@see LedgerRepository::VERIFIED_FIELDS} follows. `related_chargeback_uuid`
-     * is always null for a `kind=chargeback` row and is left unresolved (null)
-     * for a `kind=reversal` row by THIS task -- Task 14 resolves a reversal's
-     * relation and is expected to compare/update it through its own path, not
-     * a second `insert()` call.
+     * {@see LedgerRepository::VERIFIED_FIELDS} follows.
+     *
+     * `status` and `posted_at` are deliberately ABSENT -- both are mutated
+     * AFTER insert, over this row's own posting lifecycle, by
+     * {@see self::transitionStatus()}, never by a second `insert()` call, so a
+     * legitimate replay's freshly-built `received`/`null` values must never be
+     * compared against the row's current (possibly `posted`) state.
+     * `related_chargeback_uuid` (MV5a Task 14, design spec §2.10) is the SAME
+     * kind of field for a `kind=reversal` row: always `null` at insert time
+     * (deliberately unresolved here, see {@see \Glueful\Extensions\Commerce\Marketplace\ChargebackService::ingest()}),
+     * then resolved and persisted LATER, in the SAME transaction, via
+     * `transitionStatus()`'s `$extra` -- so it is likewise excluded here, or
+     * every replay of an already-resolved reversal event would spuriously
+     * mismatch its own freshly-built (still-null) insert attempt against the
+     * row it already correctly updated, and throw instead of no-op.
      */
     private const VERIFIED_FIELDS = [
         'provider',
@@ -50,7 +60,6 @@ final class ChargebackRepository
         'reason_code',
         'occurred_at',
         'kind',
-        'related_chargeback_uuid',
     ];
 
     /**
@@ -72,8 +81,14 @@ final class ChargebackRepository
      *     occurred_at: string,
      *     kind: string,
      *     related_chargeback_uuid: string|null,
-     *     status: string
-     * } $entry
+     *     status: string,
+     *     related_event_id?: string|null
+     * } $entry `related_event_id` (MV5a Task 14 review fix) is the RAW,
+     *   unresolved `relatedEventId` off a `kind=reversal` event -- NEVER
+     *   persisted as a column (see {@see self::VERIFIED_FIELDS}'s docblock
+     *   for why `related_chargeback_uuid` itself is excluded from ordinary
+     *   verification); passed through ONLY so a duplicate-key conflict can
+     *   run {@see self::verifyReversalRelation()} against it.
      * @return array<string,mixed> the persisted row (freshly inserted, or the
      *     pre-existing verified-matching row on a duplicate replay)
      */
@@ -113,6 +128,16 @@ final class ChargebackRepository
             }
 
             $this->verify($tenant, $existing, $row);
+
+            if ((string) $row['kind'] === 'reversal') {
+                $this->verifyReversalRelation(
+                    $context,
+                    $tenant,
+                    $existing,
+                    (string) $row['provider'],
+                    $entry['related_event_id'] ?? null
+                );
+            }
 
             return $existing;
         }
@@ -170,6 +195,65 @@ final class ChargebackRepository
     }
 
     /**
+     * MV5a Task 14 review fix (design spec §2.4 "exact conflict
+     * verification", §2.10): `related_chargeback_uuid` is deliberately
+     * EXCLUDED from {@see self::VERIFIED_FIELDS} (it is a post-insert-
+     * mutated column, resolved LATER by {@see self::transitionStatus()},
+     * never re-verified against a freshly-built, still-null insert
+     * attempt). That correctly stops every legitimate reversal replay from
+     * spuriously throwing -- but it also means a conflicting event reusing
+     * the SAME `(tenant, provider, provider_event_id)` with a DIFFERENT
+     * `relatedEventId` would otherwise silently no-op instead of raising an
+     * integrity failure. This closes that gap WITHOUT reopening the
+     * original bug: it only compares the REPLAYED event's OWN
+     * `relatedEventId`, re-resolved fresh under `(tenant, $provider,
+     * relatedEventId)` -- the identical lookup
+     * {@see \Glueful\Extensions\Commerce\Marketplace\ChargebackService::postReversalCompensation()}
+     * itself uses -- against the STORED row's already-resolved
+     * `related_chargeback_uuid`.
+     *
+     * Both sides must be RESOLVABLE to compare (design spec "when both
+     * resolvable"): a stored row whose relation is still unresolved
+     * (`related_chargeback_uuid` is `null` -- either a genuinely unknown
+     * relation that will never resolve, or a same-transaction race this
+     * replay lost) has nothing to compare against yet, and an incoming
+     * `relatedEventId` that itself does not YET resolve to any persisted
+     * chargeback is likewise not comparable -- neither case is a guessed
+     * mismatch, both are silently skipped (never a false-positive
+     * integrity failure). Only a STORED, RESOLVED relation disagreeing with
+     * a NEWLY, DIFFERENTLY resolved one is the genuine integrity failure
+     * this method exists to catch.
+     */
+    private function verifyReversalRelation(
+        ApplicationContext $context,
+        string $tenant,
+        array $existing,
+        string $provider,
+        ?string $relatedEventId
+    ): void {
+        $storedRelation = $existing['related_chargeback_uuid'] ?? null;
+        if ($storedRelation === null || $relatedEventId === null || $relatedEventId === '') {
+            return;
+        }
+
+        $resolved = $this->findByProviderEvent($context, $tenant, $provider, $relatedEventId);
+        if ($resolved === null) {
+            return;
+        }
+
+        $resolvedUuid = (string) $resolved['uuid'];
+        if ($resolvedUuid !== (string) $storedRelation) {
+            $eventId = (string) $existing['provider_event_id'];
+            throw new ChargebackIntegrityException(
+                "Chargeback integrity failure (tenant {$tenant}, provider {$provider}, event {$eventId}): "
+                    . "field \"related_chargeback_uuid\" mismatch on reversal replay -- "
+                    . 'existing=' . var_export($storedRelation, true) . ', '
+                    . 'replayed relatedEventId resolves to=' . var_export($resolvedUuid, true) . '.'
+            );
+        }
+    }
+
+    /**
      * Canonical `Y-m-d H:i:s` (UTC) comparison form, so a driver-formatted
      * timestamp (which may carry fractional seconds, a `T` separator, or a
      * timezone offset) compares equal to the value this repository itself
@@ -216,6 +300,12 @@ final class ChargebackRepository
      * {@see ReserveRepository::markConsumed()}'s identical "false return is a
      * legitimate no-op" discipline.
      *
+     * @param array<string,mixed> $extra additional columns to set alongside the
+     *   status transition (MV5a Task 14) -- e.g. `['related_chargeback_uuid' =>
+     *   $originalUuid]` when a reversal's relation resolves to a known original
+     *   even though it isn't posting yet (still `awaiting_attribution`/
+     *   `integrity_hold`). Applied AFTER the base `status`/`updated_at` set but
+     *   BEFORE `$postedAt`, so `$postedAt` always wins on key collision.
      * @return array<string,mixed> the freshly re-read row
      */
     public function transitionStatus(
@@ -224,11 +314,12 @@ final class ChargebackRepository
         string $uuid,
         string $fromStatus,
         string $toStatus,
-        ?string $postedAt = null
+        ?string $postedAt = null,
+        array $extra = []
     ): array {
         $now = db($context)->getDriver()->formatDateTime();
 
-        $set = ['status' => $toStatus, 'updated_at' => $now];
+        $set = array_merge(['status' => $toStatus, 'updated_at' => $now], $extra);
         if ($postedAt !== null) {
             $set['posted_at'] = $postedAt;
         }

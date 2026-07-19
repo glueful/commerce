@@ -28,8 +28,9 @@ use Glueful\Extensions\Contracts\Payments\ProviderChargebackEvent;
  * `commerce_chargebacks` row for it (an explicit `ignored` result, not
  * `integrity_hold`).
  *
- * **Scope seam -- posting is Task 11 (DONE, this class), reversal correlation
- * is Task 14.** This class INGESTS, CLASSIFIES, and (MV5a Task 11) POSTS:
+ * **Scope -- posting is Task 11, reversal correlation + compensation is Task
+ * 14 (both DONE, this class).** This class INGESTS, CLASSIFIES, and (MV5a
+ * Task 11) POSTS:
  *  - a resolvable, coherent, partitioned **full** chargeback (`amount` equals
  *    the order's own `grand_total` -- the order's original captured/charge
  *    amount; see design spec §2.5 "a full chargeback (equal to the original
@@ -57,14 +58,21 @@ use Glueful\Extensions\Contracts\Payments\ProviderChargebackEvent;
  *    event-first-insert pipeline as a chargeback (tenant/payable/order/
  *    currency/amount/partition), but is deliberately NOT classified
  *    full/partial (that concept doesn't apply to a reversal) and its
- *    `related_chargeback_uuid` is deliberately left `null` here -- Task 14
- *    resolves `relatedEventId` under `(tenant, provider, provider_event_id)`
- *    into the internal `related_chargeback_uuid`, posts the compensating
- *    `chargeback_credit`/`commission_debit`, and reinstates any consumed
- *    reserve. A resolvable reversal therefore persists `received` here too,
- *    a clearly-marked TODO seam for Task 14 to fill -- this method never
- *    guesses reversal semantics, and it is deliberately NEVER routed into
- *    {@see self::autoExpandFull()} (that path is chargeback-kind only).
+ *    `related_chargeback_uuid` is deliberately left `null` at insert time --
+ *    it is NEVER routed into {@see self::autoExpandFull()} (that path is
+ *    chargeback-kind only). Instead (MV5a Task 14, design spec §2.10), a
+ *    freshly-`received` reversal is handed to
+ *    {@see self::postReversalCompensation()}, which resolves `relatedEventId`
+ *    under `(tenant, provider, provider_event_id)` into the internal
+ *    `related_chargeback_uuid`, posts the compensating
+ *    `chargeback_credit`/`commission_debit` per attributed seller of the
+ *    original (capped so cumulative compensation never exceeds the
+ *    original's own postings), and reinstates any still-unexpired reserve
+ *    the original consumed -- see that method's own docblock for the full
+ *    contract. It never guesses reversal semantics: an unknown/cross-provider
+ *    relation, an original that isn't yet `posted`, or an over-amount/
+ *    regressing cumulative observation all land on `integrity_hold`, never a
+ *    fabricated post.
  */
 final class ChargebackService
 {
@@ -128,6 +136,13 @@ final class ChargebackService
                 // is resolved there, never guessed here.
                 'related_chargeback_uuid' => null,
                 'status' => $resolution['initial_status'],
+                // Task 14 review fix: the RAW relatedEventId, passed through
+                // (never persisted as a column) so ChargebackRepository::insert()
+                // can verify a conflicting replay's relation on a duplicate-key
+                // hit -- see ChargebackRepository::verifyReversalRelation().
+                'related_event_id' => $event->kind === ProviderChargebackEvent::KIND_REVERSAL
+                    ? $event->relatedEventId
+                    : null,
             ]);
 
             // MV5a Task 11: a fresh, resolvable, coherent, partitioned FULL
@@ -141,6 +156,23 @@ final class ChargebackService
             // `integrity_hold`), never `received` again.
             if ($row['status'] === 'received' && $event->kind === ProviderChargebackEvent::KIND_CHARGEBACK) {
                 $row = $this->autoExpandFull($c, $tenant, $row);
+            }
+
+            // MV5a Task 14 (design spec §2.10): a fresh, resolvable, coherent,
+            // partitioned REVERSAL -- `received` is likewise ONLY ever the
+            // initial_status for a first-time resolvable reversal (see
+            // self::resolve()) -- is correlated to its original and, if
+            // postable, compensated right here, in this SAME transaction. A
+            // REPLAY never re-enters this branch either, for the identical
+            // reason the full-chargeback branch above never does.
+            if ($row['status'] === 'received' && $event->kind === ProviderChargebackEvent::KIND_REVERSAL) {
+                $row = $this->postReversalCompensation(
+                    $c,
+                    $tenant,
+                    $row,
+                    (string) $event->relatedEventId,
+                    $event->provider
+                );
             }
 
             return $row;
@@ -593,6 +625,299 @@ final class ChargebackService
             $fromStatus,
             'posted',
             db($c)->getDriver()->formatDateTime()
+        );
+    }
+
+    /**
+     * MV5a Task 14 (design spec §2.10): posts the compensating credit for a
+     * `kind=reversal` chargeback event -- a provider-reported dispute WIN or
+     * re-credit -- WITHOUT ever mutating or deleting the original chargeback's
+     * own rows. Always called from `ingest()`'s open transaction, for a
+     * freshly-inserted `received` reversal row only (a replay never re-enters,
+     * mirroring {@see self::autoExpandFull()}'s identical discipline).
+     *
+     * **Relation resolution (load-bearing, never a guessed uuid):**
+     * `$relatedEventId` is looked up under `(tenant, $provider, relatedEventId)`
+     * -- the SAME `(tenant, provider, provider_event_id)` idempotency tuple
+     * every chargeback is keyed by, so a lookup scoped to the reversal's OWN
+     * `provider` can never cross-match a same-string event id filed under a
+     * DIFFERENT provider (design spec §2.10 "cross-provider... never a guessed
+     * uuid" falls out of this WHERE clause for free, no separate branch
+     * needed). Three outcomes:
+     *  - **no matching row, or a matching row that isn't itself `kind=chargeback`**:
+     *    genuinely UNKNOWN -- `related_chargeback_uuid` stays `null` forever,
+     *    `integrity_hold`;
+     *  - **a matching `kind=chargeback` row that isn't yet `status=posted`**
+     *    (still `awaiting_attribution`, or itself `integrity_hold`): the
+     *    relation IS known and IS persisted (a later repair path can find it),
+     *    but nothing postable exists yet -- `integrity_hold`, no money moves;
+     *  - **a matching `posted` `kind=chargeback` row**: proceeds to compensate.
+     *
+     * **Per-seller ceiling + cumulative cap (design spec §2.10 "cumulative
+     * compensation... may not exceed the original's postings, per seller and
+     * in total"):** {@see LedgerRepository::sellerEntryTotalsForChargeback()}
+     * reads, in ONE grouped scan, every seller's ORIGINAL `chargeback_debit`
+     * (`D`) / `commission_reversal` (`C`) AND every EARLIER reversal's
+     * `chargeback_credit` already posted against this SAME original (`P`,
+     * `chargeback_uuid` on every reversal-driven entry is deliberately the
+     * ORIGINAL's own uuid -- see class-level design note below) -- because all
+     * four entry types share that one correlation column, exactly mirroring
+     * how `order_uuid` already groups a whole order's lifecycle. Each seller's
+     * remaining room is `max(0, D - P)`.
+     *
+     * **Marketplace-remainder inclusion (fix, MV5a Task 14 review, design
+     * spec §2.10 "may not exceed the original chargeback's postings"):** the
+     * original's own marketplace-funded unattributable remainder (design
+     * spec §2.5, {@see self::postAttributedLines()}'s `$marketplaceRemainder`)
+     * is a genuine original POSTING too -- {@see LedgerRepository::marketplaceEntryTotalsForChargeback()}
+     * reads that SAME `chargeback_debit`/`chargeback_credit` pair, scoped to
+     * `account_kind = 'marketplace'` instead of a seller, and its own
+     * remaining room (`max(0, marketplace D - marketplace P)`) is folded
+     * into the SAME weights map the sellers' rooms live in, under the
+     * reserved {@see LedgerRepository::MARKETPLACE_ACCOUNT_KEY} sentinel
+     * (never a real seller uuid, so it can never collide). A provider
+     * reverses the FULL disputed amount with no knowledge of the internal
+     * seller/marketplace split; capping against sellers alone would strand
+     * every remainder-bearing chargeback's full reversal in `integrity_hold`
+     * forever, even though the original's TOTAL postings (sellers +
+     * marketplace) fully cover it.
+     *
+     * This combined weights map's SUM is `$totalCap`; this event's own
+     * `amount` is validated against it BEFORE claiming a single lock or
+     * posting a single entry (mirrors {@see self::postAttributedLines()}'s
+     * over-attribution guard) -- `amount` exceeding that sum (a GENUINE
+     * over-amount, now measured against the original's true total, or a
+     * regressing observation) is an integrity finding: `integrity_hold`,
+     * NEVER a fabricated positive post, not even a truncated one.
+     *
+     * **Distribution:** {@see LargestRemainder::distribute()} proportions this
+     * event's own `amount` across every weight (sellers AND, when positive,
+     * the marketplace) -- because `amount <= sum(weights)` is already
+     * guaranteed by the cap check above, the algorithm's own floor+largest-
+     * remainder construction can mathematically never allocate any ONE key
+     * more than ITS OWN weight (a `total <= sum(weights)` invariant proof,
+     * not merely an empirical observation), so no key's own cap needs a
+     * separate clamping step. A PARTIAL reversal therefore distributes
+     * proportionally across whichever components still have remaining room,
+     * seller and marketplace alike.
+     *
+     * **Posting, per credited account, under that account's account-key-
+     * sorted {@see LedgerAccountLock}:**
+     *  - every credited SELLER gets `chargeback_credit = +(this event's
+     *    seller share)` (undoes the original `chargeback_debit`),
+     *    `commission_debit = -(commission re-application)` computed via
+     *    {@see self::target()} REUSED VERBATIM against cumulative `P`/`P +
+     *    thisShare` (the identical `R_before`/`R_after` cumulative-cap shape
+     *    {@see self::postAttributedLines()} already uses at line-level, just
+     *    applied at seller-level here, automatically capped at `C` in total
+     *    no matter how many separate reversal events eventually cover the
+     *    full original), and {@see ReserveConsumptionService::reinstate()}
+     *    (reinstates whatever still-unexpired reserve protection the
+     *    ORIGINAL chargeback consumed, bounded by this event's own posted
+     *    credit -- see that method's own docblock for the full three-way cap);
+     *  - the MARKETPLACE, when its own remaining room is positive and this
+     *    event's distribution credits it, gets ONLY a mirrored
+     *    `chargeback_credit = +(this event's marketplace share)` under the
+     *    marketplace account's own lock (the marketplace's original
+     *    remainder never carried a commission entry, so there is nothing to
+     *    re-apply, and the marketplace never holds a reserve, so
+     *    {@see ReserveConsumptionService::reinstate()} is never called for it).
+     *
+     * Every reversal-driven ledger entry's `chargeback_uuid` is the ORIGINAL's
+     * own uuid (not this reversal row's uuid) -- entry_type is what
+     * disambiguates a reversal's compensating rows from the original's own
+     * rows, the SAME "one correlation id, many entry types" convention
+     * `order_uuid` already establishes. Every idempotency_key embeds THIS
+     * reversal's own uuid, so each discrete reversal event's postings stay
+     * independently unique and replay-safe regardless of what they share a
+     * `chargeback_uuid` with.
+     *
+     * @param array<string,mixed> $cb the freshly inserted `received` reversal row
+     * @return array<string,mixed> the updated row (`posted` or `integrity_hold`)
+     */
+    private function postReversalCompensation(
+        ApplicationContext $c,
+        string $tenant,
+        array $cb,
+        string $relatedEventId,
+        string $provider
+    ): array {
+        $reversalUuid = (string) $cb['uuid'];
+        $currency = (string) $cb['currency'];
+        $amount = (int) $cb['amount'];
+
+        $original = $this->chargebacks->findByProviderEvent($c, $tenant, $provider, $relatedEventId);
+
+        if ($original === null || (string) $original['kind'] !== 'chargeback') {
+            // Genuinely unknown / cross-provider / mistargeted relation --
+            // NEVER a guessed uuid (design spec §2.10).
+            return $this->chargebacks->transitionStatus($c, $tenant, $reversalUuid, 'received', 'integrity_hold');
+        }
+
+        $originalUuid = (string) $original['uuid'];
+
+        if ((string) $original['status'] !== 'posted') {
+            // The relation IS known -- persisted for a later repair path --
+            // but there is nothing posted yet to compensate against.
+            return $this->chargebacks->transitionStatus(
+                $c,
+                $tenant,
+                $reversalUuid,
+                'received',
+                'integrity_hold',
+                null,
+                ['related_chargeback_uuid' => $originalUuid]
+            );
+        }
+
+        $totals = $this->ledger->sellerEntryTotalsForChargeback($c, $tenant, $originalUuid, [
+            'chargeback_debit',
+            'commission_reversal',
+            'chargeback_credit',
+        ]);
+
+        /** @var array<string,int> $remainingCap seller_uuid => remaining compensable room */
+        $remainingCap = [];
+        foreach ($totals as $sellerUuid => $sellerTotals) {
+            $debit = abs($sellerTotals['chargeback_debit'] ?? 0);
+            if ($debit <= 0) {
+                continue;
+            }
+            $priorCompensated = $sellerTotals['chargeback_credit'] ?? 0;
+            $remainingCap[$sellerUuid] = max(0, $debit - $priorCompensated);
+        }
+
+        // Marketplace-remainder inclusion (fix, MV5a Task 14 review, design
+        // spec §2.10): the original's own marketplace-funded unattributable
+        // remainder is a genuine original POSTING too -- folded into the
+        // SAME weights map under a reserved sentinel key that can never
+        // collide with a real seller uuid.
+        $marketplaceTotals = $this->ledger->marketplaceEntryTotalsForChargeback($c, $tenant, $originalUuid, [
+            'chargeback_debit',
+            'chargeback_credit',
+        ]);
+        $marketplaceDebit = abs($marketplaceTotals['chargeback_debit'] ?? 0);
+        $marketplacePriorCompensated = $marketplaceTotals['chargeback_credit'] ?? 0;
+        $marketplaceRemainingCap = max(0, $marketplaceDebit - $marketplacePriorCompensated);
+
+        $capWeights = $remainingCap;
+        if ($marketplaceRemainingCap > 0) {
+            $capWeights[LedgerRepository::MARKETPLACE_ACCOUNT_KEY] = $marketplaceRemainingCap;
+        }
+
+        $totalCap = array_sum($capWeights);
+        if ($capWeights === [] || $amount > $totalCap) {
+            // Over-amount / regressing (design spec §2.10) -- integrity
+            // finding, never a fabricated positive post, not even a truncated
+            // one.
+            return $this->chargebacks->transitionStatus(
+                $c,
+                $tenant,
+                $reversalUuid,
+                'received',
+                'integrity_hold',
+                null,
+                ['related_chargeback_uuid' => $originalUuid]
+            );
+        }
+
+        $creditByAccount = LargestRemainder::distribute($capWeights, $amount);
+
+        $accounts = [];
+        foreach ($creditByAccount as $key => $creditAmount) {
+            if ($creditAmount <= 0) {
+                continue;
+            }
+            $accounts[] = $key === LedgerRepository::MARKETPLACE_ACCOUNT_KEY
+                ? ['account_key' => LedgerRepository::MARKETPLACE_ACCOUNT_KEY, 'seller_uuid' => null]
+                : ['account_key' => LedgerRepository::accountKeyForSeller($key), 'seller_uuid' => $key];
+        }
+        usort($accounts, static fn (array $a, array $b): int => $a['account_key'] <=> $b['account_key']);
+
+        foreach ($accounts as $account) {
+            $this->lock->claim($c, $tenant, $account['account_key'], $currency);
+        }
+
+        foreach ($accounts as $account) {
+            if ($account['seller_uuid'] === null) {
+                // The marketplace leg: only a mirrored `chargeback_credit`
+                // (design spec §2.10 fix) -- no commission entry (the
+                // original remainder never carried one) and no reserve
+                // reinstatement (the marketplace never holds a reserve).
+                $creditAmount = $creditByAccount[LedgerRepository::MARKETPLACE_ACCOUNT_KEY];
+
+                $this->ledger->post($c, $tenant, [
+                    'account_kind' => 'marketplace',
+                    'account_key' => LedgerRepository::MARKETPLACE_ACCOUNT_KEY,
+                    'seller_uuid' => null,
+                    'currency' => $currency,
+                    'entry_type' => 'chargeback_credit',
+                    'amount' => $creditAmount,
+                    'order_uuid' => $original['order_uuid'] ?? null,
+                    'chargeback_uuid' => $originalUuid,
+                    'idempotency_key' => "{$reversalUuid}:marketplace:chargeback_credit",
+                ]);
+
+                continue;
+            }
+
+            $sellerUuid = $account['seller_uuid'];
+            $creditAmount = $creditByAccount[$sellerUuid];
+            $sellerTotals = $totals[$sellerUuid] ?? [];
+            $basis = abs($sellerTotals['chargeback_debit'] ?? 0);
+            $commissionCredited = $sellerTotals['commission_reversal'] ?? 0;
+            $priorCompensated = $sellerTotals['chargeback_credit'] ?? 0;
+
+            $rBefore = $priorCompensated;
+            $rAfter = $priorCompensated + $creditAmount;
+            $commissionDebit = self::target($commissionCredited, $basis, $rAfter)
+                - self::target($commissionCredited, $basis, $rBefore);
+
+            $this->ledger->post($c, $tenant, [
+                'account_kind' => 'seller',
+                'account_key' => $account['account_key'],
+                'seller_uuid' => $sellerUuid,
+                'currency' => $currency,
+                'entry_type' => 'chargeback_credit',
+                'amount' => $creditAmount,
+                'order_uuid' => $original['order_uuid'] ?? null,
+                'chargeback_uuid' => $originalUuid,
+                'idempotency_key' => "{$reversalUuid}:{$sellerUuid}:chargeback_credit",
+            ]);
+
+            if ($commissionDebit > 0) {
+                $this->ledger->post($c, $tenant, [
+                    'account_kind' => 'seller',
+                    'account_key' => $account['account_key'],
+                    'seller_uuid' => $sellerUuid,
+                    'currency' => $currency,
+                    'entry_type' => 'commission_debit',
+                    'amount' => -$commissionDebit,
+                    'order_uuid' => $original['order_uuid'] ?? null,
+                    'chargeback_uuid' => $originalUuid,
+                    'idempotency_key' => "{$reversalUuid}:{$sellerUuid}:commission_debit",
+                ]);
+            }
+
+            $this->reserveConsumption->reinstate(
+                $c,
+                $tenant,
+                $sellerUuid,
+                $currency,
+                $creditAmount,
+                $originalUuid,
+                $reversalUuid
+            );
+        }
+
+        return $this->chargebacks->transitionStatus(
+            $c,
+            $tenant,
+            $reversalUuid,
+            'received',
+            'posted',
+            db($c)->getDriver()->formatDateTime(),
+            ['related_chargeback_uuid' => $originalUuid]
         );
     }
 

@@ -420,6 +420,141 @@ final class LedgerRepository
      * column name directly into the query, which a prepared-statement bind cannot do
      * for an identifier).
      */
+    /**
+     * Per-seller entry-type totals for ONE `chargeback_uuid` (design spec §2.10,
+     * MV5a Task 14): a SINGLE grouped scan returning every requested entry
+     * type's summed `amount`, keyed by seller. The ORIGINAL chargeback's own
+     * `chargeback_debit`/`commission_reversal` rows AND every compensating
+     * reversal's `chargeback_credit`/`commission_debit` rows all correlate to
+     * the SAME `chargeback_uuid` (the ORIGINAL's own uuid) -- mirroring how
+     * `order_uuid` already groups a whole order's lifecycle across many entry
+     * types (`entriesForOrder()`) -- so one call with all four entry types
+     * gives {@see \Glueful\Extensions\Commerce\Marketplace\ChargebackService}
+     * everything it needs to derive each seller's original debit/reversal
+     * ceiling AND cumulative compensation already posted, in one round trip.
+     * A seller with no rows for a given type simply has no key for it.
+     *
+     * @param list<string> $entryTypes
+     * @return array<string, array<string,int>> seller_uuid => [entry_type => summed amount]
+     */
+    public function sellerEntryTotalsForChargeback(
+        ApplicationContext $context,
+        string $tenant,
+        string $chargebackUuid,
+        array $entryTypes
+    ): array {
+        if ($entryTypes === []) {
+            return [];
+        }
+
+        $rows = db($context)->table('commerce_marketplace_ledger')
+            ->selectRaw('seller_uuid, entry_type, SUM(amount) as total')
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('chargeback_uuid', '=', $chargebackUuid)
+            ->whereIn('entry_type', $entryTypes)
+            ->whereNotNull('seller_uuid')
+            ->groupBy(['seller_uuid', 'entry_type'])
+            ->get();
+
+        /** @var array<string, array<string,int>> $out */
+        $out = [];
+        foreach ($rows as $row) {
+            $seller = (string) $row['seller_uuid'];
+            $out[$seller][(string) $row['entry_type']] = (int) $row['total'];
+        }
+
+        return $out;
+    }
+
+    /**
+     * The marketplace-account sibling of {@see self::sellerEntryTotalsForChargeback()}
+     * (design spec §2.10, MV5a Task 14 review fix): the marketplace's own
+     * unattributable-remainder `chargeback_debit` (design spec §2.5) and its
+     * compensating `chargeback_credit` (§2.10) both carry `seller_uuid =
+     * NULL`, so they can NEVER appear in `sellerEntryTotalsForChargeback()`'s
+     * `whereNotNull('seller_uuid')` scan -- this is the SAME one-grouped-scan
+     * shape, just scoped to `account_kind = 'marketplace'` instead of a
+     * per-seller breakdown, since there is only ever ONE marketplace account.
+     *
+     * @param list<string> $entryTypes
+     * @return array<string,int> entry_type => summed amount
+     */
+    public function marketplaceEntryTotalsForChargeback(
+        ApplicationContext $context,
+        string $tenant,
+        string $chargebackUuid,
+        array $entryTypes
+    ): array {
+        if ($entryTypes === []) {
+            return [];
+        }
+
+        $rows = db($context)->table('commerce_marketplace_ledger')
+            ->selectRaw('entry_type, SUM(amount) as total')
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('chargeback_uuid', '=', $chargebackUuid)
+            ->where('account_kind', '=', 'marketplace')
+            ->whereIn('entry_type', $entryTypes)
+            ->groupBy('entry_type')
+            ->get();
+
+        /** @var array<string,int> $out */
+        $out = [];
+        foreach ($rows as $row) {
+            $out[(string) $row['entry_type']] = (int) $row['total'];
+        }
+
+        return $out;
+    }
+
+    /**
+     * Every `reserve_release` this ORIGINAL chargeback posted for ONE
+     * seller, summed per `reserve_uuid`, in the SAME order those releases
+     * were originally posted (`id ASC` --
+     * {@see \Glueful\Extensions\Commerce\Marketplace\ReserveConsumptionService::consume()}'s
+     * own FIFO walk, design spec §2.5) -- design spec §2.10, MV5a Task 14's
+     * reserve-reinstatement source of truth for "how much did the ORIGINAL
+     * chargeback draw from each reserve." PHP associative-array insertion
+     * order is preserved, so a caller iterating this result walks the
+     * reserves in the exact order they were originally consumed.
+     *
+     * **Seller-scoped (fix, MV5a Task 14 review):** a MULTI-seller original
+     * chargeback consumes multiple sellers' own reserves in the SAME
+     * `chargeback_uuid`; every `reserve_release` row carries its own
+     * `seller_uuid` (the seller whose reserve it drew from, set by
+     * `consume()`), so filtering on `$sellerUuid` here is what keeps
+     * {@see \Glueful\Extensions\Commerce\Marketplace\ReserveConsumptionService::reinstate()}'s
+     * per-seller walk from ever seeing -- and re-holding -- a DIFFERENT
+     * seller's reserve under the wrong account.
+     *
+     * @return array<string,int> reserve_uuid => summed amount, insertion-ordered `id ASC`
+     */
+    public function reserveReleasesForChargeback(
+        ApplicationContext $context,
+        string $tenant,
+        string $chargebackUuid,
+        string $sellerUuid
+    ): array {
+        $rows = db($context)->table('commerce_marketplace_ledger')
+            ->select(['reserve_uuid', 'amount'])
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('chargeback_uuid', '=', $chargebackUuid)
+            ->where('entry_type', '=', 'reserve_release')
+            ->where('seller_uuid', '=', $sellerUuid)
+            ->whereNotNull('reserve_uuid')
+            ->orderBy('id', 'ASC')
+            ->get();
+
+        /** @var array<string,int> $sums */
+        $sums = [];
+        foreach ($rows as $row) {
+            $key = (string) $row['reserve_uuid'];
+            $sums[$key] = ($sums[$key] ?? 0) + (int) $row['amount'];
+        }
+
+        return $sums;
+    }
+
     public function consumedForLiability(
         ApplicationContext $context,
         string $tenant,

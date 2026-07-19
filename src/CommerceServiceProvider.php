@@ -36,6 +36,7 @@ use Glueful\Extensions\Commerce\Customers\AddressBookService;
 use Glueful\Extensions\Commerce\Customers\CustomerAggregationRepository;
 use Glueful\Extensions\Commerce\Discounts\DiscountRepository;
 use Glueful\Extensions\Commerce\Discounts\DiscountService;
+use Glueful\Extensions\Commerce\Events\Listeners\ProviderChargebackListener;
 use Glueful\Extensions\Commerce\Events\OrderFulfilled;
 use Glueful\Extensions\Commerce\Events\OrderNoteAdded;
 use Glueful\Extensions\Commerce\Events\OrderPaid;
@@ -55,6 +56,7 @@ use Glueful\Extensions\Commerce\Http\Admin\AdminPayoutController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminProductController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminRefundController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminReportController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminReserveController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminReviewController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminShippingClassController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminShippingZoneController;
@@ -157,6 +159,7 @@ use Glueful\Extensions\Contracts\Tenancy\TenantTableRegistry;
 use Glueful\Extensions\Contracts\Payments\PaymentCollector;
 use Glueful\Extensions\Contracts\Payments\PaymentConfirmationHandler;
 use Glueful\Extensions\Contracts\Payments\PayoutCollector;
+use Glueful\Extensions\Contracts\Payments\ProviderChargebackEvent;
 use Glueful\Extensions\Contracts\Payments\RefundCollector;
 use Glueful\Extensions\ServiceProvider;
 use Glueful\Repository\BlobRepository;
@@ -487,6 +490,14 @@ final class CommerceServiceProvider extends ServiceProvider
                 'class' => ChargebackService::class,
                 'shared' => true,
                 'autowire' => true,
+            ],
+            ProviderChargebackListener::class => [
+                'factory' => [self::class, 'makeProviderChargebackListener'],
+                'shared' => true,
+            ],
+            AdminReserveController::class => [
+                'factory' => [self::class, 'makeAdminReserveController'],
+                'shared' => true,
             ],
             SellerService::class => [
                 'factory' => [self::class, 'makeSellerService'],
@@ -1221,6 +1232,29 @@ final class CommerceServiceProvider extends ServiceProvider
         );
     }
 
+    public static function makeProviderChargebackListener(ContainerInterface $container): ProviderChargebackListener
+    {
+        return new ProviderChargebackListener(
+            $container->get(ApplicationContext::class),
+            $container->get(ChargebackService::class)
+        );
+    }
+
+    public static function makeAdminReserveController(ContainerInterface $container): AdminReserveController
+    {
+        return new AdminReserveController(
+            $container->get(ApplicationContext::class),
+            $container->get(ReservePolicyService::class),
+            $container->get(ChargebackService::class),
+            $container->get(ReserveService::class),
+            $container->get(AdjustmentService::class),
+            $container->get(SellerBalanceService::class),
+            $container->get(SellerRepository::class),
+            $container->get(MarketplaceMode::class),
+            self::tenantResolver($container)
+        );
+    }
+
     public static function makeAdminMediaController(ContainerInterface $container): AdminMediaController
     {
         return new AdminMediaController(
@@ -1518,7 +1552,8 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(PayoutRepository::class),
             $container->get(MarketplaceMode::class),
             self::tenantResolver($container),
-            $container->get(PayoutAccountRepository::class)
+            $container->get(PayoutAccountRepository::class),
+            $container->get(ReserveService::class)
         );
     }
 
@@ -1615,6 +1650,21 @@ final class CommerceServiceProvider extends ServiceProvider
                     $events->addListener(OrderFulfilled::class, [$listener, 'onOrderFulfilled']);
                     $events->addListener(RefundCompleted::class, [$listener, 'onRefundCompleted']);
                     $events->addListener(OrderNoteAdded::class, [$listener, 'onOrderNoteAdded']);
+
+                    // MV5a Task 16 (design spec §2.4/§2.11/§5): the chargeback listener is
+                    // added directly to EventService here too -- the extension has no
+                    // config/events.php, mirroring the OrderMailListener block above exactly.
+                    // Payvia dispatches ProviderChargebackEvent through the STRICT
+                    // EventService::dispatchOrFail() (framework 1.71.0), never the
+                    // fault-isolated dispatch() the mail events above use -- this
+                    // registration is deliberately on the SAME ListenerProvider either way,
+                    // since dispatchOrFail() only changes how the dispatcher walks the SAME
+                    // listener list, not where listeners are registered.
+                    $chargebackListener = $container->get(ProviderChargebackListener::class);
+                    $events->addListener(
+                        ProviderChargebackEvent::class,
+                        [$chargebackListener, 'onProviderChargeback']
+                    );
                 }
             }
         } catch (\Throwable $e) {

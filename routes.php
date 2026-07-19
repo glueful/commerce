@@ -24,6 +24,7 @@ use Glueful\Extensions\Commerce\Http\Admin\AdminPayoutController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminProductController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminRefundController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminReportController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminReserveController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminReviewController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminShippingClassController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminShippingZoneController;
@@ -380,6 +381,47 @@ if ($marketplaceEnabled) {
             [AdminMarketplaceFinancialController::class, 'sellerReport']
         )->middleware($read);
 
+        // Reserve/chargeback/debt surfaces (design spec §6, MV5a Task 16): reserve
+        // policy (workspace + per-seller), chargeback ingestion + partial attribution,
+        // manual reserve hold/release, audited debt forgiveness, and a read of any
+        // seller's reserves + debt -- gated the SAME way as every other route in this
+        // group. Manual hold and debt forgiveness REQUIRE the HTTP `Idempotency-Key`
+        // header (AdminReserveController checks it itself, mirroring
+        // AdminRefundController::store()); every route derives its tenant from the
+        // resolved CurrentTenantResolver, never a request-body field (design spec §6
+        // tenant binding). Deliberately NO "reverse a chargeback" route anywhere --
+        // reversals are provider-reported only (design spec §2.10), delivered
+        // exclusively through ProviderChargebackListener.
+        $router->patch(
+            '/marketplace/settings/reserves',
+            [AdminReserveController::class, 'updateWorkspacePolicy']
+        )->middleware($write);
+        $router->patch(
+            '/marketplace/sellers/{uuid}/reserve-policy',
+            [AdminReserveController::class, 'updateSellerPolicy']
+        )->middleware($write);
+
+        $router->post('/marketplace/chargebacks', [AdminReserveController::class, 'ingestChargeback'])
+            ->middleware($write);
+        $router->post(
+            '/marketplace/chargebacks/{uuid}/attribution',
+            [AdminReserveController::class, 'attributeChargeback']
+        )->middleware($write);
+
+        $router->post('/marketplace/reserves/holds', [AdminReserveController::class, 'manualHold'])
+            ->middleware($write);
+        $router->post('/marketplace/reserves/{uuid}/release', [AdminReserveController::class, 'manualRelease'])
+            ->middleware($write);
+
+        $router->post(
+            '/marketplace/sellers/{uuid}/debt/forgive',
+            [AdminReserveController::class, 'forgiveDebt']
+        )->middleware($write);
+        $router->get(
+            '/marketplace/sellers/{uuid}/reserves',
+            [AdminReserveController::class, 'sellerReserves']
+        )->middleware($read);
+
         // Marketplace MV2 (design spec §6.2, Task 9): operator fulfills ANY
         // seller order directly. Gated the SAME way as every other route in
         // this group -- with the install master switch off, a
@@ -467,6 +509,11 @@ if ($marketplaceEnabled) {
         $router->get('/{sellerUuid}/financials/report', [SellerFinancialController::class, 'report'])
             ->middleware($reportsRead);
         $router->get('/{sellerUuid}/financials/balance', [SellerFinancialController::class, 'balance'])
+            ->middleware($reportsRead);
+        // Reserves + upcoming releases + debt (design spec §6, MV5a Task 16): SANITIZED
+        // allow-list projection, own seller only -- same gate as the balance/report
+        // reads above.
+        $router->get('/{sellerUuid}/financials/reserves', [SellerFinancialController::class, 'reserves'])
             ->middleware($reportsRead);
         $router->get('/{sellerUuid}/payouts', [SellerFinancialController::class, 'payouts'])
             ->middleware($payoutsRead);

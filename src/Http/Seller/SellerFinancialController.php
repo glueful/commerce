@@ -12,6 +12,7 @@ use Glueful\Extensions\Commerce\Marketplace\LedgerRepository;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceMode;
 use Glueful\Extensions\Commerce\Marketplace\PayoutAccountRepository;
 use Glueful\Extensions\Commerce\Marketplace\PayoutRepository;
+use Glueful\Extensions\Commerce\Marketplace\ReserveService;
 use Glueful\Extensions\Commerce\Marketplace\SellerBalanceService;
 use Glueful\Extensions\Commerce\Reports\ReportWindow;
 use Glueful\Extensions\Commerce\Reports\SellerFinancialReportRepository;
@@ -49,6 +50,11 @@ final class SellerFinancialController
         private ?MarketplaceMode $marketplaceMode = null,
         private ?CurrentTenantResolver $tenants = null,
         private ?PayoutAccountRepository $payoutAccounts = null,
+        // Deliberately NOT eagerly resolved below (see reserveService()) -- mirrors
+        // OrderMailListener::downloadGrantService()'s identical reasoning: several
+        // pre-Task-16 tests construct this controller directly with only the earlier
+        // args, against containers with no ReserveService binding at all.
+        private ?ReserveService $reserves = null,
     ) {
         $this->reports ??= app($context, SellerFinancialReportRepository::class);
         $this->balances ??= app($context, SellerBalanceService::class);
@@ -58,6 +64,11 @@ final class SellerFinancialController
             ? container($context)->get(CurrentTenantResolver::class)
             : new SentinelTenantResolver();
         $this->payoutAccounts ??= app($context, PayoutAccountRepository::class);
+    }
+
+    private function reserveService(): ReserveService
+    {
+        return $this->reserves ??= app($this->context, ReserveService::class);
     }
 
     #[ApiOperation(summary: "Seller's own financial report over a date window", tags: ['Commerce Seller'])]
@@ -106,6 +117,81 @@ final class SellerFinancialController
         );
 
         return Response::success(['balances' => $balances], 'Seller balance retrieved');
+    }
+
+    /**
+     * `GET /{sellerUuid}/financials/reserves` (design spec §6, MV5a Task 16): the
+     * seller's own `reserved` total + upcoming reserve releases + `debt`, per currency --
+     * ALL of which are already-derived components of {@see SellerBalanceService::balance()}
+     * (`reserved`, `debt`) or a per-hold read from {@see ReserveService::heldWithRemaining()}
+     * (upcoming releases). **SANITIZED allow-list projection (design spec §6, MV4
+     * leak-prevention discipline)**: {@see self::upcomingReleaseProjection()} builds a
+     * FRESH, named-key array containing ONLY `amount`/`release_at` for each held reserve
+     * with a known release schedule -- NEVER a raw `commerce_seller_reserves` row spread,
+     * so a provider/chargeback correlation id can never reach this response even by
+     * accident. A `source_kind=manual` INDEFINITE hold (`release_at IS NULL`) is excluded
+     * from `upcoming_releases` (it has no known release time -- design spec §2.8) but
+     * still counts toward `reserved` via `balance()`'s own ledger-wide sum. A reserve
+     * already fully consumed by an earlier liability (`remaining <= 0`) is likewise
+     * excluded -- nothing will ever actually release from it.
+     */
+    #[ApiOperation(
+        summary: "Seller's own reserved balance, upcoming reserve releases, and debt",
+        tags: ['Commerce Seller']
+    )]
+    #[ApiResponse(200, description: 'Seller reserves retrieved')]
+    #[ApiResponse(404, description: 'Unknown seller, no active membership, or workspace not activated')]
+    public function reserves(Request $request, string $sellerUuid): Response
+    {
+        $tenant = $this->tenants->tenantUuid($this->context);
+        $currencies = $this->balances->currencies($this->context, $tenant, $sellerUuid);
+
+        $balances = array_map(function (string $currency) use ($tenant, $sellerUuid): array {
+            $balance = $this->balances->balance($this->context, $tenant, $sellerUuid, $currency);
+
+            $upcoming = [];
+            $holds = $this->reserveService()->heldWithRemaining($this->context, $tenant, $sellerUuid, $currency);
+            foreach ($holds as $row) {
+                $projected = self::upcomingReleaseProjection($row);
+                if ($projected !== null) {
+                    $upcoming[] = $projected;
+                }
+            }
+
+            return [
+                'currency' => $currency,
+                'reserved' => $balance['reserved'],
+                'debt' => $balance['debt'],
+                'upcoming_releases' => $upcoming,
+            ];
+        }, $currencies);
+
+        return Response::success(['balances' => $balances], 'Seller reserves retrieved');
+    }
+
+    /**
+     * The SANITIZED per-hold projection {@see self::reserves()} uses -- a FRESH,
+     * named-key array with ONLY `amount` (the hold's own DERIVED `remaining`, never its
+     * original `amount` -- a partially-consumed hold must report what will actually
+     * release) and `release_at`. `null` for an indefinite manual hold (`release_at IS
+     * NULL`) or an already-fully-consumed reserve (`remaining <= 0`) -- neither belongs
+     * in an "upcoming releases" list.
+     *
+     * @param array<string,mixed> $row a {@see ReserveService::heldWithRemaining()} row
+     * @return array{amount:int,release_at:string}|null
+     */
+    private static function upcomingReleaseProjection(array $row): ?array
+    {
+        if ($row['release_at'] === null) {
+            return null;
+        }
+
+        $remaining = (int) $row['remaining'];
+        if ($remaining <= 0) {
+            return null;
+        }
+
+        return ['amount' => $remaining, 'release_at' => (string) $row['release_at']];
     }
 
     #[ApiOperation(summary: "Seller's own payouts", tags: ['Commerce Seller'])]

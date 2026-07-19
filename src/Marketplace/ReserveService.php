@@ -7,6 +7,7 @@ namespace Glueful\Extensions\Commerce\Marketplace;
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Helpers\Utils;
 use Glueful\Http\Exceptions\Client\NotFoundException;
+use Glueful\Validation\ValidationException;
 
 /**
  * Rolling-reserve hold posting at settlement (design spec §2.2, MV5a Task
@@ -367,6 +368,16 @@ final class ReserveService
      * row: {@see LedgerRepository::post()}'s own idempotency-key verify is the backstop even
      * if every guard above were somehow bypassed.
      *
+     * {@see self::manualHold()}/{@see self::manualRelease()} (design spec §2.8, MV5a Task 15)
+     * are the operator emergency-override entry points, layered ON TOP of the rolling-reserve
+     * lifecycle above -- neither replaces it. Both are always operator-initiated (caller
+     * idempotency key + actor + reason are mandatory) and both post through the SAME
+     * `reserve_hold`/`reserve_release` ledger machinery every other path in this class uses --
+     * never an untracked raw ledger post -- so every existing derive-from-ledger consumer
+     * ({@see LedgerRepository::balanceComponents()}'s `reserved`, {@see LedgerRepository::remainingForReserve()},
+     * {@see ReserveConsumptionService::consume()}'s FIFO scan) already understands a manual
+     * hold with zero code changes there.
+     *
      * @param array<string,mixed> $reserve
      * @return array{status: string, released_amount: int} `status` is the row's status
      *     immediately after this call returns (`released`, or whatever non-`held` status a
@@ -415,5 +426,337 @@ final class ReserveService
         };
 
         return db($c)->transaction($release);
+    }
+
+    // -----------------------------------------------------------------
+    // Manual operator hold/release (design spec §2.8, MV5a Task 15).
+    // -----------------------------------------------------------------
+
+    /**
+     * Emergency operator reserve hold (design spec §2.8): an audited, always-operator-
+     * initiated `commerce_seller_reserves` row with `source_kind=manual`, `seller_order_uuid
+     * =NULL`, policy snapshots `0`/`0`, and NO `release_at` (indefinite -- it never enters
+     * {@see self::releaseDue()}'s scheduled-release sweep, {@see ReserveRepository::dueForRelease()}'s
+     * `whereNotNull('release_at')` filter permanently excludes it). Every field this method
+     * accepts is validated BEFORE any write ({@see ValidationException}, `422`): a non-empty
+     * `idempotencyKey` of at most 128 characters, a non-empty `actor`, a non-empty `reason`,
+     * and `amount > 0`.
+     *
+     * **Idempotency (design spec §2.8):** the unique `(tenant_uuid, idempotency_key)` pair
+     * on `commerce_seller_reserves` IS the reserve-row claim -- {@see ReserveRepository::findManualByIdempotencyKey()}
+     * is checked FIRST, before any lock or insert is attempted. An EXACT replay (identical
+     * `sellerUuid`/`currency`/`amount`/`reason`) returns the pre-existing row untouched, after
+     * re-verifying every one of those fields against it ({@see self::verifyManualIdentity()});
+     * a CONFLICTING reuse of the SAME key with ANY of those fields different is an operator
+     * idempotency-key MISUSE, never a legitimate replay, and throws
+     * {@see ManualReserveConflictException} (`409`) -- mirrors this codebase's existing
+     * `IdempotencyConflictException`/`CheckoutConflictException` convention for a
+     * caller-supplied key reused with different request content. `actor` is deliberately
+     * NOT part of this identity check -- it is audit metadata, not conflict identity, so a
+     * legitimate operator retry under a different actor (e.g. after a session/token refresh)
+     * is still a clean replay, never a `409`. **A verified replay -- up front here, or
+     * race-recovered below -- NEVER re-posts to the ledger**: the row's existence already
+     * proves its OWN `reserve_hold` entry committed atomically alongside it on the original
+     * call (both branches below insert row + ledger entry inside one transaction), and
+     * re-posting under the CURRENT caller's actor would collide `created_by` against the
+     * ORIGINAL actor under the same deterministic idempotency key --
+     * {@see LedgerRepository}'s `VERIFIED_FIELDS` includes `created_by`, so that would throw
+     * a spurious {@see LedgerException} instead of the clean no-op this contract promises.
+     *
+     * A fresh (non-replay) request opens ONE transaction, claims the seller/currency
+     * {@see LedgerAccountLock}, inserts the row via {@see ReserveRepository::insertManualHold()}
+     * -- which itself degrades cleanly on a genuine insert race, returning whichever row won
+     * -- and re-verifies identity against THAT returned row before ever posting to the ledger.
+     * ONLY this call's own successful insert (its own generated `uuid` survived) posts the
+     * ledger `reserve_hold` entry; a race-recovered row (a DIFFERENT uuid) already had its
+     * own entry posted atomically by whichever transaction actually won the insert, so this
+     * call skips posting entirely for it -- a race-losing concurrent duplicate can therefore
+     * never post a ledger entry under someone else's reserve. The ledger `reserve_hold` entry
+     * always carries `payout_uuid=NULL` and `reserve_uuid` = the row's own `uuid` -- never an
+     * untracked raw post -- under the DETERMINISTIC key `manual:{idempotencyKey}:reserve_hold`.
+     *
+     * @return array<string,mixed> the persisted `commerce_seller_reserves` row (freshly
+     *     created, or the pre-existing row on a verified exact replay)
+     */
+    public function manualHold(
+        ApplicationContext $c,
+        string $tenant,
+        string $sellerUuid,
+        string $currency,
+        int $amount,
+        string $idempotencyKey,
+        string $actor,
+        string $reason
+    ): array {
+        $this->validateManualHoldInput($amount, $idempotencyKey, $actor, $reason);
+
+        $existing = $this->reserves->findManualByIdempotencyKey($c, $tenant, $idempotencyKey);
+        if ($existing !== null) {
+            // A verified replay returns the existing row UNTOUCHED -- no re-post. The
+            // row's existence already proves its OWN reserve_hold ledger entry committed
+            // atomically alongside it on the original call (both branches of this method
+            // insert row + ledger entry inside one transaction), so re-posting here would
+            // be redundant at best. It would also be actively WRONG: verifyManualIdentity()
+            // deliberately excludes `actor` from the replay identity (a legitimate operator
+            // retry under a different actor must never 409), but the ledger's own
+            // VERIFIED_FIELDS DOES include `created_by` -- re-posting under the CURRENT
+            // caller's actor, under the same deterministic `manual:{key}:reserve_hold` key
+            // an earlier call may have committed under a DIFFERENT actor, would
+            // deterministically throw a LedgerException instead of the clean no-op replay
+            // this contract promises.
+            $this->verifyManualIdentity($existing, $sellerUuid, $currency, $amount, $reason);
+
+            return $existing;
+        }
+
+        $accountKey = LedgerRepository::accountKeyForSeller($sellerUuid);
+        $uuid = Utils::generateNanoID();
+
+        return db($c)->transaction(function () use (
+            $c,
+            $tenant,
+            $sellerUuid,
+            $currency,
+            $amount,
+            $idempotencyKey,
+            $actor,
+            $reason,
+            $accountKey,
+            $uuid
+        ): array {
+            $this->lock->claim($c, $tenant, $accountKey, $currency);
+
+            $row = $this->reserves->insertManualHold($c, $tenant, [
+                'uuid' => $uuid,
+                'seller_uuid' => $sellerUuid,
+                'currency' => $currency,
+                'amount' => $amount,
+                'idempotency_key' => $idempotencyKey,
+                'created_by' => $actor,
+                'reason' => $reason,
+                'held_at' => db($c)->getDriver()->formatDateTime(),
+            ]);
+
+            // insertManualHold() may have returned a RACE WINNER's row (a concurrent
+            // request that claimed this same idempotency_key first) rather than this
+            // call's own insert -- re-verify identity against it before trusting it as a
+            // legitimate replay and posting anything under it.
+            $this->verifyManualIdentity($row, $sellerUuid, $currency, $amount, $reason);
+
+            // Only THIS call's own fresh insert (its own generated $uuid survived) still
+            // needs its reserve_hold posted. A race-recovered row (a DIFFERENT uuid than
+            // the one this call attempted to insert) already had its own reserve_hold
+            // posted atomically by the transaction that actually won the insert -- see
+            // the up-front branch above for why re-posting it here under (possibly) a
+            // different actor would be redundant and unsafe.
+            if ((string) $row['uuid'] === $uuid) {
+                $this->postManualHoldLedgerEntry($c, $tenant, $row, $actor, $reason);
+            }
+
+            return $row;
+        });
+    }
+
+    private function validateManualHoldInput(
+        int $amount,
+        string $idempotencyKey,
+        string $actor,
+        string $reason
+    ): void {
+        if (trim($idempotencyKey) === '') {
+            throw ValidationException::forField(
+                'idempotency_key',
+                'A non-empty idempotency key is required for a manual reserve hold.'
+            );
+        }
+        if (strlen($idempotencyKey) > 128) {
+            throw ValidationException::forField(
+                'idempotency_key',
+                'idempotency_key must be at most 128 characters.'
+            );
+        }
+        if (trim($actor) === '') {
+            throw ValidationException::forField('actor', 'A non-empty operator actor is required.');
+        }
+        if (trim($reason) === '') {
+            throw ValidationException::forField('reason', 'A non-empty reason is required.');
+        }
+        if ($amount <= 0) {
+            throw ValidationException::forField('amount', 'Manual reserve hold amount must be greater than zero.');
+        }
+    }
+
+    /**
+     * The manual-hold replay/conflict arbiter (design spec §2.8): every field a reused
+     * `idempotencyKey` must reproduce EXACTLY for this to be a legitimate replay rather than
+     * a conflicting reuse. `$row` may be either the pre-existing row a fresh call's own
+     * up-front lookup found, or the row {@see ReserveRepository::insertManualHold()} itself
+     * returned after recovering from a genuine insert race -- either way, the same identity
+     * check applies before any ledger post is attempted under it.
+     *
+     * @param array<string,mixed> $row
+     */
+    private function verifyManualIdentity(
+        array $row,
+        string $sellerUuid,
+        string $currency,
+        int $amount,
+        string $reason
+    ): void {
+        $matches = (string) $row['seller_uuid'] === $sellerUuid
+            && (string) $row['currency'] === $currency
+            && (int) $row['amount'] === $amount
+            && (string) ($row['reason'] ?? '') === $reason;
+
+        if (!$matches) {
+            throw new ManualReserveConflictException(sprintf(
+                'Manual reserve hold idempotency key "%s" was already used with a different request.',
+                (string) $row['idempotency_key']
+            ));
+        }
+    }
+
+    /** @param array<string,mixed> $row */
+    private function postManualHoldLedgerEntry(
+        ApplicationContext $c,
+        string $tenant,
+        array $row,
+        string $actor,
+        string $reason
+    ): void {
+        $sellerUuid = (string) $row['seller_uuid'];
+
+        $this->ledger->post($c, $tenant, [
+            'account_kind' => 'seller',
+            'account_key' => LedgerRepository::accountKeyForSeller($sellerUuid),
+            'seller_uuid' => $sellerUuid,
+            'currency' => (string) $row['currency'],
+            'entry_type' => 'reserve_hold',
+            'amount' => -((int) $row['amount']),
+            'payout_uuid' => null,
+            'reserve_uuid' => (string) $row['uuid'],
+            'created_by' => $actor,
+            'reason' => $reason,
+            'idempotency_key' => 'manual:' . $row['idempotency_key'] . ':reserve_hold',
+        ]);
+    }
+
+    /**
+     * Emergency operator reserve release (design spec §2.8): names ANY reserve --
+     * `source_kind=manual` (its intended primary use, releasing an indefinite hold early)
+     * or `source_kind=rolling` (an operator releasing a not-yet-due rolling hold early,
+     * bypassing {@see self::releaseDue()}'s `release_at` gate entirely) -- and releases its
+     * LOCKED remaining amount via the exact same derive-from-ledger logic
+     * {@see self::releaseDue()} uses: claim the seller/currency {@see LedgerAccountLock},
+     * re-read the row fresh under it, and -- only if still `status=held` -- derive
+     * `remaining` via {@see LedgerRepository::remainingForReserve()} and post
+     * `reserve_release = +remaining` (`payout_uuid=NULL`, `reserve_uuid` set) before
+     * CAS-marking the row `released`. A row already out of `held` (already released by an
+     * earlier manual release, the scheduled sweep, or fully consumed) is a legitimate no-op
+     * -- this method never double-releases.
+     *
+     * Unlike {@see self::manualHold()}, there is no caller-supplied amount/currency/reason
+     * here to conflict on -- the reserve identity (`$reserveUuid`) IS the idempotency key
+     * (`manual:{reserve_uuid}:release`), so a replay of this exact call can only ever be a
+     * safe no-op, never a mismatch. The releasing `actor` is recorded on the posted
+     * `reserve_release` ledger entry itself (`created_by`) -- not overwritten onto the
+     * reserve row's own `created_by`, which stays the hold's ORIGINAL creator (the operator
+     * who opened a manual hold, or `NULL` for a rolling hold) for audit purposes.
+     *
+     * @return int the amount released BY THIS CALL (`0` for a no-op replay or a reserve with
+     *     no remaining left to release)
+     */
+    public function manualRelease(ApplicationContext $c, string $tenant, string $reserveUuid, string $actor): int
+    {
+        if (trim($actor) === '') {
+            throw ValidationException::forField('actor', 'A non-empty operator actor is required.');
+        }
+
+        $reserve = $this->reserves->findByUuid($c, $tenant, $reserveUuid);
+        if ($reserve === null) {
+            throw new NotFoundException('Resource not found.');
+        }
+
+        $sellerUuid = (string) $reserve['seller_uuid'];
+        $currency = (string) $reserve['currency'];
+        $accountKey = LedgerRepository::accountKeyForSeller($sellerUuid);
+
+        $release = function () use ($c, $tenant, $reserveUuid, $sellerUuid, $currency, $accountKey, $actor): int {
+            $this->lock->claim($c, $tenant, $accountKey, $currency);
+
+            $current = $this->reserves->findByUuid($c, $tenant, $reserveUuid);
+            if ($current === null) {
+                throw new LedgerException(
+                    "Manual reserve release failure: reserve '{$reserveUuid}' not found under lock."
+                );
+            }
+
+            if ((string) $current['status'] !== 'held') {
+                return 0;
+            }
+
+            $remaining = $this->ledger->remainingForReserve($c, $tenant, $reserveUuid);
+            if ($remaining > 0) {
+                $this->ledger->post($c, $tenant, [
+                    'account_kind' => 'seller',
+                    'account_key' => $accountKey,
+                    'seller_uuid' => $sellerUuid,
+                    'currency' => $currency,
+                    'entry_type' => 'reserve_release',
+                    'amount' => $remaining,
+                    'payout_uuid' => null,
+                    'reserve_uuid' => $reserveUuid,
+                    'created_by' => $actor,
+                    'idempotency_key' => "manual:{$reserveUuid}:release",
+                ]);
+            }
+
+            $this->reserves->markReleased($c, $tenant, $reserveUuid);
+
+            return $remaining;
+        };
+
+        return db($c)->transaction($release);
+    }
+
+    // -----------------------------------------------------------------
+    // Operator/seller reads (design spec §6, MV5a Task 16).
+    // -----------------------------------------------------------------
+
+    /**
+     * Every currently-`held` reserve for this seller/currency, each annotated with its
+     * OWN derived `remaining` amount (design spec §6, MV5a Task 16): a partially-consumed
+     * hold must report what is actually left, never its original `amount` -- the SAME
+     * derive-from-ledger discipline every other balance/remaining read in this package
+     * uses ({@see LedgerRepository::remainingForReserve()}, never a second mutable
+     * balance). Reuses {@see ReserveRepository::heldForConsumption()}'s own FIFO
+     * (earliest-`release_at`-first, indefinite manual holds last) ordering -- this is an
+     * UNLOCKED read, exactly like every other read in that method's own docblock; a
+     * caller mutating a specific hold (manual release, consumption) always re-derives
+     * fresh under its own lock, so a stale read here is never a correctness risk.
+     *
+     * Shared by BOTH the trusted operator read surface (full row detail) and the
+     * seller-safe projection ({@see \Glueful\Extensions\Commerce\Http\Seller\SellerFinancialController}'s
+     * own allow-list, amount + release_at ONLY) -- this method itself has no opinion on
+     * which fields a caller is allowed to expose.
+     *
+     * @return list<array<string,mixed>> each row is the full `commerce_seller_reserves`
+     *     row (id/uuid/source_kind/amount/status/held_at/release_at/closed_at/created_by/
+     *     reason/...) PLUS a `remaining` int key
+     */
+    public function heldWithRemaining(
+        ApplicationContext $c,
+        string $tenant,
+        string $sellerUuid,
+        string $currency
+    ): array {
+        $rows = $this->reserves->heldForConsumption($c, $tenant, $sellerUuid, $currency);
+
+        return array_map(
+            fn (array $row): array => $row + [
+                'remaining' => $this->ledger->remainingForReserve($c, $tenant, (string) $row['uuid']),
+            ],
+            $rows
+        );
     }
 }

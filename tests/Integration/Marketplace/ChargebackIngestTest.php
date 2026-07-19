@@ -23,9 +23,12 @@ use Glueful\Extensions\Contracts\Payments\ProviderChargebackEvent;
  * historical-partition gate (order's own `marketplace_partitioned`, never
  * current workspace activation), the event-first insert with its
  * `(tenant, provider, provider_event_id)` idempotency claim, and the exact
- * conflict-verify discipline. Posting (Task 11) and reversal correlation
- * (Task 14) are OUT of scope here -- every assertion below stops at
- * classification/persistence.
+ * conflict-verify discipline. Posting (Task 11) is out of scope here -- every
+ * chargeback-kind assertion below stops at classification/persistence. The
+ * one `kind=reversal` case below now exercises Task 14's actual relation
+ * resolution (design spec §2.10) since that seam is filled; the full
+ * compensating-post behavior itself is covered by
+ * {@see \Glueful\Extensions\Commerce\Tests\Integration\Marketplace\ChargebackReversalCompensationTest}.
  */
 final class ChargebackIngestTest extends CommerceTestCase
 {
@@ -386,12 +389,17 @@ final class ChargebackIngestTest extends CommerceTestCase
 
     // -----------------------------------------------------------------
     // A `kind=reversal` event runs the same resolve/validate/event-first
-    // pipeline but is deliberately NOT posted or correlated -- the Task 14
-    // seam. It still persists `received` (never guessed into `posted`),
-    // with `related_chargeback_uuid` left null for Task 14 to resolve.
+    // pipeline, then (MV5a Task 14, design spec §2.10) tries to correlate
+    // `relatedEventId` to an original chargeback. `evt_original_1` was never
+    // ingested here, so the relation is genuinely UNKNOWN -- persisted
+    // event-first as `received` first, exactly like any other reversal, then
+    // immediately transitioned to `integrity_hold` with `related_chargeback_uuid`
+    // left `null` forever (never a guessed uuid). The full relation-resolved /
+    // compensating-post paths are covered by
+    // {@see \Glueful\Extensions\Commerce\Tests\Integration\Marketplace\ChargebackReversalCompensationTest}.
     // -----------------------------------------------------------------
 
-    public function testReversalKindPersistsReceivedAsAnUnresolvedTask14Seam(): void
+    public function testReversalKindWithUnknownRelatedEventBecomesIntegrityHold(): void
     {
         $this->seedOrder(['uuid' => 'orderCB000012', 'grand_total' => 5000]);
 
@@ -403,11 +411,11 @@ final class ChargebackIngestTest extends CommerceTestCase
             'payable' => ['id' => 'orderCB000012', 'amount' => 5000],
         ]));
 
-        self::assertSame('received', $result['status']);
+        self::assertSame('integrity_hold', $result['status']);
         self::assertSame('reversal', $result['kind']);
         self::assertNull(
             $result['related_chargeback_uuid'],
-            'Task 14 resolves relatedEventId -> related_chargeback_uuid; this task never guesses it.'
+            'evt_original_1 does not correlate to any ingested chargeback -- never a guessed uuid.'
         );
     }
 }
