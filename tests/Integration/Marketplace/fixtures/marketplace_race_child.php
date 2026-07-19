@@ -16,7 +16,7 @@ declare(strict_types=1);
  *
  * argv: 1=pgConfig JSON, 2=action, 3=args JSON
  * actions: create | activate | assign | close | changeRole | checkout |
- *     suspend | payoutRecord
+ *     suspend | payoutRecord | apiKeyCreate | apiKeyRotate | apiKeyRevoke
  * stdout: JSON, shape depends on action (see each branch below)
  */
 
@@ -45,6 +45,10 @@ use Glueful\Extensions\Commerce\Marketplace\MarketplaceMode;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceWorkspaceLock;
 use Glueful\Extensions\Commerce\Marketplace\PayoutRepository;
 use Glueful\Extensions\Commerce\Marketplace\PayoutService;
+use Glueful\Extensions\Commerce\Marketplace\SellerApiKeyException;
+use Glueful\Extensions\Commerce\Marketplace\SellerApiKeyRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerApiKeyScopeValidator;
+use Glueful\Extensions\Commerce\Marketplace\SellerApiKeyService;
 use Glueful\Extensions\Commerce\Marketplace\SellerAttributionService;
 use Glueful\Extensions\Commerce\Marketplace\SellerBalanceService;
 use Glueful\Extensions\Commerce\Marketplace\SellerLifecycleEventRepository;
@@ -112,6 +116,25 @@ $fixedTenant = static function (string $tenant): CurrentTenantResolver {
         }
     };
 };
+
+/**
+ * MV5c-1 Task 7: a real {@see SellerApiKeyService}, freshly constructed per
+ * call -- mirrors every other per-action service construction above (no
+ * shared mutable state across actions in this single-action-per-invocation
+ * script).
+ */
+function apiKeyService(): SellerApiKeyService
+{
+    $roles = new FixedSellerRoleAuthority();
+
+    return new SellerApiKeyService(
+        new SellerRepository(),
+        new SellerMembershipRepository(),
+        new SellerApiKeyRepository(),
+        $roles,
+        new SellerApiKeyScopeValidator($roles)
+    );
+}
 
 $out = [];
 
@@ -326,6 +349,59 @@ try {
             $out = ['ok' => true, 'changed' => true, 'role' => $membership['role'], 'exceptionClass' => null];
             break;
 
+        // MV5c-1 Task 7 (design spec §2.8/§2.9): the REAL
+        // SellerApiKeyService::create()/rotate()/revoke() -- each claims the
+        // seller revision FIRST (create()/rotate()/revoke() all share the
+        // identical `requireLiveManagerAuthority()`-shaped claim-then-
+        // re-read discipline), the SAME primitive a concurrent
+        // changeRole()/suspend() claims for the identical seller row.
+        case 'apiKeyCreate':
+            $apiKeys = apiKeyService();
+            $created = $apiKeys->create(
+                $context,
+                $tenant,
+                (string) $args['sellerUuid'],
+                (string) ($args['name'] ?? 'Race test key'),
+                (array) ($args['scopes'] ?? ['commerce.seller.catalog.read']),
+                $args['expiresAt'] ?? null,
+                (string) $args['actor']
+            );
+            $out = [
+                'ok' => true,
+                'exceptionClass' => null,
+                'lineageUuid' => $created['lineage']['uuid'],
+                'currentCredentialUuid' => $created['lineage']['current_credential_uuid'],
+            ];
+            break;
+
+        case 'apiKeyRotate':
+            $apiKeys = apiKeyService();
+            $rotated = $apiKeys->rotate(
+                $context,
+                $tenant,
+                (string) $args['sellerUuid'],
+                (string) $args['lineageUuid'],
+                (string) $args['actor']
+            );
+            $out = [
+                'ok' => true,
+                'exceptionClass' => null,
+                'currentCredentialUuid' => $rotated['lineage']['current_credential_uuid'],
+            ];
+            break;
+
+        case 'apiKeyRevoke':
+            $apiKeys = apiKeyService();
+            $revoked = $apiKeys->revoke(
+                $context,
+                $tenant,
+                (string) $args['sellerUuid'],
+                (string) $args['lineageUuid'],
+                (string) $args['actor']
+            );
+            $out = ['ok' => true, 'exceptionClass' => null, 'status' => $revoked['lineage']['status']];
+            break;
+
         default:
             throw new \RuntimeException("Unknown action: {$action}");
     }
@@ -334,6 +410,13 @@ try {
         'ok' => false,
         'exceptionClass' => $e::class,
         'unassignedCount' => $e->unassignedCount,
+    ];
+} catch (SellerApiKeyException $e) {
+    $out = [
+        'ok' => false,
+        'exceptionClass' => $e::class,
+        'message' => $e->getMessage(),
+        'errorCode' => $e->errorCode,
     ];
 } catch (\Throwable $e) {
     $out = ['ok' => false, 'exceptionClass' => $e::class, 'message' => $e->getMessage()];

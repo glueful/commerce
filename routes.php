@@ -32,6 +32,7 @@ use Glueful\Extensions\Commerce\Http\Admin\AdminStockController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminTagController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminTaxRateController;
 use Glueful\Extensions\Commerce\Http\Admin\MarketplaceAdminController;
+use Glueful\Extensions\Commerce\Http\Seller\SellerApiKeyController;
 use Glueful\Extensions\Commerce\Http\Seller\SellerCatalogController;
 use Glueful\Extensions\Commerce\Http\Seller\SellerFinancialController;
 use Glueful\Extensions\Commerce\Http\Seller\SellerInventoryController;
@@ -503,6 +504,26 @@ if ($marketplaceEnabled) {
             ->middleware($membersManage);
         $router->delete('/{sellerUuid}/members/{userUuid}', [SellerMembershipController::class, 'destroy'])
             ->middleware($membersManage);
+
+        // Seller self-service API-key management (design spec §2.8/§5,
+        // MV5c-1 Task 6): JWT-INTERACTIVE-ONLY -- `interactive_session` runs
+        // BEFORE `commerce_seller:...apikeys.manage` on every route below, so
+        // an API-key request (or any non-JWT-interactive provider) is
+        // refused 403 before seller lifecycle/membership/capability handling
+        // ever runs -- a key can NEVER manage keys, even one whose scope
+        // somehow includes `apikeys.manage` (the catalog never grants it,
+        // but this gate refuses regardless of scope). See
+        // {@see \Glueful\Extensions\Commerce\Http\Middleware\InteractiveSessionMiddleware}'s
+        // own docblock for the exact positive-JWT predicate this relies on.
+        $apikeysManage = 'commerce_seller:commerce.seller.apikeys.manage';
+        $router->post('/{sellerUuid}/api-keys', [SellerApiKeyController::class, 'store'])
+            ->middleware(['interactive_session', $apikeysManage]);
+        $router->get('/{sellerUuid}/api-keys', [SellerApiKeyController::class, 'index'])
+            ->middleware(['interactive_session', $apikeysManage]);
+        $router->post('/{sellerUuid}/api-keys/{lineageUuid}/rotate', [SellerApiKeyController::class, 'rotate'])
+            ->middleware(['interactive_session', $apikeysManage]);
+        $router->post('/{sellerUuid}/api-keys/{lineageUuid}/revoke', [SellerApiKeyController::class, 'revoke'])
+            ->middleware(['interactive_session', $apikeysManage]);
 
         // Seller order surfaces (design spec §6.1/§2.12, MV2 Task 8): the
         // confirmed_at payment-confirmation gate lives at the

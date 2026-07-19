@@ -64,7 +64,9 @@ use Glueful\Extensions\Commerce\Http\Admin\AdminStockController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminTagController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminTaxRateController;
 use Glueful\Extensions\Commerce\Http\Admin\MarketplaceAdminController;
+use Glueful\Extensions\Commerce\Http\Middleware\InteractiveSessionMiddleware;
 use Glueful\Extensions\Commerce\Http\Middleware\SellerMemberMiddleware;
+use Glueful\Extensions\Commerce\Http\Seller\SellerApiKeyController;
 use Glueful\Extensions\Commerce\Http\Seller\SellerCatalogController;
 use Glueful\Extensions\Commerce\Http\Seller\SellerFinancialController;
 use Glueful\Extensions\Commerce\Http\Seller\SellerInventoryController;
@@ -550,6 +552,18 @@ final class CommerceServiceProvider extends ServiceProvider
             ],
             SellerMemberMiddleware::class => [
                 'factory' => [self::class, 'makeSellerMemberMiddleware'],
+                'shared' => true,
+            ],
+            'interactive_session' => [
+                'factory' => [self::class, 'makeInteractiveSessionMiddleware'],
+                'shared' => true,
+            ],
+            InteractiveSessionMiddleware::class => [
+                'factory' => [self::class, 'makeInteractiveSessionMiddleware'],
+                'shared' => true,
+            ],
+            SellerApiKeyController::class => [
+                'factory' => [self::class, 'makeSellerApiKeyController'],
                 'shared' => true,
             ],
             SellerCatalogController::class => [
@@ -1536,6 +1550,21 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(MarketplaceMode::class),
             self::tenantResolver($container),
             $container->get(SellerApiKeyAuthorizer::class)
+        );
+    }
+
+    public static function makeInteractiveSessionMiddleware(ContainerInterface $container): InteractiveSessionMiddleware
+    {
+        return new InteractiveSessionMiddleware();
+    }
+
+    public static function makeSellerApiKeyController(ContainerInterface $container): SellerApiKeyController
+    {
+        return new SellerApiKeyController(
+            $container->get(ApplicationContext::class),
+            $container->get(SellerApiKeyService::class),
+            $container->get(SellerApiKeyRepository::class),
+            self::tenantResolver($container)
         );
     }
 

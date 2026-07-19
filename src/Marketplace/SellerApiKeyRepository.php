@@ -64,6 +64,30 @@ final class SellerApiKeyRepository
         return $row === null ? null : $this->decodeLineage($row);
     }
 
+    /**
+     * The seller's OWN self-service lineage list (design spec §2.8, MV5c-1
+     * Task 6, `GET /{sellerUuid}/api-keys`) -- every lineage recorded for
+     * this seller, active AND revoked (a seller may legitimately want to see
+     * its own key HISTORY, not only what is currently active), ordered
+     * oldest-first -- mirrors {@see SellerMembershipRepository::listForSeller()}'s
+     * identical `(created_at, uuid)` ordering convention. Never includes a
+     * secret -- there is none to include; the framework key material is
+     * never persisted anywhere Commerce reads.
+     *
+     * @return list<array<string,mixed>>
+     */
+    public function listForSeller(ApplicationContext $context, string $tenant, string $sellerUuid): array
+    {
+        $rows = db($context)->table('commerce_seller_api_keys')
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('seller_uuid', '=', $sellerUuid)
+            ->orderBy('created_at', 'ASC')
+            ->orderBy('uuid', 'ASC')
+            ->get();
+
+        return array_map(fn (array $row): array => $this->decodeLineage($row), $rows);
+    }
+
     /** @param array<string,mixed> $row */
     public function insertCredential(ApplicationContext $context, string $tenant, array $row): void
     {

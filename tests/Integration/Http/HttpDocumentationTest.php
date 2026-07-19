@@ -156,6 +156,18 @@ final class HttpDocumentationTest extends CommerceTestCase
         // loudly here rather than silently shrinking the walked set.
         self::assertContains('/commerce/admin/marketplace/sellers/{uuid}/lifecycle', $paths);
 
+        // MV5c-1 Task 6/7 (GATES): the seller self-service API-key management
+        // surface -- create/list/rotate/revoke. Already flows through the fully
+        // generic walk below with zero changes (every action already carries
+        // `#[ApiOperation]`/`#[ApiResponse]`, see `SellerApiKeyController`) --
+        // these `assertContains` calls only pin that the four NEW routes are
+        // genuinely present in this pass, so a future regression that
+        // accidentally drops one of them from `routes.php` fails loudly here
+        // rather than silently shrinking the walked set.
+        self::assertContains('/commerce/seller/{sellerUuid}/api-keys', $paths);
+        self::assertContains('/commerce/seller/{sellerUuid}/api-keys/{lineageUuid}/rotate', $paths);
+        self::assertContains('/commerce/seller/{sellerUuid}/api-keys/{lineageUuid}/revoke', $paths);
+
         $this->assertEveryCommerceRouteActionIsDocumented($router, $actions);
     }
 

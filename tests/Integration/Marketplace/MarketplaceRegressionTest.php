@@ -21,6 +21,7 @@ use Glueful\Extensions\Commerce\Contracts\ShippingRateProvider;
 use Glueful\Extensions\Commerce\Contracts\TaxCalculator;
 use Glueful\Extensions\Commerce\Discounts\DiscountRepository;
 use Glueful\Extensions\Commerce\Discounts\DiscountService;
+use Glueful\Extensions\Commerce\Console\PurgeApiKeyDenialsCommand;
 use Glueful\Extensions\Commerce\Http\Admin\AdminOrderController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminProductController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminReportController;
@@ -30,17 +31,22 @@ use Glueful\Extensions\Commerce\Http\DTOs\FulfillOrderData;
 use Glueful\Extensions\Commerce\Http\DTOs\ProductListQuery;
 use Glueful\Extensions\Commerce\Http\DTOs\ProductVariantData;
 use Glueful\Extensions\Commerce\Http\DTOs\ReportWindowQuery;
+use Glueful\Extensions\Commerce\Http\Middleware\SellerMemberMiddleware;
+use Glueful\Extensions\Commerce\Http\Seller\SellerFinancialController;
+use Glueful\Extensions\Commerce\Http\Seller\SellerOrderController;
 use Glueful\Extensions\Commerce\Http\Storefront\CartController;
 use Glueful\Extensions\Commerce\Http\Storefront\OrderController;
 use Glueful\Extensions\Commerce\Http\Storefront\ProductController;
 use Glueful\Extensions\Commerce\Invoices\ConfigSellerIdentityProvider;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
+use Glueful\Extensions\Commerce\Marketplace\FixedSellerRoleAuthority;
 use Glueful\Extensions\Commerce\Marketplace\LedgerAccountLock;
 use Glueful\Extensions\Commerce\Marketplace\LedgerPostingService;
 use Glueful\Extensions\Commerce\Marketplace\LedgerRepository;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceMode;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceRefundGuard;
 use Glueful\Extensions\Commerce\Marketplace\MarketplaceWorkspaceLock;
+use Glueful\Extensions\Commerce\Marketplace\PayoutAccountRepository;
 use Glueful\Extensions\Commerce\Marketplace\PayoutException;
 use Glueful\Extensions\Commerce\Marketplace\PayoutRepository;
 use Glueful\Extensions\Commerce\Marketplace\PayoutService;
@@ -48,11 +54,15 @@ use Glueful\Extensions\Commerce\Marketplace\ReservePolicyEventRepository;
 use Glueful\Extensions\Commerce\Marketplace\ReservePolicyService;
 use Glueful\Extensions\Commerce\Marketplace\ReserveRepository;
 use Glueful\Extensions\Commerce\Marketplace\ReserveService;
+use Glueful\Extensions\Commerce\Marketplace\SellerApiKeyAuthorizer;
+use Glueful\Extensions\Commerce\Marketplace\SellerApiKeyRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerBalanceService;
 use Glueful\Extensions\Commerce\Marketplace\SellerLifecycleEventRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerOrderFulfillmentService;
 use Glueful\Extensions\Commerce\Marketplace\SellerOrderPaymentConfirmation;
 use Glueful\Extensions\Commerce\Marketplace\SellerOrderRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerOrderService;
 use Glueful\Extensions\Commerce\Marketplace\SellerRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerService;
 use Glueful\Extensions\Commerce\Orders\CheckoutService;
@@ -67,6 +77,7 @@ use Glueful\Extensions\Commerce\Pricing\PricingEngine;
 use Glueful\Extensions\Commerce\Pricing\ShippingQuote;
 use Glueful\Extensions\Commerce\Pricing\TaxQuote;
 use Glueful\Extensions\Commerce\Reports\SalesReportRepository;
+use Glueful\Extensions\Commerce\Reports\SellerFinancialReportRepository;
 use Glueful\Extensions\Commerce\Shipping\ShippingClassRepository;
 use Glueful\Extensions\Commerce\Support\DiagnosticsReport;
 use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
@@ -74,7 +85,12 @@ use Glueful\Extensions\Commerce\Tenancy\TenantAdopter;
 use Glueful\Extensions\Commerce\Tests\Support\CommerceTestCase;
 use Glueful\Extensions\Commerce\Tests\Support\QueryLoggingPdoStatement;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
+use Glueful\Helpers\Utils;
+use Glueful\Http\Exceptions\Handler as ExceptionHandler;
+use Glueful\Http\Response;
+use Glueful\Routing\RouteMiddleware;
 use Glueful\Routing\Router;
+use Symfony\Component\Console\Tester\CommandTester;
 use Symfony\Component\HttpFoundation\Request;
 
 /**
@@ -154,6 +170,13 @@ final class MarketplaceRegressionTest extends CommerceTestCase
 
     /** MV5b Task 7 (design spec §3): the brand-new lifecycle-audit table. */
     private const MV5B_LIFECYCLE_TABLE = 'commerce_seller_lifecycle_events';
+
+    /** MV5c-1 Task 7 (design spec §3): the three brand-new seller-API-key tables. */
+    private const MV5C1_TABLES = [
+        'commerce_seller_api_keys',
+        'commerce_seller_api_key_credentials',
+        'commerce_seller_api_key_events',
+    ];
 
     // =====================================================================
     // 1. Route manifest: flag off == pre-MV1, byte for byte.
@@ -448,7 +471,14 @@ final class MarketplaceRegressionTest extends CommerceTestCase
         // adds the new lifecycle-audit table: no ordinary storefront/cart/
         // checkout/admin/report/payment/refund/fulfill/cancel/projection
         // path may ever touch it either -- it is written ONLY by an explicit
-        // operator suspend/reactivate/close call, never incidentally.
+        // operator suspend/reactivate/close call, never incidentally. MV5c-1
+        // Task 7 (GATES) adds the three new seller-API-key tables: no
+        // ordinary path above touches them either -- they are written/read
+        // ONLY by the seller-API-key surface + the per-request authorizer,
+        // and the authorizer itself is a proven zero-query no-op for every
+        // one of these session-authenticated paths (design spec §6 --
+        // `auth_method != 'api_key'` short-circuits before any key-table
+        // query; see `SellerApiKeyAuthorizer::authorize()`).
         $marketplaceTables = [
             'commerce_marketplace_settings',
             'commerce_sellers',
@@ -461,6 +491,7 @@ final class MarketplaceRegressionTest extends CommerceTestCase
             self::MV4_PAYOUT_ACCOUNTS_TABLE,
             ...self::MV5A_TABLES,
             self::MV5B_LIFECYCLE_TABLE,
+            ...self::MV5C1_TABLES,
         ];
         foreach (QueryLoggingPdoStatement::$queries as $sql) {
             foreach ($marketplaceTables as $table) {
@@ -1758,6 +1789,378 @@ final class MarketplaceRegressionTest extends CommerceTestCase
         self::assertSame('Regression history event 1.', $page2['items'][0]['reason']);
     }
 
+    // =====================================================================
+    // 10. MV5c-1 Task 7 GATES (design spec §2.7/§2.10/§2.11/§6): the three
+    //    new seller-API-key tables join the SAME maintenance guarantees the
+    //    MV1-MV5b tables already have (§4); no new route leaks into the
+    //    manifest with the master switch off; immediate revalidation for a
+    //    KEY specifically (not merely a session, already proven by
+    //    `SellerApiKeyAuthTest`, MV5c-1 Task 4) -- a suspended seller's key
+    //    reaches ONLY the same 5 `allow_suspended` routes a session reaches
+    //    (`SuspendedSellerAuthorizationTest`, MV5b Task 5), and a closed
+    //    seller's key reaches NOTHING (its membership is deactivated by a
+    //    real `close()`, design spec §2.11); the retention-cleanup command.
+    //    Off-invariance's other two legs -- the authorizer's zero-query
+    //    no-op for `auth_method != 'api_key'` and a non-Commerce framework
+    //    key getting no seller authority -- are already proven end to end by
+    //    `SellerApiKeyAuthTest::testSessionRequestIssuesZeroKeyTableQueries()`/
+    //    `testNonCommerceFrameworkKeyOwnedByAnActiveSellerMemberIsStillDenied()`
+    //    (MV5c-1 Task 4); not duplicated here.
+    // =====================================================================
+
+    public function testSellerApiKeyRoutesNeverLeakIntoTheManifestWithTheMasterSwitchOff(): void
+    {
+        self::assertFalse((bool) config($this->context, 'commerce.marketplace.enabled', false));
+
+        $router = $this->freshRouter();
+        $paths = array_map(static fn (array $route): string => (string) $route['path'], $router->getAllRoutes());
+
+        foreach (
+            [
+                '/commerce/seller/{sellerUuid}/api-keys',
+                '/commerce/seller/{sellerUuid}/api-keys/{lineageUuid}/rotate',
+                '/commerce/seller/{sellerUuid}/api-keys/{lineageUuid}/revoke',
+            ] as $mv5c1Route
+        ) {
+            self::assertNotContains(
+                $mv5c1Route,
+                $paths,
+                "{$mv5c1Route} must not leak into the manifest with the master switch off."
+            );
+        }
+    }
+
+    public function testDiagnosticsReportListsAllThreeSellerApiKeyTablesAsPresentWithTheSwitchOff(): void
+    {
+        self::assertFalse((bool) config($this->context, 'commerce.marketplace.enabled', false));
+
+        $present = DiagnosticsReport::build($this->context)['database']['commerce_tables_present'];
+
+        foreach (self::MV5C1_TABLES as $table) {
+            self::assertArrayHasKey($table, $present);
+            self::assertTrue(
+                $present[$table],
+                "DiagnosticsReport must list {$table} as present regardless of the switch"
+            );
+        }
+    }
+
+    /**
+     * MV5c-1 Task 7: `commerce:tenancy:adopt` rekeys all three new
+     * seller-API-key tables too -- {@see DiagnosticsReport::tenantTables()}
+     * already lists them unconditionally (design spec §3), so
+     * {@see TenantAdopter} picks them up mechanically; this pins that
+     * behaviorally, mirroring the MV3/MV4/MV5a/MV5b siblings above exactly,
+     * switch off (the default).
+     */
+    public function testTenantAdoptRekeysAllThreeSellerApiKeyTablesEvenWhenTheMasterSwitchIsOff(): void
+    {
+        self::assertFalse(
+            (bool) config($this->context, 'commerce.marketplace.enabled', false),
+            'this test relies on the master switch being off (the default)'
+        );
+
+        $this->connection->table('commerce_seller_api_keys')->insert([
+            'uuid' => 'mv5c1adptln1',
+            'tenant_uuid' => '',
+            'seller_uuid' => 'mv5c1adptsl1',
+            'subject_user_uuid' => 'mv5c1adptsu1',
+            'declared_scopes' => json_encode(['commerce.seller.orders.read'], JSON_THROW_ON_ERROR),
+            'name' => 'Adopt probe key',
+            'status' => 'active',
+            'current_credential_uuid' => 'mv5c1adptcr1',
+            'created_by' => 'mv5c1adptsu1',
+        ]);
+        $this->connection->table('commerce_seller_api_key_credentials')->insert([
+            'uuid' => 'mv5c1adptcr1',
+            'tenant_uuid' => '',
+            'lineage_uuid' => 'mv5c1adptln1',
+            'framework_key_uuid' => 'mv5c1adptfk1',
+            'generation' => 1,
+            'relationship' => 'current',
+        ]);
+        $this->connection->table('commerce_seller_api_key_events')->insert([
+            'uuid' => 'mv5c1adptev1',
+            'tenant_uuid' => '',
+            'lineage_uuid' => 'mv5c1adptln1',
+            'seller_uuid' => 'mv5c1adptsl1',
+            'subject_user_uuid' => 'mv5c1adptsu1',
+            'action' => 'created',
+            'actor_uuid' => 'mv5c1adptsu1',
+        ]);
+
+        $result = (new TenantAdopter())->adopt($this->context, 'tenantMV5c1099');
+
+        foreach (self::MV5C1_TABLES as $table) {
+            self::assertSame(1, $result['tables'][$table], "{$table} must report exactly 1 rekeyed row");
+            self::assertSame(
+                0,
+                $this->connection->table($table)->where('tenant_uuid', '=', '')->count(),
+                "{$table} must have no sentinel rows left behind"
+            );
+            self::assertSame(
+                1,
+                $this->connection->table($table)->where('tenant_uuid', '=', 'tenantMV5c1099')->count(),
+                "{$table} row must be rekeyed to the adopted tenant"
+            );
+        }
+    }
+
+    /**
+     * Design spec §2.7/§2.11: suspension takes effect on the VERY NEXT
+     * key-authenticated request -- the key reaches ONLY the same 5
+     * `allow_suspended` routes a session reaches (MV5b), through the SAME
+     * `SellerMemberMiddleware` lifecycle gate a session goes through, no
+     * key-specific suspension logic. The key declares every capability the 5
+     * routes need (`orders.read`/`orders.fulfill`/`reports.read`) so every
+     * denial proven below is genuinely the LIFECYCLE gate, never merely a
+     * missing declared scope.
+     */
+    public function testSuspendedSellerApiKeyReachesOnlyTheFiveAllowSuspendedRoutesImmediately(): void
+    {
+        $this->enableMarketplace();
+        $this->activateWorkspace(self::TENANT);
+        $seller = $this->seedActiveSeller('regress-mv5c1-susp-key');
+        $product = $this->seedAttributedProduct('regress-mv5c1-susp-key-p', $seller['uuid']);
+        (new StockRepository())->increment($this->context, self::TENANT, (string) $product['variants'][0]['uuid'], 10);
+
+        $cartService = $this->cartService();
+        ['cart' => $cart, 'token' => $token] = $cartService->create($this->context);
+        $cartService->addLine($this->context, $cart, (string) $product['variants'][0]['uuid'], 1);
+        $placed = $this->marketplaceCheckoutService()
+            ->placeOrder($this->context, $token, $this->buyer(), $this->addresses(), 'std');
+        $order = $placed['order'];
+        $this->paymentService()->markPaid($this->context, self::TENANT, (string) $order['uuid']);
+        $sellerOrder = $this->connection->table('commerce_seller_orders')
+            ->where('order_uuid', '=', $order['uuid'])->first();
+
+        $ownerUuid = $this->ownerUuidFor($seller['uuid']);
+        $scopes = [
+            'commerce.seller.orders.read',
+            'commerce.seller.orders.fulfill',
+            'commerce.seller.reports.read',
+        ];
+        $this->seedApiKeyBinding($seller['uuid'], $ownerUuid, $scopes, 'fwKeyMv5c1S1');
+
+        $this->sellerService()->suspend(
+            $this->context,
+            self::TENANT,
+            $seller['uuid'],
+            'MV5c-1 key regression probe.',
+            'operatorMv5c'
+        );
+
+        $router = $this->freshSellerKeyRouter();
+        $key = fn (string $method, string $uri, array $body = []): Request => $this->apiKeyRequestFor(
+            $ownerUuid,
+            'fwKeyMv5c1S1',
+            $scopes,
+            $method,
+            $uri,
+            $body
+        );
+
+        self::assertSame(
+            200,
+            $this->dispatch($router, $key('GET', "/commerce/seller/{$seller['uuid']}/orders"))->getStatusCode(),
+            'orders.read (list) must stay reachable while suspended'
+        );
+        self::assertSame(
+            200,
+            $this->dispatch(
+                $router,
+                $key('GET', "/commerce/seller/{$seller['uuid']}/orders/{$sellerOrder['uuid']}")
+            )->getStatusCode(),
+            'orders.read (show) must stay reachable while suspended'
+        );
+        self::assertSame(
+            200,
+            $this->dispatch($router, $key(
+                'POST',
+                "/commerce/seller/{$seller['uuid']}/orders/{$sellerOrder['uuid']}/fulfill",
+                ['carrier' => 'UPS', 'tracking_number' => 'MV5C1TRACK1', 'tracking_url' => null]
+            ))->getStatusCode(),
+            'orders.fulfill must stay reachable while suspended'
+        );
+        self::assertSame(
+            200,
+            $this->dispatch(
+                $router,
+                $key('GET', "/commerce/seller/{$seller['uuid']}/financials/balance")
+            )->getStatusCode(),
+            'reports.read (balance) must stay reachable while suspended'
+        );
+        self::assertSame(
+            200,
+            $this->dispatch(
+                $router,
+                $key('GET', "/commerce/seller/{$seller['uuid']}/financials/reserves")
+            )->getStatusCode(),
+            'reports.read (reserves) must stay reachable while suspended'
+        );
+
+        // An UNMARKED route using a capability the key's OWN scope already
+        // satisfies (reports.read) still fails closed -- proving this is the
+        // LIFECYCLE gate refusing, never merely a scope check.
+        self::assertSame(
+            409,
+            $this->dispatch(
+                $router,
+                $key('GET', "/commerce/seller/{$seller['uuid']}/financials/report")
+            )->getStatusCode(),
+            'an unmarked route must be 409 for a suspended seller\'s key, even one its own scope satisfies'
+        );
+    }
+
+    /**
+     * Design spec §2.11: "a closed seller's keys reach nothing (deactivated
+     * memberships)" -- a real {@see SellerService::close()} deactivates
+     * every membership row for the seller, so the key's subject no longer
+     * has ANY active membership at all; the non-revealing 404 fires at
+     * `SellerMemberMiddleware` step 2 for EVERY route, read or mutation
+     * alike -- never the closed-seller "reads stay" allowance a SESSION
+     * still gets (that allowance is reached only via an ACTIVE membership,
+     * which a key-holder no longer has once closed).
+     */
+    public function testClosedSellerApiKeyReachesNothingBecauseItsMembershipIsDeactivated(): void
+    {
+        $this->enableMarketplace();
+        $this->activateWorkspace(self::TENANT);
+        $seller = $this->seedActiveSeller('regress-mv5c1-closed-key');
+        // No product attributed -- close() carries a live-products guard.
+
+        $ownerUuid = $this->ownerUuidFor($seller['uuid']);
+        // Declares BOTH capabilities the two probes below need -- the point of
+        // this test is that a deactivated MEMBERSHIP refuses even a request
+        // the key's own declared scope satisfies, never a scope mismatch.
+        $scopes = ['commerce.seller.orders.read', 'commerce.seller.orders.fulfill'];
+        $this->seedApiKeyBinding($seller['uuid'], $ownerUuid, $scopes, 'fwKeyMv5c1C1');
+
+        $this->sellerService()->close(
+            $this->context,
+            self::TENANT,
+            $seller['uuid'],
+            'MV5c-1 key regression probe.',
+            'operatorMv5c'
+        );
+
+        $router = $this->freshSellerKeyRouter();
+
+        $readResponse = $this->dispatch($router, $this->apiKeyRequestFor(
+            $ownerUuid,
+            'fwKeyMv5c1C1',
+            $scopes,
+            'GET',
+            "/commerce/seller/{$seller['uuid']}/orders"
+        ));
+        self::assertSame(404, $readResponse->getStatusCode(), 'a closed seller\'s key must reach NOTHING, not even a read');
+
+        $mutateResponse = $this->dispatch($router, $this->apiKeyRequestFor(
+            $ownerUuid,
+            'fwKeyMv5c1C1',
+            $scopes,
+            'POST',
+            "/commerce/seller/{$seller['uuid']}/orders/irrelevantOrd1/fulfill",
+            ['carrier' => 'UPS', 'tracking_number' => 'MV5C1TRACK2', 'tracking_url' => null]
+        ));
+        self::assertSame(404, $mutateResponse->getStatusCode());
+    }
+
+    /**
+     * Design spec §2.10: {@see PurgeApiKeyDenialsCommand} deletes ONLY
+     * `auth_denied` rows older than the configured retention window
+     * (default 90 days, `commerce.marketplace.api_keys.auth_denied_retention_days`)
+     * -- a fresh `auth_denied` row survives, a permanent mutation event
+     * (`created`/`rotated`/`revoked`) is NEVER touched regardless of age, and
+     * the sweep is a single cross-tenant statement (no per-tenant retention
+     * override exists to honor).
+     */
+    public function testPurgeApiKeyDenialsCommandDeletesOnlyStaleAuthDeniedRowsHonoringDefaultRetention(): void
+    {
+        self::assertSame(
+            90,
+            (int) config($this->context, 'commerce.marketplace.api_keys.auth_denied_retention_days', 90),
+            'sanity: the default retention window must be 90 days'
+        );
+
+        $staleCreatedAt = gmdate('Y-m-d H:i:s', strtotime('-91 days'));
+
+        // Fresh auth_denied row (well within retention) -- must survive.
+        $this->connection->table('commerce_seller_api_key_events')->insert([
+            'uuid' => 'mv5c1purgev1',
+            'tenant_uuid' => self::TENANT,
+            'lineage_uuid' => 'mv5c1purgeln',
+            'seller_uuid' => 'mv5c1purgesl',
+            'subject_user_uuid' => 'mv5c1purgesu',
+            'action' => 'auth_denied',
+            'reason_code' => 'seller_mismatch',
+            'bucket_start' => gmdate('Y-m-d H:i:00'),
+        ]);
+        // Stale auth_denied row (past the default 90-day retention) -- must be purged.
+        $this->connection->table('commerce_seller_api_key_events')->insert([
+            'uuid' => 'mv5c1purgev2',
+            'tenant_uuid' => self::TENANT,
+            'lineage_uuid' => 'mv5c1purgeln',
+            'seller_uuid' => 'mv5c1purgesl',
+            'subject_user_uuid' => 'mv5c1purgesu',
+            'action' => 'auth_denied',
+            'reason_code' => 'scope_drift',
+            'bucket_start' => gmdate('Y-m-d H:i:00', strtotime('-91 days')),
+            'created_at' => $staleCreatedAt,
+        ]);
+        // A permanent mutation event, ALSO 91 days old -- action != auth_denied,
+        // so it must NEVER be touched by this sweep regardless of age.
+        $this->connection->table('commerce_seller_api_key_events')->insert([
+            'uuid' => 'mv5c1purgev3',
+            'tenant_uuid' => self::TENANT,
+            'lineage_uuid' => 'mv5c1purgeln',
+            'seller_uuid' => 'mv5c1purgesl',
+            'subject_user_uuid' => 'mv5c1purgesu',
+            'action' => 'created',
+            'actor_uuid' => 'mv5c1purgesu',
+            'created_at' => $staleCreatedAt,
+        ]);
+        // A different tenant's equally-stale auth_denied row -- the sweep is
+        // cross-tenant by design (design spec §2.10), so this must ALSO be purged.
+        $this->connection->table('commerce_seller_api_key_events')->insert([
+            'uuid' => 'mv5c1purgev4',
+            'tenant_uuid' => 'otherTenantK',
+            'lineage_uuid' => 'mv5c1purgeln',
+            'seller_uuid' => 'mv5c1purgesl',
+            'subject_user_uuid' => 'mv5c1purgesu',
+            'action' => 'auth_denied',
+            'reason_code' => 'capability_denied',
+            'bucket_start' => gmdate('Y-m-d H:i:00', strtotime('-91 days')),
+            'created_at' => $staleCreatedAt,
+        ]);
+
+        $command = new PurgeApiKeyDenialsCommand($this->context->getContainer(), $this->context);
+        $tester = new CommandTester($command);
+        $exitCode = $tester->execute([]);
+
+        self::assertSame(0, $exitCode);
+        self::assertSame(
+            1,
+            $this->connection->table('commerce_seller_api_key_events')->where('uuid', '=', 'mv5c1purgev1')->count(),
+            'a fresh auth_denied row must survive'
+        );
+        self::assertSame(
+            0,
+            $this->connection->table('commerce_seller_api_key_events')->where('uuid', '=', 'mv5c1purgev2')->count(),
+            'a stale auth_denied row must be purged'
+        );
+        self::assertSame(
+            1,
+            $this->connection->table('commerce_seller_api_key_events')->where('uuid', '=', 'mv5c1purgev3')->count(),
+            'a permanent mutation event must never be touched by retention, regardless of age'
+        );
+        self::assertSame(
+            0,
+            $this->connection->table('commerce_seller_api_key_events')->where('uuid', '=', 'mv5c1purgev4')->count(),
+            'the sweep is cross-tenant -- a different tenant\'s stale auth_denied row is purged too'
+        );
+    }
+
     // -----------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------
@@ -2147,5 +2550,173 @@ final class MarketplaceRegressionTest extends CommerceTestCase
     private function fixedTenant(): CurrentTenantResolver
     {
         return new SentinelTenantResolver();
+    }
+
+    // -----------------------------------------------------------------
+    // MV5c-1 Task 7 helpers: a minimal, LOCAL real-router harness for the
+    // two key-lifecycle tests above -- deliberately NOT a full
+    // `CommerceRouterTestCase` (this file's own class hierarchy predates it
+    // and every OTHER test above relies on this file's own plain
+    // `CommerceTestCase` base + its OWN `freshRouter()`/`fixedTenant()`
+    // conventions) -- binds only what those two tests actually dispatch to:
+    // `commerce_seller` (the REAL {@see SellerMemberMiddleware}, wired
+    // identically to `CommerceRouterTestCase::buildSellerMiddleware()`),
+    // `SellerOrderController`, `SellerFinancialController`, and a
+    // pass-through `auth` stub (this suite pre-sets every auth-relevant
+    // request ATTRIBUTE directly via {@see self::apiKeyRequestFor()} --
+    // mirroring {@see SellerApiKeyAuthTest}'s own
+    // `testPrincipalMismatchDoesNotOverwriteTheAuthenticatedUserAttribute()`
+    // convention -- rather than simulating framework header parsing).
+    // -----------------------------------------------------------------
+
+    private function freshSellerKeyRouter(): Router
+    {
+        $this->bind(ApplicationContext::class, $this->context);
+        $this->bind('auth', new class implements RouteMiddleware {
+            public function handle(Request $request, callable $next, mixed ...$params): mixed
+            {
+                return $next($request);
+            }
+        });
+        $this->bind('commerce_seller', new SellerMemberMiddleware(
+            $this->context,
+            new SellerRepository(),
+            new SellerMembershipRepository(),
+            new FixedSellerRoleAuthority(),
+            new MarketplaceMode(),
+            $this->fixedTenant(),
+            new SellerApiKeyAuthorizer(new SellerApiKeyRepository())
+        ));
+
+        $orders = new OrderRepository();
+        $sellerOrders = new SellerOrderRepository();
+        $this->bind(SellerOrderController::class, new SellerOrderController(
+            $this->context,
+            new SellerOrderService($sellerOrders, $orders, $this->fixedTenant()),
+            new SellerOrderFulfillmentService($orders, $sellerOrders),
+            $this->fixedTenant()
+        ));
+        $this->bind(SellerFinancialController::class, new SellerFinancialController(
+            $this->context,
+            new SellerFinancialReportRepository(),
+            new SellerBalanceService(new LedgerRepository()),
+            new PayoutRepository(),
+            new MarketplaceMode(),
+            $this->fixedTenant(),
+            new PayoutAccountRepository(),
+            // Explicit -- never lazily `app()`-resolved (see the controller's
+            // own `reserveService()`) -- this suite's lightweight container
+            // has no `ReserveService` binding at all. Mirrors this file's own
+            // `reserveWiredLedgerPostingService()` wiring above.
+            new ReserveService(
+                new ReservePolicyService(
+                    new SellerRepository(),
+                    new MarketplaceWorkspaceLock(),
+                    new ReservePolicyEventRepository()
+                ),
+                new ReserveRepository(),
+                new LedgerRepository()
+            )
+        ));
+
+        $router = new Router($this->contextContainer());
+        require __DIR__ . '/../../../routes.php';
+
+        return $router;
+    }
+
+    private function dispatch(Router $router, Request $request): Response
+    {
+        try {
+            $response = $router->dispatch($request);
+        } catch (\Throwable $e) {
+            $response = (new ExceptionHandler())->handle($e, $request);
+        }
+
+        return $response instanceof Response ? $response : new Response((string) $response);
+    }
+
+    /**
+     * Pre-sets every attribute the framework's real `ApiKeyAuthenticationProvider`/
+     * `AuthMiddleware` would set for a genuinely authenticated API-key
+     * request, directly on the `Request` (see this section's own docblock
+     * for why -- mirrors `SellerApiKeyAuthTest`'s identical convention).
+     *
+     * @param list<string> $scopes
+     * @param array<string,mixed> $body
+     */
+    private function apiKeyRequestFor(
+        string $subjectUuid,
+        string $frameworkKeyUuid,
+        array $scopes,
+        string $method,
+        string $uri,
+        array $body = []
+    ): Request {
+        $content = $body === [] ? null : json_encode($body, JSON_THROW_ON_ERROR);
+        $request = Request::create($uri, $method, [], [], [], [], $content);
+        if ($content !== null) {
+            $request->headers->set('Content-Type', 'application/json');
+        }
+        $request->attributes->set('auth_method', 'api_key');
+        $request->attributes->set('user_id', $subjectUuid);
+        $request->attributes->set('api_key_scopes', $scopes);
+        $request->attributes->set('api_key_uuid', $frameworkKeyUuid);
+        $request->attributes->set('user', ['uuid' => $subjectUuid]);
+
+        return $request;
+    }
+
+    /** The seller's `seller_owner` membership uuid, as actually persisted (never recomputed). */
+    private function ownerUuidFor(string $sellerUuid): string
+    {
+        $membership = $this->connection->table('commerce_seller_memberships')
+            ->where('seller_uuid', '=', $sellerUuid)
+            ->where('role', '=', 'seller_owner')
+            ->first();
+        self::assertNotNull($membership, "no seller_owner membership found for seller {$sellerUuid}");
+
+        return (string) $membership['user_uuid'];
+    }
+
+    /**
+     * Seeds a lineage + its ONE credential row directly via
+     * {@see SellerApiKeyRepository} (bypassing `SellerApiKeyService::create()`,
+     * which needs the framework's OWN `api_keys` table -- this file's
+     * lightweight container has no such table) -- mirrors
+     * `SellerApiKeyAuthTest::seedKeyBinding()`'s identical convention; this
+     * suite only cares about the per-request authorization/lifecycle
+     * contract, never CREATE itself.
+     *
+     * @param list<string> $declaredScopes
+     */
+    private function seedApiKeyBinding(
+        string $sellerUuid,
+        string $subjectUuid,
+        array $declaredScopes,
+        string $frameworkKeyUuid
+    ): void {
+        $repo = new SellerApiKeyRepository();
+        $lineageUuid = Utils::generateNanoID();
+        $credentialUuid = Utils::generateNanoID();
+
+        $repo->insertLineage($this->context, self::TENANT, [
+            'uuid' => $lineageUuid,
+            'seller_uuid' => $sellerUuid,
+            'subject_user_uuid' => $subjectUuid,
+            'declared_scopes' => $declaredScopes,
+            'name' => 'MV5c-1 regression key',
+            'status' => 'active',
+            'current_credential_uuid' => $credentialUuid,
+            'expires_at' => null,
+            'created_by' => $subjectUuid,
+        ]);
+        $repo->insertCredential($this->context, self::TENANT, [
+            'uuid' => $credentialUuid,
+            'lineage_uuid' => $lineageUuid,
+            'framework_key_uuid' => $frameworkKeyUuid,
+            'generation' => 1,
+            'relationship' => 'current',
+        ]);
     }
 }

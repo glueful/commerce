@@ -9,7 +9,9 @@ use Glueful\Extensions\Commerce\Catalog\CatalogService;
 use Glueful\Extensions\Commerce\Catalog\ProductChildrenRepository;
 use Glueful\Extensions\Commerce\Catalog\ProductRepository;
 use Glueful\Extensions\Commerce\Catalog\VariantRepository;
+use Glueful\Extensions\Commerce\Http\Middleware\InteractiveSessionMiddleware;
 use Glueful\Extensions\Commerce\Http\Middleware\SellerMemberMiddleware;
+use Glueful\Extensions\Commerce\Http\Seller\SellerApiKeyController;
 use Glueful\Extensions\Commerce\Http\Seller\SellerCatalogController;
 use Glueful\Extensions\Commerce\Http\Seller\SellerFinancialController;
 use Glueful\Extensions\Commerce\Http\Seller\SellerInventoryController;
@@ -25,6 +27,8 @@ use Glueful\Extensions\Commerce\Marketplace\PayoutAccountRepository;
 use Glueful\Extensions\Commerce\Marketplace\PayoutRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerApiKeyAuthorizer;
 use Glueful\Extensions\Commerce\Marketplace\SellerApiKeyRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerApiKeyScopeValidator;
+use Glueful\Extensions\Commerce\Marketplace\SellerApiKeyService;
 use Glueful\Extensions\Commerce\Marketplace\SellerBalanceService;
 use Glueful\Extensions\Commerce\Marketplace\SellerLifecycleEventRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipRepository;
@@ -89,6 +93,8 @@ abstract class CommerceRouterTestCase extends CommerceTestCase
         $this->bind(SellerMembershipController::class, $this->buildMembershipController());
         $this->bind(SellerOrderController::class, $this->buildSellerOrderController());
         $this->bind(SellerFinancialController::class, $this->buildSellerFinancialController());
+        $this->bind(SellerApiKeyController::class, $this->buildSellerApiKeyController());
+        $this->bind('interactive_session', new InteractiveSessionMiddleware());
 
         $router = new Router($this->contextContainer());
 
@@ -314,6 +320,33 @@ abstract class CommerceRouterTestCase extends CommerceTestCase
             new MarketplaceMode(),
             $this->fixedTenant(),
             new PayoutAccountRepository()
+        );
+    }
+
+    /**
+     * Seller self-service API-key management surface (design spec §2.8,
+     * MV5c-1 Task 6): a REAL {@see SellerApiKeyController} wired against a
+     * REAL {@see SellerApiKeyService}/{@see SellerApiKeyRepository}/
+     * {@see SellerApiKeyScopeValidator} stack, sharing the SAME
+     * {@see FixedSellerRoleAuthority} instance {@see self::buildSellerMiddleware()}
+     * uses -- mirrors every other `build*Controller()` helper above.
+     */
+    protected function buildSellerApiKeyController(): SellerApiKeyController
+    {
+        $roles = new FixedSellerRoleAuthority();
+        $apiKeys = new SellerApiKeyRepository();
+
+        return new SellerApiKeyController(
+            $this->context,
+            new SellerApiKeyService(
+                new SellerRepository(),
+                new SellerMembershipRepository(),
+                $apiKeys,
+                $roles,
+                new SellerApiKeyScopeValidator($roles)
+            ),
+            $apiKeys,
+            $this->fixedTenant()
         );
     }
 
