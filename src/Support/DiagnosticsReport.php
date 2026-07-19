@@ -230,6 +230,13 @@ final class DiagnosticsReport
             // Marketplace-aware REGARDLESS of `commerce.marketplace.enabled` for the
             // same reason as the MV1-MV5a tables above.
             'commerce_seller_lifecycle_events',
+            // Marketplace MV5c-1 seller API key binding + credential + audit
+            // trail (design spec §3). Marketplace-aware REGARDLESS of
+            // `commerce.marketplace.enabled` for the same reason as the
+            // MV1-MV5b tables above.
+            'commerce_seller_api_keys',
+            'commerce_seller_api_key_credentials',
+            'commerce_seller_api_key_events',
         ];
     }
 

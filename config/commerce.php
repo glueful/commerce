@@ -129,6 +129,17 @@ return [
             // per invocation.
             'release_sweep_batch_size' => (int) env('COMMERCE_RESERVES_RELEASE_SWEEP_BATCH_SIZE', 100),
         ],
+
+        // Seller API keys (MV5c-1, design spec §2.10). Machine-credential
+        // binding/authorization settings ONLY -- the key material itself
+        // remains entirely framework-owned/configured (`ApiKeyService`).
+        'api_keys' => [
+            // Retention window (days) for `commerce_seller_api_key_events`
+            // rows with action=`auth_denied` before a host-scheduled cleanup
+            // command purges them. Permanent mutation events (created/
+            // rotated/revoked) are never subject to this retention window.
+            'auth_denied_retention_days' => (int) env('COMMERCE_API_KEYS_AUTH_DENIED_RETENTION_DAYS', 90),
+        ],
     ],
 
     // Null-tolerant: invoice-data serializes each key as null, never omitted, when unset.

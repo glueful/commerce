@@ -403,10 +403,13 @@ final class CatalogBreadthTenancyTest extends CommerceTestCase
         // MV2 `commerce_seller_orders` table added in migration 011, the four
         // MV3 settlement-ledger tables added in migrations 012/013, the MV4
         // `commerce_seller_payout_accounts` table added in migration 014, the
-        // four MV5a reserve/chargeback tables added in migrations 015/016, and
-        // the MV5b `commerce_seller_lifecycle_events` audit table added in
-        // migration 017), so a future accidental removal/addition is caught
-        // here as well as locally.
+        // four MV5a reserve/chargeback tables added in migrations 015/016, the
+        // MV5b `commerce_seller_lifecycle_events` audit table added in
+        // migration 017, and the three MV5c-1 seller-API-key tables
+        // (`commerce_seller_api_keys`, `commerce_seller_api_key_credentials`,
+        // `commerce_seller_api_key_events`) added in migration 018), so a
+        // future accidental removal/addition is caught here as well as
+        // locally.
         self::assertSame([
             'commerce_products',
             'commerce_variants',
@@ -445,11 +448,15 @@ final class CatalogBreadthTenancyTest extends CommerceTestCase
             'commerce_chargebacks',
             'commerce_chargeback_lines',
             'commerce_seller_lifecycle_events',
+            'commerce_seller_api_keys',
+            'commerce_seller_api_key_credentials',
+            'commerce_seller_api_key_events',
         ], DiagnosticsReport::tenantTables());
 
         // The join/child tables added alongside the six must never be treated as
         // tenant tables (they carry no tenant_uuid column of their own).
-        foreach ([
+        foreach (
+            [
             'commerce_product_categories',
             'commerce_product_tags',
             'commerce_attribute_values',
@@ -457,7 +464,8 @@ final class CatalogBreadthTenancyTest extends CommerceTestCase
             'commerce_product_children',
             'commerce_shipping_zone_locations',
             'commerce_shipping_methods',
-        ] as $joinTable) {
+            ] as $joinTable
+        ) {
             self::assertNotContains($joinTable, DiagnosticsReport::tenantTables());
         }
 

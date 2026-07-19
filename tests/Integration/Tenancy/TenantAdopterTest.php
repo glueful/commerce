@@ -219,6 +219,141 @@ final class TenantAdopterTest extends CommerceTestCase
         );
     }
 
+    /**
+     * Design spec §3: all three MV5c-1 seller-API-key tables (migration 018)
+     * -- `commerce_seller_api_keys`, `commerce_seller_api_key_credentials`,
+     * `commerce_seller_api_key_events` -- are marketplace-aware regardless of
+     * the master switch, exactly like the MV1-MV5b tables above --
+     * {@see \Glueful\Extensions\Commerce\Support\DiagnosticsReport::tenantTables()}
+     * lists all three unconditionally, so `TenantAdopter` rekeys all three
+     * too, switch off or on.
+     */
+    public function testAdoptRekeysSellerApiKeyTablesEvenWhenTheMasterSwitchIsOff(): void
+    {
+        self::assertFalse(
+            (bool) config($this->context, 'commerce.marketplace.enabled', false),
+            'this test relies on the master switch being off (the default)'
+        );
+
+        $this->connection->table('commerce_seller_api_keys')->insert([
+            'uuid' => 'mktadoptak01',
+            'tenant_uuid' => '',
+            'seller_uuid' => 'mktadoptsel1',
+            'subject_user_uuid' => 'mktadoptusr1',
+            'declared_scopes' => '["commerce.seller.orders.read"]',
+            'name' => 'Sentinel key',
+            'current_credential_uuid' => 'mktadoptcr01',
+            'created_by' => 'mktadoptusr1',
+        ]);
+        $this->connection->table('commerce_seller_api_key_credentials')->insert([
+            'uuid' => 'mktadoptcr01',
+            'tenant_uuid' => '',
+            'lineage_uuid' => 'mktadoptak01',
+            'framework_key_uuid' => 'mktadoptfk01',
+            'generation' => 1,
+            'relationship' => 'current',
+        ]);
+        $this->connection->table('commerce_seller_api_key_events')->insert([
+            'uuid' => 'mktadoptev01',
+            'tenant_uuid' => '',
+            'lineage_uuid' => 'mktadoptak01',
+            'seller_uuid' => 'mktadoptsel1',
+            'subject_user_uuid' => 'mktadoptusr1',
+            'action' => 'created',
+        ]);
+
+        $result = (new TenantAdopter())->adopt($this->context, 'tenantMKT0005');
+
+        foreach (
+            [
+            'commerce_seller_api_keys',
+            'commerce_seller_api_key_credentials',
+            'commerce_seller_api_key_events',
+            ] as $table
+        ) {
+            self::assertSame(1, $result['tables'][$table], "{$table} should have adopted exactly 1 sentinel row.");
+            self::assertSame(
+                0,
+                $this->connection->table($table)->where('tenant_uuid', '=', '')->count(),
+                "{$table} must have no sentinel rows left behind"
+            );
+            self::assertSame(
+                1,
+                $this->connection->table($table)->where('tenant_uuid', '=', 'tenantMKT0005')->count(),
+                "{$table} row must be rekeyed to the adopted tenant"
+            );
+        }
+    }
+
+    /**
+     * Cross-tenant isolation safety net (design spec §5/§6), mirroring
+     * {@see testAdoptRefusesAndLeavesCrossTenantSellerLifecycleEventsRowIsolated}
+     * for all three MV5c-1 seller-API-key tables: a row already keyed to a
+     * DIFFERENT, already-resolved tenant in ANY of the three tables must
+     * never be silently rekeyed by a later `adopt()` call -- the shared
+     * mixed-data guard must refuse, and every row must stay exactly as it
+     * was.
+     */
+    public function testAdoptRefusesAndLeavesCrossTenantSellerApiKeyRowsIsolated(): void
+    {
+        $this->connection->table('commerce_seller_api_keys')->insert([
+            'uuid' => 'mktadoptak02',
+            'tenant_uuid' => 'tenantOTHER01',
+            'seller_uuid' => 'mktadoptsel2',
+            'subject_user_uuid' => 'mktadoptusr2',
+            'declared_scopes' => '["commerce.seller.orders.read"]',
+            'name' => 'Cross-tenant control key',
+            'current_credential_uuid' => 'mktadoptcr02',
+            'created_by' => 'mktadoptusr2',
+        ]);
+        $this->connection->table('commerce_seller_api_key_credentials')->insert([
+            'uuid' => 'mktadoptcr02',
+            'tenant_uuid' => 'tenantOTHER01',
+            'lineage_uuid' => 'mktadoptak02',
+            'framework_key_uuid' => 'mktadoptfk02',
+            'generation' => 1,
+            'relationship' => 'current',
+        ]);
+        $this->connection->table('commerce_seller_api_key_events')->insert([
+            'uuid' => 'mktadoptev02',
+            'tenant_uuid' => 'tenantOTHER01',
+            'lineage_uuid' => 'mktadoptak02',
+            'seller_uuid' => 'mktadoptsel2',
+            'subject_user_uuid' => 'mktadoptusr2',
+            'action' => 'created',
+        ]);
+
+        // The assertion is made OUTSIDE the try/catch on purpose -- see the
+        // note on testAdoptRefusesAndLeavesCrossTenantSellerLifecycleEventsRowIsolated()
+        // above.
+        $refused = false;
+        try {
+            (new TenantAdopter())->adopt($this->context, 'tenantMKT0006');
+        } catch (\RuntimeException) {
+            $refused = true;
+        }
+        self::assertTrue(
+            $refused,
+            'adopt() must refuse when a seller-API-key table already contains another tenant\'s row'
+        );
+
+        foreach (
+            [
+            'commerce_seller_api_keys' => 'mktadoptak02',
+            'commerce_seller_api_key_credentials' => 'mktadoptcr02',
+            'commerce_seller_api_key_events' => 'mktadoptev02',
+            ] as $table => $uuid
+        ) {
+            $row = $this->connection->table($table)->where('uuid', '=', $uuid)->first();
+            self::assertNotNull($row);
+            self::assertSame(
+                'tenantOTHER01',
+                $row['tenant_uuid'],
+                "a {$table} row already keyed to another tenant must remain untouched by a refused adoption"
+            );
+        }
+    }
+
     private function seedSentinelCatalog(): void
     {
         (new CatalogService(

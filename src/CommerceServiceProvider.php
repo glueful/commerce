@@ -109,6 +109,9 @@ use Glueful\Extensions\Commerce\Marketplace\ReservePolicyEventRepository;
 use Glueful\Extensions\Commerce\Marketplace\ReservePolicyService;
 use Glueful\Extensions\Commerce\Marketplace\ReserveRepository;
 use Glueful\Extensions\Commerce\Marketplace\ReserveService;
+use Glueful\Extensions\Commerce\Marketplace\SellerApiKeyRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerApiKeyScopeValidator;
+use Glueful\Extensions\Commerce\Marketplace\SellerApiKeyService;
 use Glueful\Extensions\Commerce\Marketplace\SellerAttributionService;
 use Glueful\Extensions\Commerce\Marketplace\SellerBalanceService;
 use Glueful\Extensions\Commerce\Marketplace\SellerLifecycleEventRepository;
@@ -383,6 +386,18 @@ final class CommerceServiceProvider extends ServiceProvider
             ],
             SellerLifecycleEventRepository::class => [
                 'class' => SellerLifecycleEventRepository::class,
+                'shared' => true,
+            ],
+            SellerApiKeyRepository::class => [
+                'class' => SellerApiKeyRepository::class,
+                'shared' => true,
+            ],
+            SellerApiKeyScopeValidator::class => [
+                'factory' => [self::class, 'makeSellerApiKeyScopeValidator'],
+                'shared' => true,
+            ],
+            SellerApiKeyService::class => [
+                'factory' => [self::class, 'makeSellerApiKeyService'],
                 'shared' => true,
             ],
             SellerOrderRepository::class => [
@@ -1448,6 +1463,22 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(SellerRepository::class),
             $container->get(SellerMembershipRepository::class),
             $container->get(SellerRoleAuthority::class)
+        );
+    }
+
+    public static function makeSellerApiKeyScopeValidator(ContainerInterface $container): SellerApiKeyScopeValidator
+    {
+        return new SellerApiKeyScopeValidator($container->get(SellerRoleAuthority::class));
+    }
+
+    public static function makeSellerApiKeyService(ContainerInterface $container): SellerApiKeyService
+    {
+        return new SellerApiKeyService(
+            $container->get(SellerRepository::class),
+            $container->get(SellerMembershipRepository::class),
+            $container->get(SellerApiKeyRepository::class),
+            $container->get(SellerRoleAuthority::class),
+            $container->get(SellerApiKeyScopeValidator::class)
         );
     }
 

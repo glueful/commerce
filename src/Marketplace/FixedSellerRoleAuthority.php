@@ -23,6 +23,7 @@ use Glueful\Extensions\Commerce\Marketplace\Contracts\SellerRoleAuthority;
  * | commerce.seller.orders.fulfill     |   x   |   x   |   x   |         |
  * | commerce.seller.reports.read       |   x   |   x   |       |    x    |
  * | commerce.seller.payouts.read       |   x   |   x   |       |    x    |
+ * | commerce.seller.apikeys.manage     |   x   |   x   |       |         |
  *
  * `commerce.seller.orders.{read,fulfill}` (design spec §6.1/§2.6, MV2 Task 8)
  * gate the seller order surfaces -- `fulfill` deliberately mirrors
@@ -35,6 +36,16 @@ use Glueful\Extensions\Commerce\Marketplace\Contracts\SellerRoleAuthority;
  * is an owner/management/analytics concern, the mirror image of
  * `orders.fulfill`'s operational-only shape above. No per-seller overrides
  * or custom roles in v1.
+ *
+ * `commerce.seller.apikeys.manage` (design spec §2.8, MV5c-1 Task 2) gates
+ * the seller self-service API-key management surface (create/rotate/revoke/
+ * list) -- granted to owner/admin ONLY, deliberately NOT staff/analyst:
+ * minting machine credentials is a credential-administration concern, never
+ * an operational or read-only-analytics one. This capability itself can
+ * NEVER be declared on a key (design spec §2.5) -- see
+ * {@see \Glueful\Extensions\Commerce\Marketplace\SellerApiKeyCapabilityCatalog},
+ * the separate, dedicated machine-grantable catalog that intentionally does
+ * NOT live on this class.
  */
 final class FixedSellerRoleAuthority implements SellerRoleAuthority
 {
@@ -47,6 +58,7 @@ final class FixedSellerRoleAuthority implements SellerRoleAuthority
     private const ORDERS_FULFILL = 'commerce.seller.orders.fulfill';
     private const REPORTS_READ = 'commerce.seller.reports.read';
     private const PAYOUTS_READ = 'commerce.seller.payouts.read';
+    public const APIKEYS_MANAGE = 'commerce.seller.apikeys.manage';
 
     /** @var array<string,list<string>> */
     private const CAPABILITY_MATRIX = [
@@ -60,6 +72,7 @@ final class FixedSellerRoleAuthority implements SellerRoleAuthority
             self::ORDERS_FULFILL,
             self::REPORTS_READ,
             self::PAYOUTS_READ,
+            self::APIKEYS_MANAGE,
         ],
         'seller_admin' => [
             self::CATALOG_READ,
@@ -70,6 +83,7 @@ final class FixedSellerRoleAuthority implements SellerRoleAuthority
             self::ORDERS_FULFILL,
             self::REPORTS_READ,
             self::PAYOUTS_READ,
+            self::APIKEYS_MANAGE,
         ],
         'seller_staff' => [
             self::CATALOG_READ,
