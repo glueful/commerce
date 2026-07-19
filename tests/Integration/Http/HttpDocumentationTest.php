@@ -130,6 +130,25 @@ final class HttpDocumentationTest extends CommerceTestCase
         self::assertContains('/commerce/admin/marketplace/payouts/accounts/sync', $paths);
         self::assertContains('/commerce/seller/{sellerUuid}/payouts/accounts', $paths);
 
+        // MV5a Task 17 (GATES): the risk-reserve/chargeback/debt surfaces -- reserve
+        // policy (workspace + per-seller), chargeback ingestion + partial attribution,
+        // manual reserve hold/release, audited debt forgiveness, the operator read of
+        // any seller's reserves + debt, and the seller's own sanitized reserves read.
+        // Every one of these actions already flows through the fully generic walk
+        // below with zero changes -- these `assertContains` calls only pin that the
+        // NEW routes are genuinely present in this pass, so a future regression that
+        // accidentally drops one of them from `routes.php` fails loudly here rather
+        // than silently shrinking the walked set.
+        self::assertContains('/commerce/admin/marketplace/settings/reserves', $paths);
+        self::assertContains('/commerce/admin/marketplace/sellers/{uuid}/reserve-policy', $paths);
+        self::assertContains('/commerce/admin/marketplace/chargebacks', $paths);
+        self::assertContains('/commerce/admin/marketplace/chargebacks/{uuid}/attribution', $paths);
+        self::assertContains('/commerce/admin/marketplace/reserves/holds', $paths);
+        self::assertContains('/commerce/admin/marketplace/reserves/{uuid}/release', $paths);
+        self::assertContains('/commerce/admin/marketplace/sellers/{uuid}/debt/forgive', $paths);
+        self::assertContains('/commerce/admin/marketplace/sellers/{uuid}/reserves', $paths);
+        self::assertContains('/commerce/seller/{sellerUuid}/financials/reserves', $paths);
+
         $this->assertEveryCommerceRouteActionIsDocumented($router, $actions);
     }
 

@@ -44,6 +44,10 @@ use Glueful\Extensions\Commerce\Marketplace\MarketplaceWorkspaceLock;
 use Glueful\Extensions\Commerce\Marketplace\PayoutException;
 use Glueful\Extensions\Commerce\Marketplace\PayoutRepository;
 use Glueful\Extensions\Commerce\Marketplace\PayoutService;
+use Glueful\Extensions\Commerce\Marketplace\ReservePolicyEventRepository;
+use Glueful\Extensions\Commerce\Marketplace\ReservePolicyService;
+use Glueful\Extensions\Commerce\Marketplace\ReserveRepository;
+use Glueful\Extensions\Commerce\Marketplace\ReserveService;
 use Glueful\Extensions\Commerce\Marketplace\SellerBalanceService;
 use Glueful\Extensions\Commerce\Marketplace\SellerMembershipRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerOrderPaymentConfirmation;
@@ -138,6 +142,14 @@ final class MarketplaceRegressionTest extends CommerceTestCase
 
     /** MV4 Task 11 (design spec §3.2): the brand-new payout-destination table. */
     private const MV4_PAYOUT_ACCOUNTS_TABLE = 'commerce_seller_payout_accounts';
+
+    /** MV5a Task 17 (design spec §3.2/§3.3): the four new reserve/chargeback tables. */
+    private const MV5A_TABLES = [
+        'commerce_seller_reserves',
+        'commerce_reserve_policy_events',
+        'commerce_chargebacks',
+        'commerce_chargeback_lines',
+    ];
 
     // =====================================================================
     // 1. Route manifest: flag off == pre-MV1, byte for byte.
@@ -425,7 +437,10 @@ final class MarketplaceRegressionTest extends CommerceTestCase
         // plus MV2's commerce_seller_orders plus the four MV3 settlement
         // tables. MV4 Task 11 (GATES) adds a 9th: commerce_seller_payout_accounts
         // -- no ordinary request path may ever touch the payout-destination
-        // table or its retry/reconcile sweep indexes either.
+        // table or its retry/reconcile sweep indexes either. MV5a Task 17
+        // (GATES) adds the FOUR new risk/chargeback tables: no ordinary
+        // (non-payout/non-chargeback/non-reserve) request path may ever
+        // touch a reserve or chargeback table either.
         $marketplaceTables = [
             'commerce_marketplace_settings',
             'commerce_sellers',
@@ -436,6 +451,7 @@ final class MarketplaceRegressionTest extends CommerceTestCase
             'commerce_commission_policy_events',
             'commerce_payouts',
             self::MV4_PAYOUT_ACCOUNTS_TABLE,
+            ...self::MV5A_TABLES,
         ];
         foreach (QueryLoggingPdoStatement::$queries as $sql) {
             foreach ($marketplaceTables as $table) {
@@ -1155,6 +1171,319 @@ final class MarketplaceRegressionTest extends CommerceTestCase
         );
     }
 
+    // =====================================================================
+    // 8. MV5a Task 17 GATES (design spec §2.11/§7): marketplace off, or the
+    //    folded 0/0 reserve-policy default, produce zero reserve holds and
+    //    zero chargeback rows; no MV5a route leaks into the manifest; the
+    //    manual-payout response shape stays byte-identical; all four new
+    //    tables join the SAME maintenance guarantees the MV1-MV4 tables
+    //    already have (§4).
+    // =====================================================================
+
+    /**
+     * A full marketplace-OFF order lifecycle -- pay, refund, and a manual
+     * payout for an unrelated seller -- must leave every one of the four new
+     * MV5a tables completely empty. `assertNoMarketplaceQueries()` above
+     * already proves this indirectly (zero QUERIES against these tables
+     * across every ordinary/checkout/payment/refund/fulfill/cancel path);
+     * this closes the loop with a direct row-COUNT assertion across a real
+     * pay+refund+payout sequence, mirroring this file's existing
+     * `self::assertSame(0, $this->connection->table('commerce_marketplace_ledger')->count());`
+     * convention in `testAdminRefundIssuesZeroMarketplaceTableQueries()`.
+     */
+    public function testMarketplaceOffProducesZeroReserveHoldsAndZeroChargebackRowsAcrossAFullOrderLifecycle(): void
+    {
+        self::assertFalse((bool) config($this->context, 'commerce.marketplace.enabled', false));
+
+        $order = $this->placeNonPartitionedOrder()['order'];
+        $this->paymentService()->markPaid($this->context, self::TENANT, (string) $order['uuid']);
+        $refund = $this->refundService()->issue(
+            $this->context,
+            (string) $order['uuid'],
+            new RefundInput(null, 'regress mv5a off refund', [], false),
+            'idem-regress-mv5a-off-refund'
+        );
+        self::assertSame('completed', $refund['status']);
+
+        $ledger = new LedgerRepository();
+        $seller = 'regressmv5a01';
+        $ledger->post($this->context, self::TENANT, [
+            'account_kind' => 'seller',
+            'account_key' => LedgerRepository::accountKeyForSeller($seller),
+            'seller_uuid' => $seller,
+            'currency' => 'USD',
+            'entry_type' => 'sale_credit',
+            'amount' => 5000,
+            'order_uuid' => 'regressmv5aord',
+            'idempotency_key' => 'regressmv5aord:' . $seller . ':sale_credit',
+        ]);
+        $payoutService = new PayoutService(
+            new PayoutRepository(),
+            $ledger,
+            new LedgerAccountLock(),
+            new SellerBalanceService($ledger)
+        );
+        $payoutService->record(
+            $this->context,
+            self::TENANT,
+            $seller,
+            'USD',
+            1000,
+            'idem-regress-mv5a-off-payout',
+            'ext-regress-mv5a-off',
+            null,
+            'operatorregr4'
+        );
+
+        foreach (self::MV5A_TABLES as $table) {
+            self::assertSame(
+                0,
+                $this->connection->table($table)->count(),
+                "{$table} must have zero rows across a full pay/refund/payout lifecycle with the switch off"
+            );
+        }
+        self::assertSame(
+            0,
+            $this->connection->table('commerce_marketplace_ledger')
+                ->where('entry_type', '=', 'reserve_hold')
+                ->count(),
+            'zero reserve holds must ever post with the master switch off'
+        );
+    }
+
+    /**
+     * The folded `010` defaults (`reserve_bps=0`, `reserve_days=0` -- design
+     * spec §2.1/§3.1: an UNCONFIGURED workspace, never having called
+     * `ReservePolicyService::setWorkspace()`) must keep a real, fully settled
+     * seller reserve-free -- even with the {@see ReserveService} collaborator
+     * GENUINELY wired into {@see LedgerPostingService} (never merely absent,
+     * mirroring this file's own "prove the REAL branch condition" discipline
+     * for the MV2/MV3 zero-query proofs above).
+     */
+    public function testFoldedReservePolicyDefaultsKeepSettledSellersReserveFreeWithMarketplaceEnabled(): void
+    {
+        $this->enableMarketplace();
+        $this->activateWorkspace(self::TENANT);
+        $seller = $this->seedActiveSeller('regress-reserve-free');
+        $product = $this->seedAttributedProduct('regress-reserve-free-prod', $seller['uuid']);
+        (new StockRepository())->increment(
+            $this->context,
+            self::TENANT,
+            (string) $product['variants'][0]['uuid'],
+            10
+        );
+
+        $cartService = $this->cartService();
+        ['cart' => $cart, 'token' => $token] = $cartService->create($this->context);
+        $cartService->addLine($this->context, $cart, (string) $product['variants'][0]['uuid'], 1);
+
+        $placed = $this->marketplaceCheckoutService()
+            ->placeOrder($this->context, $token, $this->buyer(), $this->addresses(), 'std');
+        $order = $placed['order'];
+        self::assertTrue((bool) $order['marketplace_partitioned']);
+
+        // Sanity: the workspace has never had an explicit reserve policy set --
+        // it resolves to the folded 010 default (0 bps / 0 days), design spec
+        // §2.1's "inert by construction" posture for an unconfigured install.
+        $settings = $this->connection->table('commerce_marketplace_settings')
+            ->where('tenant_uuid', '=', self::TENANT)
+            ->first();
+        self::assertNotNull($settings);
+        self::assertSame(0, (int) $settings['reserve_bps']);
+        self::assertSame(0, (int) $settings['reserve_days']);
+
+        $this->reserveWiredPaymentService()->markPaid($this->context, self::TENANT, (string) $order['uuid']);
+
+        self::assertSame('paid', $this->orderRow((string) $order['uuid'])['status']);
+        self::assertGreaterThan(
+            0,
+            $this->connection->table('commerce_marketplace_ledger')
+                ->where('entry_type', '=', 'sale_credit')
+                ->count(),
+            'sanity: settlement actually posted'
+        );
+        self::assertSame(
+            0,
+            $this->connection->table('commerce_seller_reserves')->count(),
+            'the folded 0/0 default must keep a settled seller reserve-free even with ReserveService wired'
+        );
+        self::assertSame(
+            0,
+            $this->connection->table('commerce_marketplace_ledger')
+                ->where('entry_type', '=', 'reserve_hold')
+                ->count()
+        );
+    }
+
+    /**
+     * The manual `PayoutService::record()` response row -- the ONE surface
+     * MV5a's new debt gate ({@see PayoutService::refuseIfInDebt()}) sits in
+     * front of -- must carry EXACTLY its pre-MV5a field set when no debt
+     * exists (the master-switch-off / reserve-inert posture): no new field
+     * (`debt`, `reserved`, ...) leaked onto the flat payout row.
+     */
+    public function testManualPayoutResponseRowStaysByteIdenticalToItsPreMv5aFieldSetWithNoDebt(): void
+    {
+        self::assertFalse((bool) config($this->context, 'commerce.marketplace.enabled', false));
+
+        $ledger = new LedgerRepository();
+        $seller = 'regressmv5ajs1';
+        $ledger->post($this->context, self::TENANT, [
+            'account_kind' => 'seller',
+            'account_key' => LedgerRepository::accountKeyForSeller($seller),
+            'seller_uuid' => $seller,
+            'currency' => 'USD',
+            'entry_type' => 'sale_credit',
+            'amount' => 5000,
+            'order_uuid' => 'regressmv5ajord',
+            'idempotency_key' => 'regressmv5ajord:' . $seller . ':sale_credit',
+        ]);
+        $payoutService = new PayoutService(
+            new PayoutRepository(),
+            $ledger,
+            new LedgerAccountLock(),
+            new SellerBalanceService($ledger)
+        );
+
+        $payout = $payoutService->record(
+            $this->context,
+            self::TENANT,
+            $seller,
+            'USD',
+            1000,
+            'idem-regress-mv5a-json-payout',
+            'ext-regress-mv5a-json',
+            null,
+            'operatorregr5'
+        );
+
+        self::assertSame(
+            [
+                'uuid', 'tenant_uuid', 'seller_uuid', 'currency', 'amount', 'external_ref', 'note', 'created_by',
+                'idempotency_key', 'method', 'status', 'completed_at',
+            ],
+            array_keys($payout),
+            'the manual payout row shape must be byte-identical to its pre-MV5a field set -- no new field leaked'
+        );
+    }
+
+    public function testReserveChargebackRoutesNeverLeakIntoTheManifestWithTheMasterSwitchOff(): void
+    {
+        self::assertFalse((bool) config($this->context, 'commerce.marketplace.enabled', false));
+
+        $router = $this->freshRouter();
+        $paths = array_map(static fn (array $route): string => (string) $route['path'], $router->getAllRoutes());
+
+        foreach (
+            [
+                '/commerce/admin/marketplace/settings/reserves',
+                '/commerce/admin/marketplace/sellers/{uuid}/reserve-policy',
+                '/commerce/admin/marketplace/chargebacks',
+                '/commerce/admin/marketplace/chargebacks/{uuid}/attribution',
+                '/commerce/admin/marketplace/reserves/holds',
+                '/commerce/admin/marketplace/reserves/{uuid}/release',
+                '/commerce/admin/marketplace/sellers/{uuid}/debt/forgive',
+                '/commerce/admin/marketplace/sellers/{uuid}/reserves',
+                '/commerce/seller/{sellerUuid}/financials/reserves',
+            ] as $mv5aRoute
+        ) {
+            self::assertNotContains(
+                $mv5aRoute,
+                $paths,
+                "{$mv5aRoute} must not leak into the manifest with the master switch off."
+            );
+        }
+    }
+
+    public function testDiagnosticsReportListsAllFourMv5aTablesAsPresentWithTheSwitchOff(): void
+    {
+        self::assertFalse((bool) config($this->context, 'commerce.marketplace.enabled', false));
+
+        $present = DiagnosticsReport::build($this->context)['database']['commerce_tables_present'];
+
+        foreach (self::MV5A_TABLES as $table) {
+            self::assertArrayHasKey($table, $present);
+            self::assertTrue(
+                $present[$table],
+                "DiagnosticsReport must list {$table} as present regardless of the switch"
+            );
+        }
+    }
+
+    /**
+     * MV5a Task 17: `commerce:tenancy:adopt` rekeys the four new
+     * reserve/chargeback tables too -- {@see DiagnosticsReport::tenantTables()}
+     * already lists them unconditionally (design spec §3.2/§3.3), so
+     * {@see TenantAdopter} picks them up mechanically; this pins that
+     * behaviorally, mirroring the MV3/MV4 siblings above exactly, switch off
+     * (the default).
+     */
+    public function testTenantAdoptRekeysAllFourMv5aTablesEvenWhenTheMasterSwitchIsOff(): void
+    {
+        self::assertFalse(
+            (bool) config($this->context, 'commerce.marketplace.enabled', false),
+            'this test relies on the master switch being off (the default)'
+        );
+
+        $now = $this->connection->getDriver()->formatDateTime();
+
+        $this->connection->table('commerce_seller_reserves')->insert([
+            'uuid' => 'mv5adoptrsv1',
+            'tenant_uuid' => '',
+            'seller_uuid' => 'mv5adoptsel1',
+            'currency' => 'USD',
+            'source_kind' => 'manual',
+            'idempotency_key' => 'mv5-adopt-reserve-1',
+            'amount' => 500,
+            'reserve_bps_snapshot' => 0,
+            'reserve_days_snapshot' => 0,
+            'held_at' => $now,
+        ]);
+        $this->connection->table('commerce_reserve_policy_events')->insert([
+            'uuid' => 'mv5adoptevt1',
+            'tenant_uuid' => '',
+            'subject_kind' => 'workspace',
+            'subject_uuid' => 'mv5adoptwsp1',
+            'actor_uuid' => 'mv5adoptop01',
+            'before_policy' => json_encode(['reserve_bps' => 0, 'reserve_days' => 0], JSON_THROW_ON_ERROR),
+            'after_policy' => json_encode(['reserve_bps' => 250, 'reserve_days' => 14], JSON_THROW_ON_ERROR),
+        ]);
+        $this->connection->table('commerce_chargebacks')->insert([
+            'uuid' => 'mv5adoptcb01',
+            'tenant_uuid' => '',
+            'provider' => 'payvia',
+            'provider_event_id' => 'mv5-adopt-evt-1',
+            'payment_reference' => 'mv5-adopt-pay-1',
+            'amount' => 2500,
+            'currency' => 'USD',
+            'occurred_at' => $now,
+        ]);
+        $this->connection->table('commerce_chargeback_lines')->insert([
+            'uuid' => 'mv5adoptcbl1',
+            'tenant_uuid' => '',
+            'chargeback_uuid' => 'mv5adoptcb01',
+            'order_line_uuid' => 'mv5adoptoln1',
+            'seller_uuid' => 'mv5adoptsel1',
+            'amount' => 2500,
+        ]);
+
+        $result = (new TenantAdopter())->adopt($this->context, 'tenantMV5a099');
+
+        foreach (self::MV5A_TABLES as $table) {
+            self::assertSame(1, $result['tables'][$table], "{$table} must report exactly 1 rekeyed row");
+            self::assertSame(
+                0,
+                $this->connection->table($table)->where('tenant_uuid', '=', '')->count(),
+                "{$table} must have no sentinel rows left behind"
+            );
+            self::assertSame(
+                1,
+                $this->connection->table($table)->where('tenant_uuid', '=', 'tenantMV5a099')->count(),
+                "{$table} row must be rekeyed to the adopted tenant"
+            );
+        }
+    }
+
     // -----------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------
@@ -1407,6 +1736,43 @@ final class MarketplaceRegressionTest extends CommerceTestCase
     private function ledgerPostingService(): LedgerPostingService
     {
         return new LedgerPostingService(new LedgerRepository(), new LedgerAccountLock());
+    }
+
+    /**
+     * MV5a Task 17 (GATES): the ONLY `paymentService()` variant in this file that
+     * ALSO wires the {@see ReserveService} collaborator into
+     * {@see LedgerPostingService}, against a REAL {@see ReservePolicyService} reading
+     * whatever policy is actually persisted -- used exclusively by
+     * {@see self::testFoldedReservePolicyDefaultsKeepSettledSellersReserveFreeWithMarketplaceEnabled()}
+     * to prove the folded `010` `0`/`0` default keeps a settled seller reserve-free
+     * even with the REAL reserve-hold branch genuinely reachable, never merely absent.
+     */
+    private function reserveWiredPaymentService(): OrderPaymentService
+    {
+        return new OrderPaymentService(
+            new OrderRepository(),
+            new SellerOrderPaymentConfirmation(),
+            null,
+            new SellerOrderRepository(),
+            $this->reserveWiredLedgerPostingService()
+        );
+    }
+
+    private function reserveWiredLedgerPostingService(): LedgerPostingService
+    {
+        return new LedgerPostingService(
+            new LedgerRepository(),
+            new LedgerAccountLock(),
+            new ReserveService(
+                new ReservePolicyService(
+                    new SellerRepository(),
+                    new MarketplaceWorkspaceLock(),
+                    new ReservePolicyEventRepository()
+                ),
+                new ReserveRepository(),
+                new LedgerRepository()
+            )
+        );
     }
 
     /** MV3 Task 12: wired WITH both marketplace collaborators -- see {@see paymentService()}. */

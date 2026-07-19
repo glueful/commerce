@@ -1102,8 +1102,8 @@ final class ReserveChargebackShapeTest extends CommerceTestCase
             try {
                 $connection->table('commerce_seller_reserves')->insert([
                     'uuid' => 'pgckrsv' . abs($amount),
-                    'tenant_uuid' => 'tntpgckrsv001',
-                    'seller_uuid' => 'pgckrsvslr001',
+                    'tenant_uuid' => 'tntpgckrsv01',
+                    'seller_uuid' => 'pgckrsvslr01',
                     'currency' => 'USD',
                     'source_kind' => 'manual',
                     'idempotency_key' => 'idem-pg-ckrsv-' . $amount,
@@ -1126,15 +1126,15 @@ final class ReserveChargebackShapeTest extends CommerceTestCase
         $connection = $this->migratedConnection($this->pgConfig());
         // Self-healing cleanup: real commits against the persistent PostgreSQL
         // test database, unlike every SQLite test in this file.
-        $connection->table('commerce_seller_reserves')->where('tenant_uuid', '=', 'tntpgckrsv002')->delete();
+        $connection->table('commerce_seller_reserves')->where('tenant_uuid', '=', 'tntpgckrsv02')->delete();
 
         $connection->table('commerce_seller_reserves')->insert([
-            'uuid' => 'pgckrsvnul001',
-            'tenant_uuid' => 'tntpgckrsv002',
-            'seller_uuid' => 'pgckrsvslr002',
+            'uuid' => 'pgckrsvnul01',
+            'tenant_uuid' => 'tntpgckrsv02',
+            'seller_uuid' => 'pgckrsvslr02',
             'currency' => 'USD',
             'source_kind' => 'rolling',
-            'seller_order_uuid' => 'pgckrsvord001',
+            'seller_order_uuid' => 'pgckrsvord01',
             'amount' => 1000,
             'reserve_bps_snapshot' => 250,
             'reserve_days_snapshot' => 14,
@@ -1143,12 +1143,12 @@ final class ReserveChargebackShapeTest extends CommerceTestCase
         // A second rolling row (idempotency_key null, distinct seller_order_uuid)
         // must succeed -- NULLs are never duplicates on PostgreSQL either.
         $connection->table('commerce_seller_reserves')->insert([
-            'uuid' => 'pgckrsvnul002',
-            'tenant_uuid' => 'tntpgckrsv002',
-            'seller_uuid' => 'pgckrsvslr002',
+            'uuid' => 'pgckrsvnul02',
+            'tenant_uuid' => 'tntpgckrsv02',
+            'seller_uuid' => 'pgckrsvslr02',
             'currency' => 'USD',
             'source_kind' => 'rolling',
-            'seller_order_uuid' => 'pgckrsvord002',
+            'seller_order_uuid' => 'pgckrsvord02',
             'amount' => 500,
             'reserve_bps_snapshot' => 250,
             'reserve_days_snapshot' => 14,
@@ -1156,9 +1156,9 @@ final class ReserveChargebackShapeTest extends CommerceTestCase
         ]);
 
         $connection->table('commerce_seller_reserves')->insert([
-            'uuid' => 'pgckrsvnul003',
-            'tenant_uuid' => 'tntpgckrsv002',
-            'seller_uuid' => 'pgckrsvslr002',
+            'uuid' => 'pgckrsvnul03',
+            'tenant_uuid' => 'tntpgckrsv02',
+            'seller_uuid' => 'pgckrsvslr02',
             'currency' => 'USD',
             'source_kind' => 'manual',
             'idempotency_key' => 'idem-pg-ckrsv-dup',
@@ -1169,9 +1169,9 @@ final class ReserveChargebackShapeTest extends CommerceTestCase
         ]);
         try {
             $connection->table('commerce_seller_reserves')->insert([
-                'uuid' => 'pgckrsvnul004',
-                'tenant_uuid' => 'tntpgckrsv002',
-                'seller_uuid' => 'pgckrsvslr002',
+                'uuid' => 'pgckrsvnul04',
+                'tenant_uuid' => 'tntpgckrsv02',
+                'seller_uuid' => 'pgckrsvslr02',
                 'currency' => 'USD',
                 'source_kind' => 'manual',
                 'idempotency_key' => 'idem-pg-ckrsv-dup',
@@ -1185,7 +1185,7 @@ final class ReserveChargebackShapeTest extends CommerceTestCase
             $this->addToAssertionCount(1);
         }
 
-        $connection->table('commerce_seller_reserves')->where('tenant_uuid', '=', 'tntpgckrsv002')->delete();
+        $connection->table('commerce_seller_reserves')->where('tenant_uuid', '=', 'tntpgckrsv02')->delete();
     }
 
     public function testRerunning010012015016MigrationsAreNoOpsOnRealPostgres(): void
