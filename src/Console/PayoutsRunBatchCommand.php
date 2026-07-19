@@ -22,8 +22,9 @@ use Symfony\Component\Console\Output\OutputInterface;
  * amount from the account's `available` balance UNDER the per-account ledger lock (the
  * SAME shared reserve step {@see \Glueful\Extensions\Commerce\Marketplace\PayoutService::execute()}
  * uses), so two overlapping runs of this command serialize on that lock rather than
- * double-spending a stale hint. A `null` return is a legitimate skip (the locked amount
- * was non-positive or below the configured per-currency minimum);
+ * double-spending a stale hint. A `null` return is a legitimate skip (the locked seller
+ * carries outstanding debt -- MV5a design spec §2.7, Task 13 -- or the locked amount was
+ * otherwise non-positive or below the configured per-currency minimum);
  * {@see PayoutOutcomeUnknownException} is an expected, non-fatal outcome (the reconcile
  * sweep resolves it); any other candidate failure (e.g. no ready payout destination, a
  * provider throw) is caught and reported WITHOUT aborting the rest of the batch. This is a
@@ -108,7 +109,8 @@ final class PayoutsRunBatchCommand extends BaseCommand
         }
 
         $this->line(sprintf(
-            'Batch: %d paid out, %d skipped (below minimum), %d unresolved (awaiting reconcile), %d failed.',
+            'Batch: %d paid out, %d skipped (in debt or below minimum), %d unresolved (awaiting reconcile), '
+                . '%d failed.',
             $processed,
             $skipped,
             $unresolved,

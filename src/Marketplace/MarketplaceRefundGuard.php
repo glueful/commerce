@@ -61,11 +61,27 @@ use Glueful\Extensions\Commerce\Orders\Refunds\RefundValidationException;
  * calls it for its own `marketplace_partitioned` snapshot, so this class
  * issues zero queries in that case by construction, not by an internal
  * check here.
+ *
+ * `$chargebacks` is an APPENDED OPTIONAL collaborator (design spec §2.5/§2.6,
+ * MV5a Task 12) -- the same "APPENDED OPTIONAL collaborator" idiom used
+ * throughout this package (e.g. {@see \Glueful\Extensions\Commerce\Orders\Refunds\RefundService}'s
+ * own `$marketplaceGuard`/`$ledgerPosting`) -- so every pre-Task-12 direct
+ * construction call site (tests included) stays source-compatible. When
+ * wired, {@see self::completedAmountByLine()} folds in prior POSTED
+ * `commerce_chargeback_lines` amounts alongside prior COMPLETED refund
+ * amounts, keeping this guard's `remaining_basis` in agreement with {@see
+ * LedgerPostingService::postRefund()}'s own (equally Task-12-extended)
+ * `R_before` -- a chargeback that already reversed part of a line's basis
+ * must shrink what this guard is willing to auto-expand onto that line, the
+ * same as an earlier refund already does. A `null` `$chargebacks`
+ * (pre-Task-12 construction) folds in nothing, byte-identical to before.
  */
 final class MarketplaceRefundGuard
 {
-    public function __construct(private RefundRepository $refunds)
-    {
+    public function __construct(
+        private RefundRepository $refunds,
+        private ?ChargebackRepository $chargebacks = null,
+    ) {
     }
 
     /**
@@ -170,18 +186,20 @@ final class MarketplaceRefundGuard
     }
 
     /**
-     * Cumulative amount this order's COMPLETED refunds have already
-     * attributed to each order line -- deliberately mirrors {@see
-     * LedgerPostingService::postRefund()}'s own `priorCompletedAmountForLine()`
-     * (completed only, never pending) so the guard's `remaining_basis` and
-     * the poster's eventual `R_before`/`delta_R` agree on the same cumulative
-     * picture. A still-`pending` refund's attribution is intentionally NOT
-     * subtracted here: {@see autoExpand()}'s own `Σ lines ≤ amount` cap is
-     * what actually bounds this refund's exposure, and `postRefund()`
-     * recomputes `R_before` fresh (from completed history only) at each
-     * refund's own completion time regardless of what this validation-time
-     * estimate produced -- so a pending sibling refund never causes
-     * double-counting of merchandise basis at settlement time.
+     * Cumulative amount this order's COMPLETED refunds PLUS (design spec
+     * §2.5/§2.6, MV5a Task 12) POSTED chargebacks have already attributed to
+     * each order line -- deliberately mirrors {@see
+     * LedgerPostingService::postRefund()}'s own (equally Task-12-extended)
+     * `R_before` derivation so the guard's `remaining_basis` and the poster's
+     * eventual `R_before`/`delta_R` agree on the same cumulative picture. A
+     * still-`pending` refund's attribution is intentionally NOT subtracted
+     * here: {@see autoExpand()}'s own `Σ lines ≤ amount` cap is what actually
+     * bounds this refund's exposure, and `postRefund()` recomputes `R_before`
+     * fresh (from completed/posted history only) at each refund's own
+     * completion time regardless of what this validation-time estimate
+     * produced -- so a pending sibling refund never causes double-counting of
+     * merchandise basis at settlement time. A `null` `$this->chargebacks`
+     * (pre-Task-12 construction) folds in nothing, byte-identical to before.
      *
      * @return array<string,int> order_line_uuid => already-attributed amount
      */
@@ -199,6 +217,16 @@ final class MarketplaceRefundGuard
         foreach ($rows as $row) {
             $key = (string) $row['order_line_uuid'];
             $sums[$key] = ($sums[$key] ?? 0) + (int) $row['amount'];
+        }
+
+        if ($this->chargebacks !== null) {
+            // No chargeback is ever "this refund itself" (distinct uuid namespaces),
+            // so nothing is excluded -- mirrors postRefund()'s identical no-exclusion
+            // call.
+            $chargedBack = $this->chargebacks->priorPostedChargedBackByLine($c, $tenant, $orderUuid, '');
+            foreach ($chargedBack as $key => $amount) {
+                $sums[$key] = ($sums[$key] ?? 0) + $amount;
+            }
         }
 
         return $sums;

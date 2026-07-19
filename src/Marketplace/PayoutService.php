@@ -145,10 +145,15 @@ final class PayoutService
                 $accountKey = LedgerRepository::accountKeyForSeller($sellerUuid);
                 $this->lock->claim($context, $tenant, $accountKey, $currency);
 
-                // The balance-safety recheck (design spec §2.6/§2.10): re-derived UNDER the
-                // lock just claimed above, so a concurrent posting to this SAME account cannot
-                // land between an earlier, unlocked read and this refusal check.
-                $available = $this->balances->available($context, $tenant, $sellerUuid, $currency);
+                // The balance-safety recheck (design spec §2.6/§2.10, MV5a §2.7 Task 13):
+                // re-derived UNDER the lock just claimed above, so a concurrent posting to
+                // this SAME account cannot land between an earlier, unlocked read and this
+                // refusal check. `balance()` (not `available()`) is called so the MV5a §2.7
+                // debt gate below reads `debt` off the SAME single grouped scan -- no extra
+                // round-trip.
+                $balance = $this->balances->balance($context, $tenant, $sellerUuid, $currency);
+                $available = $balance['available'];
+                $this->refuseIfInDebt($sellerUuid, $currency, $balance['debt']);
                 if ($amount > $available) {
                     throw new PayoutException(sprintf(
                         'Payout amount %d exceeds available balance %d for seller %s (%s).',
@@ -524,25 +529,41 @@ final class PayoutService
             $accountKey = LedgerRepository::accountKeyForSeller($sellerUuid);
             $this->lock->claim($context, $tenant, $accountKey, $currency);
 
-            // The balance-safety recheck (design spec §2.3/§2.6): re-derived UNDER the lock
-            // just claimed above, so a concurrent posting to this SAME account cannot land
-            // between an earlier, unlocked read and this refusal/derivation.
-            $available = $this->balances->available($context, $tenant, $sellerUuid, $currency);
+            // The balance-safety recheck (design spec §2.3/§2.6, MV5a §2.7 Task 13):
+            // re-derived UNDER the lock just claimed above, so a concurrent posting to this
+            // SAME account cannot land between an earlier, unlocked read and this
+            // refusal/derivation. `balance()` (not `available()`) is called so the MV5a §2.7
+            // debt gate reads `debt` off the SAME single grouped scan -- no extra round-trip
+            // -- and, critically, off the LOCKED balance rather than the unlocked batch
+            // candidate hint ({@see LedgerRepository::positiveAvailableCandidates()}).
+            $balance = $this->balances->balance($context, $tenant, $sellerUuid, $currency);
+            $available = $balance['available'];
+            $debt = $balance['debt'];
 
             if ($amount === null) {
+                // Batch derive-in-lock path (MV5a design spec §2.7, Task 13): a seller in
+                // debt is SKIPPED (null, no row/hold posted) -- the SAME independent-per-
+                // candidate discipline {@see self::deriveBatchAmount()} already applies to a
+                // non-positive/below-minimum locked available.
+                if ($debt > 0) {
+                    return null;
+                }
                 $resolved = $this->deriveBatchAmount($context, $currency, $available);
                 if ($resolved === null) {
                     return null;
                 }
                 $amount = $resolved;
-            } elseif ($amount > $available) {
-                throw new PayoutException(sprintf(
-                    'Payout amount %d exceeds available balance %d for seller %s (%s).',
-                    $amount,
-                    $available,
-                    $sellerUuid,
-                    $currency
-                ));
+            } else {
+                $this->refuseIfInDebt($sellerUuid, $currency, $debt);
+                if ($amount > $available) {
+                    throw new PayoutException(sprintf(
+                        'Payout amount %d exceeds available balance %d for seller %s (%s).',
+                        $amount,
+                        $available,
+                        $sellerUuid,
+                        $currency
+                    ));
+                }
             }
 
             $payoutUuid = ($this->uuidGenerator)();
@@ -585,6 +606,31 @@ final class PayoutService
 
             return $row;
         });
+    }
+
+    /**
+     * The MV5a design spec §2.7 debt gate (Task 13), shared by {@see self::record()}'s
+     * manual path and {@see self::reserve()}'s explicit-amount (operator `execute()`) path: refuses
+     * (`422` {@see PayoutException}, mirroring the capacity-check refusal right below each
+     * call site) whenever the seller's LOCKED `debt` component is positive. This is
+     * ADDITIVE to -- never a replacement for -- the pre-existing MV4 `amount > available`
+     * capacity guard: a positive requested amount with a locked `available >= amount`
+     * already implies `available > 0` (hence `debt == 0`, since `debt = max(0, -available)`),
+     * so this explicit check exists to make the invariant "never create a payout while in
+     * debt" self-documenting and independently enforced, not to change behavior on the
+     * capacity check's own refusal path.
+     */
+    private function refuseIfInDebt(string $sellerUuid, string $currency, int $debt): void
+    {
+        if ($debt > 0) {
+            throw new PayoutException(sprintf(
+                'Payout refused: seller %s (%s) carries outstanding debt %d; debt must be '
+                    . 'cleared before a new payout may be created.',
+                $sellerUuid,
+                $currency,
+                $debt
+            ));
+        }
     }
 
     /**

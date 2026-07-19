@@ -194,4 +194,71 @@ final class ReserveRepository
 
         return $affected === 1;
     }
+
+    /**
+     * FIFO reserve-consumption candidate scan (design spec §2.5, MV5a Task 9): every
+     * `status='held'` reserve for this seller/currency, ordered earliest-`release_at`-first;
+     * a NULL `release_at` (an indefinite manual hold, design spec §2.8) sorts LAST via a
+     * portable `CASE WHEN release_at IS NULL THEN 1 ELSE 0 END` leading sort key -- this
+     * works identically on SQLite, MySQL, and PostgreSQL with no driver branching, unlike
+     * {@see \Glueful\Extensions\Commerce\Support\UtcNowSql}'s per-driver expression (a
+     * `NULLS LAST` clause is not portable across all three). `release_at ASC` is the FIFO
+     * key proper; `id ASC` is the final stable tiebreak for two holds sharing the exact
+     * same `release_at`, mirroring {@see self::dueForRelease()}'s identical convention.
+     * This is the exact leading-column order of the `commerce_seller_reserves_fifo_index`
+     * (migration 015). Unlike {@see self::dueForRelease()}, this deliberately does NOT
+     * filter `release_at IS NOT NULL` -- a manual/indefinite hold IS an eligible
+     * consumption candidate (just always last), only auto-release sweeps exclude it.
+     *
+     * This is an UNLOCKED read and a candidate HINT ONLY --
+     * {@see \Glueful\Extensions\Commerce\Marketplace\ReserveConsumptionService::consume()}
+     * re-derives each candidate's LOCKED remaining fresh (via
+     * {@see \Glueful\Extensions\Commerce\Marketplace\LedgerRepository::remainingForReserve()})
+     * under the caller's own already-claimed seller/currency lock before slicing or
+     * posting anything.
+     *
+     * @return list<array<string,mixed>>
+     */
+    public function heldForConsumption(
+        ApplicationContext $context,
+        string $tenant,
+        string $sellerUuid,
+        string $currency
+    ): array {
+        return db($context)->table('commerce_seller_reserves')
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('seller_uuid', '=', $sellerUuid)
+            ->where('currency', '=', $currency)
+            ->where('status', '=', 'held')
+            ->orderByRaw('CASE WHEN release_at IS NULL THEN 1 ELSE 0 END ASC')
+            ->orderBy('release_at', 'ASC')
+            ->orderBy('id', 'ASC')
+            ->get();
+    }
+
+    /**
+     * Affected-row-checked `held` -> `consumed` claim (design spec §2.5, MV5a Task 9):
+     * the {@see self::markReleased()} sibling for the reserve-consumption path --
+     * {@see \Glueful\Extensions\Commerce\Marketplace\ReserveConsumptionService::consume()}
+     * calls this ONLY when a posted `reserve_release` slice exactly exhausts a reserve's
+     * locked remaining (never on a partial slice, which leaves the row `held`). A `false`
+     * return is a legitimate no-op -- e.g. a concurrent/earlier path already moved the row
+     * out of `held` -- never a fatal condition.
+     */
+    public function markConsumed(ApplicationContext $context, string $tenant, string $uuid): bool
+    {
+        $now = db($context)->getDriver()->formatDateTime();
+
+        $affected = db($context)->table('commerce_seller_reserves')
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('uuid', '=', $uuid)
+            ->where('status', '=', 'held')
+            ->update([
+                'status' => 'consumed',
+                'closed_at' => $now,
+                'updated_at' => $now,
+            ]);
+
+        return $affected === 1;
+    }
 }

@@ -27,6 +27,15 @@ use Glueful\Bootstrap\ApplicationContext;
  * construction call site (tests included) stays source-compatible. When
  * `null`, {@see self::postOneSeller()} posts `sale_credit`/`commission_debit`
  * exactly as before and never attempts a reserve hold.
+ *
+ * `$reserveConsumption` and `$chargebackRepo` are likewise APPENDED OPTIONAL
+ * collaborators (design spec §2.5/§2.6, MV5a Task 12) -- the SAME idiom as
+ * `$reserves` above. When `$reserveConsumption` is `null`, {@see self::postRefund()}
+ * never attempts a reserve draw-down before its refund_debit/commission_reversal
+ * postings (byte-identical to pre-Task-12 behavior). When `$chargebackRepo` is
+ * `null`, {@see self::priorCompletedAmountForLine()}'s cumulative picture folds
+ * in only prior COMPLETED refunds, never prior POSTED chargebacks on the same
+ * line (also byte-identical to pre-Task-12 behavior).
  */
 final class LedgerPostingService
 {
@@ -34,6 +43,8 @@ final class LedgerPostingService
         private LedgerRepository $ledger,
         private LedgerAccountLock $lock,
         private ?ReserveService $reserves = null,
+        private ?ReserveConsumptionService $reserveConsumption = null,
+        private ?ChargebackRepository $chargebackRepo = null,
     ) {
     }
 
@@ -171,12 +182,22 @@ final class LedgerPostingService
      * commission snapshot (`B` = `commission_basis`, `C` = `commission_amount`):
      *
      *  - `R_before = min(B, Σ prior COMPLETED refund_lines.amount for this
-     *    order_line, EXCLUDING this refund's own uuid)`. This is
-     *    mathematically exact (not an approximation): each prior refund's own
-     *    `delta_R_i = min(a_i, max(0, B - R_{i-1}))` makes the running `R`
-     *    monotonically non-decreasing and capped at `B`, so by induction
-     *    `R_n = min(B, Σ a_i)` regardless of how many prior refunds
-     *    contributed or in what order.
+     *    order_line, EXCLUDING this refund's own uuid, PLUS Σ prior POSTED
+     *    commerce_chargeback_lines.amount for this order_line)` (design spec
+     *    §2.5/§2.6, MV5a Task 12 -- the refund-side symmetric counterpart of
+     *    {@see ChargebackService::postAttributedLines()}'s own `prior_cash`,
+     *    which already folds prior refunds AND prior chargebacks together).
+     *    Without folding in prior chargebacks here, a refund landing AFTER a
+     *    chargeback already reversed part of a line's merchandise/commission
+     *    would recompute `R_before` from refund history alone, re-reverse
+     *    commission the chargeback already reversed, and double-debit
+     *    merchandise the chargeback already debited -- a real marketplace
+     *    loss. Folding the two together is mathematically exact for the same
+     *    inductive reason `R_before` from refunds alone is exact: each prior
+     *    refund's or chargeback's own contribution to `R` is itself capped at
+     *    `max(0, B - R_before-at-that-time)`, so the running `R` stays
+     *    monotonically non-decreasing and capped at `B` regardless of how the
+     *    two liability kinds interleave chronologically.
      *  - `delta_R = min(refund_line.amount, max(0, B - R_before))`,
      *    `R_after = R_before + delta_R`.
      *  - `target(R) = 0` when `B = 0`, else `min(C, intdiv(C*R +
@@ -226,10 +247,27 @@ final class LedgerPostingService
      * a seller is "affected" whenever ANY of this refund's lines belongs to
      * it, even if that line's own `delta_R`/reversal both resolve to zero
      * (already fully reversed by an earlier refund). Zero-amount postings
-     * are skipped, mirroring {@see postSale()}'s own discipline. Any thrown
-     * {@see LedgerException} (or any other throw) propagates out and rolls
-     * back the WHOLE transaction -- the CAS, the refund row itself (manual
-     * path), and every already-claimed lock/posting together.
+     * are skipped, mirroring {@see postSale()}'s own discipline.
+     *
+     * **Reserve-first + debt (design spec §2.5/§2.6, MV5a Task 12).** Per
+     * seller, in that SAME sorted order, under that seller's now-held lock:
+     * {@see ReserveConsumptionService::consume()} runs for the NET seller
+     * liability `max(0, debit - reversal)` FIRST -- releasing held reserve
+     * BEFORE the refund_debit/commission_reversal below land -- exactly
+     * mirroring {@see ChargebackService::postAttributedLines()}'s identical
+     * reserve-first step on the chargeback side. `$reserveConsumption`'s own
+     * `reserve_release` postings carry `refund_uuid` (never `chargeback_uuid`),
+     * via `consume()`'s own `'refund'` liability kind. The refund_debit and
+     * commission_reversal below then post in FULL, uncapped by whatever the
+     * reserve covered -- `available` may go negative (debt, surfaced via
+     * {@see LedgerRepository::balanceComponents()}'s `debt` component). A
+     * `null` `$this->reserveConsumption` (pre-Task-12 construction) skips
+     * this entirely, byte-identical to before.
+     *
+     * Any thrown {@see LedgerException} (or any other throw) propagates out
+     * and rolls back the WHOLE transaction -- the CAS, the refund row itself
+     * (manual path), and every already-claimed lock/posting/reserve-release
+     * together.
      *
      * @param array<string,mixed> $order the parent order row (only `uuid` is read)
      * @param array<string,mixed> $refund the refund row (`uuid`, `amount`, `currency` are read)
@@ -249,6 +287,17 @@ final class LedgerPostingService
 
         $orderLinesByUuid = $persistedRefundLines !== []
             ? $this->orderLinesByUuid($context, $orderUuid, array_column($persistedRefundLines, 'order_line_uuid'))
+            : [];
+
+        // Prior POSTED chargeback amounts, batched for the whole order in one query
+        // (design spec §2.5/§2.6, MV5a Task 12) -- folded into R_before below so a
+        // refund never re-reverses merchandise/commission a prior chargeback on the
+        // SAME line already reversed. No chargeback is ever "this refund itself" (the
+        // two are distinct uuid namespaces), so nothing is excluded. A `null`
+        // `$this->chargebackRepo` (pre-Task-12 construction) folds in nothing, exactly
+        // reproducing the pre-Task-12 refund-only cumulative picture.
+        $priorChargedBackByLine = $this->chargebackRepo !== null
+            ? $this->chargebackRepo->priorPostedChargedBackByLine($context, $tenant, $orderUuid, '')
             : [];
 
         /** @var array<string,int> $sellerDebit seller_uuid => Σ delta_R (positive) */
@@ -281,7 +330,8 @@ final class LedgerPostingService
             $basis = (int) $orderLine['commission_basis'];
             $commissionAmount = (int) $orderLine['commission_amount'];
 
-            $priorCompleted = $this->priorCompletedAmountForLine($context, $lineUuid, $refundUuid);
+            $priorCompleted = $this->priorCompletedAmountForLine($context, $lineUuid, $refundUuid)
+                + ($priorChargedBackByLine[$lineUuid] ?? 0);
             $rBefore = min($basis, $priorCompleted);
             $deltaR = min($lineAmount, max(0, $basis - $rBefore));
             $rAfter = $rBefore + $deltaR;
@@ -343,6 +393,21 @@ final class LedgerPostingService
             $sellerUuid = $account['seller_uuid'];
             $debit = $sellerDebit[$sellerUuid] ?? 0;
             $reversal = $sellerReversal[$sellerUuid] ?? 0;
+
+            // Reserve-first (design spec §2.5/§2.6, MV5a Task 12): consumed BEFORE
+            // the debit lands, under this seller's already-claimed lock -- mirrors
+            // ChargebackService::postAttributedLines()'s identical step exactly.
+            if ($this->reserveConsumption !== null) {
+                $this->reserveConsumption->consume(
+                    $context,
+                    $tenant,
+                    $sellerUuid,
+                    $currency,
+                    max(0, $debit - $reversal),
+                    'refund',
+                    $refundUuid
+                );
+            }
 
             if ($debit > 0) {
                 $this->ledger->post($context, $tenant, [

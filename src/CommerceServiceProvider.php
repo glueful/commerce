@@ -84,6 +84,8 @@ use Glueful\Extensions\Commerce\Mail\CommerceMailer;
 use Glueful\Extensions\Commerce\Mail\NotificationCommerceMailer;
 use Glueful\Extensions\Commerce\Mail\OrderMailListener;
 use Glueful\Extensions\Commerce\Marketplace\AdjustmentService;
+use Glueful\Extensions\Commerce\Marketplace\ChargebackRepository;
+use Glueful\Extensions\Commerce\Marketplace\ChargebackService;
 use Glueful\Extensions\Commerce\Marketplace\CommissionPolicyEventRepository;
 use Glueful\Extensions\Commerce\Marketplace\CommissionPolicyService;
 use Glueful\Extensions\Commerce\Marketplace\Contracts\SellerRoleAuthority;
@@ -100,6 +102,7 @@ use Glueful\Extensions\Commerce\Marketplace\PayoutAccountService;
 use Glueful\Extensions\Commerce\Marketplace\PayoutRepository;
 use Glueful\Extensions\Commerce\Marketplace\PayoutService;
 use Glueful\Extensions\Commerce\Marketplace\ReconciliationService;
+use Glueful\Extensions\Commerce\Marketplace\ReserveConsumptionService;
 use Glueful\Extensions\Commerce\Marketplace\ReservePolicyEventRepository;
 use Glueful\Extensions\Commerce\Marketplace\ReservePolicyService;
 use Glueful\Extensions\Commerce\Marketplace\ReserveRepository;
@@ -468,6 +471,20 @@ final class CommerceServiceProvider extends ServiceProvider
             ],
             ReserveService::class => [
                 'class' => ReserveService::class,
+                'shared' => true,
+                'autowire' => true,
+            ],
+            ReserveConsumptionService::class => [
+                'class' => ReserveConsumptionService::class,
+                'shared' => true,
+                'autowire' => true,
+            ],
+            ChargebackRepository::class => [
+                'class' => ChargebackRepository::class,
+                'shared' => true,
+            ],
+            ChargebackService::class => [
+                'class' => ChargebackService::class,
                 'shared' => true,
                 'autowire' => true,
             ],

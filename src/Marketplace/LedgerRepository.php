@@ -400,4 +400,50 @@ final class LedgerRepository
 
         return max(0, -(int) ($row['total'] ?? 0));
     }
+
+    /**
+     * The seller's TOTAL `reserve_release` amount already posted for ONE specific
+     * liability (design spec §2.5, MV5a Task 9) -- the sole idempotency check
+     * {@see \Glueful\Extensions\Commerce\Marketplace\ReserveConsumptionService::consume()}
+     * makes BEFORE attempting any FIFO walk. A non-zero total here means an earlier,
+     * already-committed call to `consume()` for this EXACT `(liabilityKind,
+     * liabilityUuid)` already ran and posted one or more `reserve_release` rows; that
+     * class's docblock explains why a naive per-reserve re-walk cannot safely replay
+     * once any reserve has moved to `status=consumed` (it would no longer be selected
+     * as a `held` candidate, so the walk would recompute a DIFFERENT -- and therefore
+     * rejected -- slice against an already-posted idempotency key).
+     *
+     * `$correlationColumn` selects WHICH of the two MV5a correlation columns to filter
+     * on -- `chargeback_uuid` for a chargeback liability, `refund_uuid` for a refund
+     * liability -- validated against a fixed allow-list here (defense in depth: the
+     * caller only ever passes one of these two literals, but this method embeds the
+     * column name directly into the query, which a prepared-statement bind cannot do
+     * for an identifier).
+     */
+    public function consumedForLiability(
+        ApplicationContext $context,
+        string $tenant,
+        string $sellerUuid,
+        string $currency,
+        string $correlationColumn,
+        string $liabilityUuid
+    ): int {
+        if (!in_array($correlationColumn, ['chargeback_uuid', 'refund_uuid'], true)) {
+            throw new \InvalidArgumentException(
+                "LedgerRepository::consumedForLiability(): unsupported correlation column "
+                    . "'{$correlationColumn}' (expected 'chargeback_uuid' or 'refund_uuid')."
+            );
+        }
+
+        $row = db($context)->table('commerce_marketplace_ledger')
+            ->selectRaw('SUM(amount) as total')
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('seller_uuid', '=', $sellerUuid)
+            ->where('currency', '=', $currency)
+            ->where('entry_type', '=', 'reserve_release')
+            ->where($correlationColumn, '=', $liabilityUuid)
+            ->first();
+
+        return (int) ($row['total'] ?? 0);
+    }
 }
