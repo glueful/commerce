@@ -26,9 +26,15 @@ namespace Glueful\Extensions\Commerce\Marketplace;
  * NEVER grantable, by design (§2.5): `commerce.seller.apikeys.manage`
  * (credential administration -- a stolen key must never mint more
  * credentials), `commerce.seller.members.manage` (ownership/membership
- * administration), and there is no payout-EXECUTION or policy-administration
+ * administration), `commerce.seller.webhooks.manage` (MV5c-2 design spec
+ * §2.10 -- webhook-endpoint/secret administration; a seller API key must
+ * NEVER be able to register/redirect an endpoint or read/rotate its signing
+ * secret), and there is no payout-EXECUTION or policy-administration
  * capability in the shipped vocabulary at all -- `payouts.read` (financial
  * visibility) is the only payout-related capability, and it IS grantable.
+ * Every excluded capability is enforced the SAME way: simply never added to
+ * {@see self::GRANTABLE} below, so {@see self::contains()} returns false for
+ * it by construction -- there is no separate denylist to keep in sync.
  */
 final class SellerApiKeyCapabilityCatalog
 {

@@ -24,6 +24,7 @@ use Glueful\Extensions\Commerce\Marketplace\Contracts\SellerRoleAuthority;
  * | commerce.seller.reports.read       |   x   |   x   |       |    x    |
  * | commerce.seller.payouts.read       |   x   |   x   |       |    x    |
  * | commerce.seller.apikeys.manage     |   x   |   x   |       |         |
+ * | commerce.seller.webhooks.manage    |   x   |   x   |       |         |
  *
  * `commerce.seller.orders.{read,fulfill}` (design spec §6.1/§2.6, MV2 Task 8)
  * gate the seller order surfaces -- `fulfill` deliberately mirrors
@@ -46,6 +47,17 @@ use Glueful\Extensions\Commerce\Marketplace\Contracts\SellerRoleAuthority;
  * {@see \Glueful\Extensions\Commerce\Marketplace\SellerApiKeyCapabilityCatalog},
  * the separate, dedicated machine-grantable catalog that intentionally does
  * NOT live on this class.
+ *
+ * `commerce.seller.webhooks.manage` (design spec §2.10, MV5c-2 Task 2) gates
+ * the seller self-service webhook-endpoint management surface (register/
+ * update/rotate-secret/disable/enable/delete/replay) -- granted to
+ * owner/admin ONLY, the identical shape to `apikeys.manage` above:
+ * registering an outbound destination that will receive signed event data
+ * (and rotating the secret that authenticates it) is a credential/endpoint-
+ * administration concern, never an operational or read-only-analytics one.
+ * Like `apikeys.manage`, this capability can NEVER be declared on a seller
+ * API key (design spec §2.10) -- {@see \Glueful\Extensions\Commerce\Marketplace\SellerApiKeyCapabilityCatalog}
+ * excludes it by the same omission-from-the-grantable-set mechanism.
  */
 final class FixedSellerRoleAuthority implements SellerRoleAuthority
 {
@@ -59,6 +71,7 @@ final class FixedSellerRoleAuthority implements SellerRoleAuthority
     private const REPORTS_READ = 'commerce.seller.reports.read';
     private const PAYOUTS_READ = 'commerce.seller.payouts.read';
     public const APIKEYS_MANAGE = 'commerce.seller.apikeys.manage';
+    public const WEBHOOKS_MANAGE = 'commerce.seller.webhooks.manage';
 
     /** @var array<string,list<string>> */
     private const CAPABILITY_MATRIX = [
@@ -73,6 +86,7 @@ final class FixedSellerRoleAuthority implements SellerRoleAuthority
             self::REPORTS_READ,
             self::PAYOUTS_READ,
             self::APIKEYS_MANAGE,
+            self::WEBHOOKS_MANAGE,
         ],
         'seller_admin' => [
             self::CATALOG_READ,
@@ -84,6 +98,7 @@ final class FixedSellerRoleAuthority implements SellerRoleAuthority
             self::REPORTS_READ,
             self::PAYOUTS_READ,
             self::APIKEYS_MANAGE,
+            self::WEBHOOKS_MANAGE,
         ],
         'seller_staff' => [
             self::CATALOG_READ,

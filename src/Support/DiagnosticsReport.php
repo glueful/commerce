@@ -237,6 +237,15 @@ final class DiagnosticsReport
             'commerce_seller_api_keys',
             'commerce_seller_api_key_credentials',
             'commerce_seller_api_key_events',
+            // Marketplace MV5c-2 seller outbound-webhook endpoint + secret +
+            // event-snapshot + delivery + audit trail (design spec §3).
+            // Marketplace-aware REGARDLESS of `commerce.marketplace.enabled`
+            // for the same reason as the MV1-MV5c-1 tables above.
+            'commerce_seller_webhook_endpoints',
+            'commerce_seller_webhook_secrets',
+            'commerce_seller_webhook_events',
+            'commerce_seller_webhook_deliveries',
+            'commerce_seller_webhook_endpoint_events',
         ];
     }
 

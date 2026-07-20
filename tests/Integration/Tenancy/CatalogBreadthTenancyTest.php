@@ -405,10 +405,14 @@ final class CatalogBreadthTenancyTest extends CommerceTestCase
         // `commerce_seller_payout_accounts` table added in migration 014, the
         // four MV5a reserve/chargeback tables added in migrations 015/016, the
         // MV5b `commerce_seller_lifecycle_events` audit table added in
-        // migration 017, and the three MV5c-1 seller-API-key tables
+        // migration 017, the three MV5c-1 seller-API-key tables
         // (`commerce_seller_api_keys`, `commerce_seller_api_key_credentials`,
-        // `commerce_seller_api_key_events`) added in migration 018), so a
-        // future accidental removal/addition is caught here as well as
+        // `commerce_seller_api_key_events`) added in migration 018, and the
+        // five MV5c-2 seller-webhook tables (`commerce_seller_webhook_endpoints`,
+        // `commerce_seller_webhook_secrets`, `commerce_seller_webhook_events`,
+        // `commerce_seller_webhook_deliveries`,
+        // `commerce_seller_webhook_endpoint_events`) added in migration 019),
+        // so a future accidental removal/addition is caught here as well as
         // locally.
         self::assertSame([
             'commerce_products',
@@ -451,6 +455,11 @@ final class CatalogBreadthTenancyTest extends CommerceTestCase
             'commerce_seller_api_keys',
             'commerce_seller_api_key_credentials',
             'commerce_seller_api_key_events',
+            'commerce_seller_webhook_endpoints',
+            'commerce_seller_webhook_secrets',
+            'commerce_seller_webhook_events',
+            'commerce_seller_webhook_deliveries',
+            'commerce_seller_webhook_endpoint_events',
         ], DiagnosticsReport::tenantTables());
 
         // The join/child tables added alongside the six must never be treated as

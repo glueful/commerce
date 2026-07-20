@@ -140,6 +140,50 @@ return [
             // rotated/revoked) are never subject to this retention window.
             'auth_denied_retention_days' => (int) env('COMMERCE_API_KEYS_AUTH_DENIED_RETENTION_DAYS', 90),
         ],
+
+        // Seller outbound webhooks (MV5c-2, design spec §2.4/§2.6/§2.7/§2.9/
+        // §3-config). Delivery/retry/claim/retention tuning ONLY -- signing
+        // and SSRF-safe delivery themselves remain entirely framework-owned
+        // (`WebhookSignature`, `SafeOutboundTargetResolver`/
+        // `Client::safeWebhookRequestAsync()`).
+        'webhooks' => [
+            // Bounded exponential-backoff retry budget (design spec §2.7):
+            // attempts exhausted beyond this move a retryable delivery to
+            // dead_letter.
+            'max_attempts' => (int) env('COMMERCE_WEBHOOKS_MAX_ATTEMPTS', 10),
+            'backoff_base_seconds' => (int) env('COMMERCE_WEBHOOKS_BACKOFF_BASE_SECONDS', 30),
+            'backoff_cap_seconds' => (int) env('COMMERCE_WEBHOOKS_BACKOFF_CAP_SECONDS', 3600),
+            // Fractional jitter (0..1) applied to each computed backoff delay.
+            'jitter' => (float) env('COMMERCE_WEBHOOKS_JITTER', 0.2),
+            // Per-endpoint consecutive-failure threshold that flips it to
+            // `disabled` and pauses its other pending work (design spec §2.7).
+            'consecutive_failure_disable_threshold' => (int) env(
+                'COMMERCE_WEBHOOKS_CONSECUTIVE_FAILURE_THRESHOLD',
+                20
+            ),
+            // Rotation overlap window (design spec §2.2): how long a retired
+            // `current` secret remains valid as `previous` after rotation.
+            'secret_overlap_hours' => (int) env('COMMERCE_WEBHOOKS_SECRET_OVERLAP_HOURS', 24),
+            // Per-attempt HTTP connect/read budget (design spec §2.6), seconds.
+            'delivery_timeout_seconds' => (int) env('COMMERCE_WEBHOOKS_DELIVERY_TIMEOUT_SECONDS', 10),
+            // Crash-safe claim lease (design spec §2.7), seconds. MUST stay
+            // strictly greater than `delivery_timeout_seconds` -- otherwise a
+            // healthy in-flight HTTP attempt could be reclaimed by the sweep
+            // out from under itself before it can even time out on its own.
+            // The default (30 > 10) satisfies this; a service that reads this
+            // config (a later task) must validate the invariant at boot/use.
+            'claim_lease_seconds' => (int) env('COMMERCE_WEBHOOKS_CLAIM_LEASE_SECONDS', 30),
+            // Strict response-size cap (design spec §2.6), bytes.
+            'max_response_bytes' => (int) env('COMMERCE_WEBHOOKS_MAX_RESPONSE_BYTES', 65536),
+            // Retention window (days) for terminal delivery history
+            // (delivered/dead_letter/canceled) and superseded secrets before a
+            // host-scheduled cleanup command purges them.
+            'retention_days' => (int) env('COMMERCE_WEBHOOKS_RETENTION_DAYS', 90),
+            // Max due rows the recovery-sweep CLI
+            // (`commerce:marketplace:webhooks:sweep`) claims per invocation
+            // (design spec §2.4).
+            'sweep_batch_size' => (int) env('COMMERCE_WEBHOOKS_SWEEP_BATCH_SIZE', 100),
+        ],
     ],
 
     // Null-tolerant: invoice-data serializes each key as null, never omitted, when unset.

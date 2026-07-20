@@ -354,6 +354,167 @@ final class TenantAdopterTest extends CommerceTestCase
         }
     }
 
+    /**
+     * Design spec §3: all five MV5c-2 seller-webhook tables (migration 019)
+     * -- `commerce_seller_webhook_endpoints`, `commerce_seller_webhook_secrets`,
+     * `commerce_seller_webhook_events`, `commerce_seller_webhook_deliveries`,
+     * `commerce_seller_webhook_endpoint_events` -- are marketplace-aware
+     * regardless of the master switch, exactly like the MV1-MV5c-1 tables
+     * above -- {@see \Glueful\Extensions\Commerce\Support\DiagnosticsReport::tenantTables()}
+     * lists all five unconditionally, so `TenantAdopter` rekeys all five too,
+     * switch off or on.
+     */
+    public function testAdoptRekeysSellerWebhookTablesEvenWhenTheMasterSwitchIsOff(): void
+    {
+        self::assertFalse(
+            (bool) config($this->context, 'commerce.marketplace.enabled', false),
+            'this test relies on the master switch being off (the default)'
+        );
+
+        $this->connection->table('commerce_seller_webhook_endpoints')->insert([
+            'uuid' => 'mktadoptwe01',
+            'tenant_uuid' => '',
+            'seller_uuid' => 'mktadoptsel1',
+            'url' => 'https://example.test/hooks',
+            'subscribed_events' => '["order.placed"]',
+            'created_by' => 'mktadoptusr1',
+        ]);
+        $this->connection->table('commerce_seller_webhook_secrets')->insert([
+            'uuid' => 'mktadoptws01',
+            'tenant_uuid' => '',
+            'endpoint_uuid' => 'mktadoptwe01',
+            'secret_ciphertext' => 'ciphertext-placeholder',
+            'relationship' => 'current',
+        ]);
+        $this->connection->table('commerce_seller_webhook_events')->insert([
+            'uuid' => 'mktadoptwv01',
+            'tenant_uuid' => '',
+            'seller_uuid' => 'mktadoptsel1',
+            'event_type' => 'order.placed',
+            'payload' => '{}',
+            'occurred_at' => '2026-07-19 00:00:00',
+        ]);
+        $this->connection->table('commerce_seller_webhook_deliveries')->insert([
+            'uuid' => 'mktadoptwd01',
+            'tenant_uuid' => '',
+            'endpoint_uuid' => 'mktadoptwe01',
+            'webhook_event_uuid' => 'mktadoptwv01',
+            'seller_uuid' => 'mktadoptsel1',
+        ]);
+        $this->connection->table('commerce_seller_webhook_endpoint_events')->insert([
+            'uuid' => 'mktadoptwx01',
+            'tenant_uuid' => '',
+            'endpoint_uuid' => 'mktadoptwe01',
+            'seller_uuid' => 'mktadoptsel1',
+            'action' => 'register',
+        ]);
+
+        $result = (new TenantAdopter())->adopt($this->context, 'tenantMKT0007');
+
+        foreach (
+            [
+            'commerce_seller_webhook_endpoints',
+            'commerce_seller_webhook_secrets',
+            'commerce_seller_webhook_events',
+            'commerce_seller_webhook_deliveries',
+            'commerce_seller_webhook_endpoint_events',
+            ] as $table
+        ) {
+            self::assertSame(1, $result['tables'][$table], "{$table} should have adopted exactly 1 sentinel row.");
+            self::assertSame(
+                0,
+                $this->connection->table($table)->where('tenant_uuid', '=', '')->count(),
+                "{$table} must have no sentinel rows left behind"
+            );
+            self::assertSame(
+                1,
+                $this->connection->table($table)->where('tenant_uuid', '=', 'tenantMKT0007')->count(),
+                "{$table} row must be rekeyed to the adopted tenant"
+            );
+        }
+    }
+
+    /**
+     * Cross-tenant isolation safety net (design spec §5/§6), mirroring
+     * {@see testAdoptRefusesAndLeavesCrossTenantSellerApiKeyRowsIsolated} for
+     * all five MV5c-2 seller-webhook tables: a row already keyed to a
+     * DIFFERENT, already-resolved tenant in ANY of the five tables must never
+     * be silently rekeyed by a later `adopt()` call -- the shared mixed-data
+     * guard must refuse, and every row must stay exactly as it was.
+     */
+    public function testAdoptRefusesAndLeavesCrossTenantSellerWebhookRowsIsolated(): void
+    {
+        $this->connection->table('commerce_seller_webhook_endpoints')->insert([
+            'uuid' => 'mktadoptwe02',
+            'tenant_uuid' => 'tenantOTHER01',
+            'seller_uuid' => 'mktadoptsel2',
+            'url' => 'https://example.test/hooks-2',
+            'subscribed_events' => '["order.placed"]',
+            'created_by' => 'mktadoptusr2',
+        ]);
+        $this->connection->table('commerce_seller_webhook_secrets')->insert([
+            'uuid' => 'mktadoptws02',
+            'tenant_uuid' => 'tenantOTHER01',
+            'endpoint_uuid' => 'mktadoptwe02',
+            'secret_ciphertext' => 'ciphertext-placeholder',
+            'relationship' => 'current',
+        ]);
+        $this->connection->table('commerce_seller_webhook_events')->insert([
+            'uuid' => 'mktadoptwv02',
+            'tenant_uuid' => 'tenantOTHER01',
+            'seller_uuid' => 'mktadoptsel2',
+            'event_type' => 'order.placed',
+            'payload' => '{}',
+            'occurred_at' => '2026-07-19 00:00:00',
+        ]);
+        $this->connection->table('commerce_seller_webhook_deliveries')->insert([
+            'uuid' => 'mktadoptwd02',
+            'tenant_uuid' => 'tenantOTHER01',
+            'endpoint_uuid' => 'mktadoptwe02',
+            'webhook_event_uuid' => 'mktadoptwv02',
+            'seller_uuid' => 'mktadoptsel2',
+        ]);
+        $this->connection->table('commerce_seller_webhook_endpoint_events')->insert([
+            'uuid' => 'mktadoptwx02',
+            'tenant_uuid' => 'tenantOTHER01',
+            'endpoint_uuid' => 'mktadoptwe02',
+            'seller_uuid' => 'mktadoptsel2',
+            'action' => 'register',
+        ]);
+
+        // The assertion is made OUTSIDE the try/catch on purpose -- see the
+        // note on testAdoptRefusesAndLeavesCrossTenantSellerLifecycleEventsRowIsolated()
+        // above.
+        $refused = false;
+        try {
+            (new TenantAdopter())->adopt($this->context, 'tenantMKT0008');
+        } catch (\RuntimeException) {
+            $refused = true;
+        }
+        self::assertTrue(
+            $refused,
+            'adopt() must refuse when a seller-webhook table already contains another tenant\'s row'
+        );
+
+        foreach (
+            [
+            'commerce_seller_webhook_endpoints' => 'mktadoptwe02',
+            'commerce_seller_webhook_secrets' => 'mktadoptws02',
+            'commerce_seller_webhook_events' => 'mktadoptwv02',
+            'commerce_seller_webhook_deliveries' => 'mktadoptwd02',
+            'commerce_seller_webhook_endpoint_events' => 'mktadoptwx02',
+            ] as $table => $uuid
+        ) {
+            $row = $this->connection->table($table)->where('uuid', '=', $uuid)->first();
+            self::assertNotNull($row);
+            self::assertSame(
+                'tenantOTHER01',
+                $row['tenant_uuid'],
+                "a {$table} row already keyed to another tenant must remain untouched by a refused adoption"
+            );
+        }
+    }
+
     private function seedSentinelCatalog(): void
     {
         (new CatalogService(

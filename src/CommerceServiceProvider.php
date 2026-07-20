@@ -7,6 +7,7 @@ namespace Glueful\Extensions\Commerce;
 use Glueful\Auth\Contracts\UserProviderInterface;
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Database\Migrations\MigrationPriority;
+use Glueful\Encryption\EncryptionService;
 use Glueful\Events\EventService;
 use Glueful\Extensions\Commerce\Catalog\AddonRepository;
 use Glueful\Extensions\Commerce\Catalog\AddonService;
@@ -126,6 +127,10 @@ use Glueful\Extensions\Commerce\Marketplace\SellerOrderRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerOrderService;
 use Glueful\Extensions\Commerce\Marketplace\SellerRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerService;
+use Glueful\Extensions\Commerce\Marketplace\SellerWebhookDeliveryRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerWebhookEndpointRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerWebhookEndpointService;
+use Glueful\Extensions\Commerce\Marketplace\SellerWebhookSecretService;
 use Glueful\Extensions\Commerce\Orders\OrderNumberGenerator;
 use Glueful\Extensions\Commerce\Orders\CheckoutService;
 use Glueful\Extensions\Commerce\Orders\Downloads\CommerceDownloadBlobPolicy;
@@ -169,6 +174,7 @@ use Glueful\Extensions\Contracts\Payments\PayoutCollector;
 use Glueful\Extensions\Contracts\Payments\ProviderChargebackEvent;
 use Glueful\Extensions\Contracts\Payments\RefundCollector;
 use Glueful\Extensions\ServiceProvider;
+use Glueful\Http\Security\SafeOutboundTargetResolver;
 use Glueful\Repository\BlobRepository;
 use Glueful\Uploader\Contracts\BlobAccessPolicyRegistry;
 use Glueful\Uploader\Contracts\BlobPublicUrlProvider;
@@ -405,6 +411,22 @@ final class CommerceServiceProvider extends ServiceProvider
             ],
             SellerApiKeyAuthorizer::class => [
                 'factory' => [self::class, 'makeSellerApiKeyAuthorizer'],
+                'shared' => true,
+            ],
+            SellerWebhookEndpointRepository::class => [
+                'class' => SellerWebhookEndpointRepository::class,
+                'shared' => true,
+            ],
+            SellerWebhookDeliveryRepository::class => [
+                'class' => SellerWebhookDeliveryRepository::class,
+                'shared' => true,
+            ],
+            SellerWebhookSecretService::class => [
+                'factory' => [self::class, 'makeSellerWebhookSecretService'],
+                'shared' => true,
+            ],
+            SellerWebhookEndpointService::class => [
+                'factory' => [self::class, 'makeSellerWebhookEndpointService'],
                 'shared' => true,
             ],
             SellerOrderRepository::class => [
@@ -1504,6 +1526,28 @@ final class CommerceServiceProvider extends ServiceProvider
     public static function makeSellerApiKeyAuthorizer(ContainerInterface $container): SellerApiKeyAuthorizer
     {
         return new SellerApiKeyAuthorizer($container->get(SellerApiKeyRepository::class));
+    }
+
+    public static function makeSellerWebhookSecretService(ContainerInterface $container): SellerWebhookSecretService
+    {
+        return new SellerWebhookSecretService(
+            $container->get(SellerWebhookEndpointRepository::class),
+            $container->get(EncryptionService::class)
+        );
+    }
+
+    public static function makeSellerWebhookEndpointService(
+        ContainerInterface $container
+    ): SellerWebhookEndpointService {
+        return new SellerWebhookEndpointService(
+            $container->get(SellerRepository::class),
+            $container->get(SellerMembershipRepository::class),
+            $container->get(SellerWebhookEndpointRepository::class),
+            $container->get(SellerWebhookDeliveryRepository::class),
+            $container->get(SellerRoleAuthority::class),
+            $container->get(SellerWebhookSecretService::class),
+            new SafeOutboundTargetResolver()
+        );
     }
 
     public static function makeSellerAttributionService(ContainerInterface $container): SellerAttributionService
