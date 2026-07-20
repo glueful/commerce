@@ -21,12 +21,22 @@ use Glueful\Http\Exceptions\Client\NotFoundException;
  * transaction, so two concurrent child fulfillments serialize and every
  * roll-up is computed on committed state -- no double-`partial`, no
  * duplicated events.
+ *
+ * `$sellers`/`$webhooks` (MV5c-2 Task 4, design spec §2.3/§2.4): APPENDED
+ * OPTIONAL collaborators, same "pre-existing call site stays
+ * source-compatible" convention as every other MV5c-2 capture site. Neither
+ * `fulfill()` nor `fanOutFulfill()` claims a `commerce_sellers` revision nor
+ * a `LedgerAccountLock` anywhere (fulfillment posts no ledger entries), so
+ * capture()'s own fresh seller-revision claim carries no lock-order
+ * constraint here.
  */
 final class SellerOrderFulfillmentService
 {
     public function __construct(
         private OrderRepository $orders,
         private SellerOrderRepository $sellerOrders,
+        private ?SellerRepository $sellers = null,
+        private ?SellerWebhookOutboxPublisher $webhooks = null,
     ) {
     }
 
@@ -104,6 +114,8 @@ final class SellerOrderFulfillmentService
             $this->sellerOrders->markFulfilled($context, $tenant, $sellerOrderUuid, $tracking);
             $fulfilledChild = $this->sellerOrders->findByUuid($context, $tenant, $sellerOrderUuid);
 
+            $this->captureSellerOrderFulfilled($context, $tenant, $fulfilledChild);
+
             // (6) Re-read every child of the parent and roll up.
             $parentBecameFulfilled = $this->rollUp($context, $tenant, $orderUuid);
             $updatedOrder = $this->orders->findByUuid($context, $tenant, $orderUuid);
@@ -172,6 +184,10 @@ final class SellerOrderFulfillmentService
                 $transitionedUuids
             );
 
+            foreach ($transitionedChildren as $child) {
+                $this->captureSellerOrderFulfilled($context, $tenant, $child);
+            }
+
             $this->dispatchAfterCommit($context, $transitionedChildren, $updatedOrder, $parentBecameFulfilled);
 
             return $updatedOrder;
@@ -232,5 +248,38 @@ final class SellerOrderFulfillmentService
         if ($container->has(EventService::class)) {
             $container->get(EventService::class)->dispatch($event);
         }
+    }
+
+    /**
+     * `seller_order.fulfilled` outbox capture (MV5c-2 Task 4, design spec
+     * §2.3/§2.4): called for EVERY child this call transitioned -- once for
+     * `fulfill()`'s single child, once per child for `fanOutFulfill()`'s
+     * whole batch. `$child` is always the FRESH, already-`markFulfilled()`
+     * row (never the pre-transition snapshot).
+     *
+     * @param array<string,mixed>|null $child
+     */
+    private function captureSellerOrderFulfilled(ApplicationContext $context, string $tenant, ?array $child): void
+    {
+        if ($this->webhooks === null || $this->sellers === null || $child === null) {
+            return;
+        }
+
+        $sellerUuid = (string) $child['seller_uuid'];
+
+        $this->webhooks->capture($context, $tenant, 'seller_order.fulfilled', [
+            'data' => [
+                $sellerUuid => [
+                    'order_uuid' => (string) $child['order_uuid'],
+                    'seller_order_uuid' => (string) $child['uuid'],
+                    'seller_reference' => (string) $child['seller_reference'],
+                    'occurred_at' => (string) ($child['fulfilled_at'] ?? gmdate('Y-m-d H:i:s')),
+                    'carrier' => $child['carrier'] ?? null,
+                    'tracking_number' => $child['tracking_number'] ?? null,
+                    'tracking_url' => $child['tracking_url'] ?? null,
+                ],
+            ],
+            'source_ref' => (string) $child['uuid'],
+        ]);
     }
 }

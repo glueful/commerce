@@ -73,6 +73,7 @@ final class SellerAttributionService
         private SellerRepository $sellers,
         private ProductRepository $products,
         ?callable $afterSnapshotHook = null,
+        private ?SellerWebhookOutboxPublisher $webhooks = null,
     ) {
         $this->afterSnapshotHook = $afterSnapshotHook ?? static function (
             ApplicationContext $context,
@@ -147,6 +148,10 @@ final class SellerAttributionService
                 throw new \RuntimeException('Updated product could not be reloaded.');
             }
 
+            if ($this->webhooks !== null) {
+                $this->captureAttribution($c, $tenant, $productUuid, $snapshotSource, $targetSellerUuid, $claimSet);
+            }
+
             return ['product' => $updated, 'source' => $snapshotSource];
         });
 
@@ -171,6 +176,66 @@ final class SellerAttributionService
         $this->dispatch($c, $event);
 
         return $product;
+    }
+
+    /**
+     * `product.adopted`/`product.transferred` outbox capture (MV5c-2 Task 4,
+     * design spec §2.3/§2.4), still inside `assign()`'s own transaction. A
+     * null `$sourceSellerUuid` (adoption -- the product had no owner)
+     * captures `product.adopted` for the target seller only; a non-null
+     * source captures `product.transferred` for BOTH participating sellers
+     * as DISTINCT snapshots (`direction = 'out'`/`'in'`) -- see
+     * {@see SellerWebhookPayloadProjector::productTransferred()} for why
+     * `counterparty_seller_uuid` is the only cross-seller reference either
+     * snapshot ever carries. `$claimedSellers` is `$claimSet` from THIS
+     * same transaction (already sorted, already claimed above, before the
+     * product's own catalog-revision claim) -- reused, never re-claimed.
+     *
+     * @param list<string> $claimedSellers
+     */
+    private function captureAttribution(
+        ApplicationContext $c,
+        string $tenant,
+        string $productUuid,
+        ?string $sourceSellerUuid,
+        string $targetSellerUuid,
+        array $claimedSellers
+    ): void {
+        $now = db($c)->getDriver()->formatDateTime();
+
+        if ($sourceSellerUuid === null) {
+            $this->webhooks->capture($c, $tenant, 'product.adopted', [
+                'data' => [
+                    $targetSellerUuid => [
+                        'product_uuid' => $productUuid,
+                        'occurred_at' => $now,
+                    ],
+                ],
+                'claimed_sellers' => $claimedSellers,
+                'source_ref' => $productUuid,
+            ]);
+
+            return;
+        }
+
+        $this->webhooks->capture($c, $tenant, 'product.transferred', [
+            'data' => [
+                $sourceSellerUuid => [
+                    'direction' => 'out',
+                    'product_uuid' => $productUuid,
+                    'counterparty_seller_uuid' => $targetSellerUuid,
+                    'occurred_at' => $now,
+                ],
+                $targetSellerUuid => [
+                    'direction' => 'in',
+                    'product_uuid' => $productUuid,
+                    'counterparty_seller_uuid' => $sourceSellerUuid,
+                    'occurred_at' => $now,
+                ],
+            ],
+            'claimed_sellers' => $claimedSellers,
+            'source_ref' => $productUuid,
+        ]);
     }
 
     private function dispatch(ApplicationContext $context, object $event): void

@@ -120,6 +120,7 @@ final class PayoutService
         ?callable $uuidGenerator = null,
         private readonly ?PayoutCollector $collector = null,
         private readonly ?PayoutAccountService $payoutAccounts = null,
+        private readonly ?SellerWebhookOutboxPublisher $webhooks = null,
     ) {
         $this->uuidGenerator = $uuidGenerator ?? static fn (): string => Utils::generateNanoID();
     }
@@ -256,6 +257,17 @@ final class PayoutService
                     'completed_at' => db($context)->getDriver()->formatDateTime(),
                 ];
                 $this->payouts->insert($context, $row);
+
+                // MV5c-2 Task 4 (design spec §2.4): the seller revision was already
+                // claimed ABOVE, before the account lock -- 'claimed_sellers' tells
+                // capture() to REUSE that claim through the shared claim helper
+                // (SellerRepository::claimRevision()) rather than re-acquiring it. The
+                // account lock is already held by this point, so this call's own
+                // placement (before vs after the ledger post below) carries no
+                // additional lock-order risk either way.
+                if ($this->webhooks !== null) {
+                    $this->capturePayoutRecorded($context, $tenant, $row, [$sellerUuid]);
+                }
 
                 $this->ledger->post($context, $tenant, [
                     'account_kind' => 'seller',
@@ -849,6 +861,18 @@ final class PayoutService
             return $this->refetch($context, $tenant, $payoutUuid) ?? $current;
         }
 
+        // MV5c-2 Task 4 (design spec §2.4/§4 lock order): `payout.recorded` for the
+        // WINNING provider-paid transition -- claimPending() above is the CAS, so this
+        // runs exactly once per payout, the first time (and only the first time) it
+        // reaches 'paid' (finalize() or reconcile()'s reconcilePendingAttempt(), both
+        // funnel through this one method). Neither caller holds a seller-revision claim
+        // anywhere else, so capture() claims fresh -- MUST land here, BEFORE the
+        // LedgerAccountLock claim in the `$posts !== []` block below, to preserve the
+        // "revision before account lock" global order.
+        if ($to === 'paid' && $this->webhooks !== null) {
+            $this->capturePayoutRecorded($context, $tenant, array_merge($current, $set, ['status' => $to]));
+        }
+
         if ($posts !== []) {
             $accountKey = LedgerRepository::accountKeyForSeller((string) $current['seller_uuid']);
             $this->lock->claim($context, $tenant, $accountKey, (string) $current['currency']);
@@ -1394,6 +1418,44 @@ final class PayoutService
     private static function normalize(mixed $value): ?string
     {
         return $value === null ? null : (string) $value;
+    }
+
+    /**
+     * `payout.recorded` outbox capture (MV5c-2 Task 4, design spec §2.3/§2.4):
+     * shared by BOTH real insertion points design spec §2.3 names -- the manual
+     * path's fresh insert (`record()`) and the winning provider-paid CAS
+     * ({@see self::applyPendingTransition()}). Deliberately minimal fields --
+     * see {@see SellerWebhookPayloadProjector::payoutRecorded()}'s own docblock
+     * for what is excluded and why.
+     *
+     * @param array<string,mixed> $row the commerce_payouts row (post-transition for the
+     *     CAS caller, freshly-inserted for the manual caller)
+     * @param list<string> $claimedSellers sellers whose revision the CALLER already
+     *     claimed in this same transaction (manual `record()` only; empty for the CAS
+     *     finalizer, which holds no such claim)
+     */
+    private function capturePayoutRecorded(
+        ApplicationContext $context,
+        string $tenant,
+        array $row,
+        array $claimedSellers = []
+    ): void {
+        $sellerUuid = (string) $row['seller_uuid'];
+
+        $this->webhooks->capture($context, $tenant, 'payout.recorded', [
+            'data' => [
+                $sellerUuid => [
+                    'payout_uuid' => (string) $row['uuid'],
+                    'currency' => (string) $row['currency'],
+                    'amount' => (int) $row['amount'],
+                    'method' => (string) ($row['method'] ?? 'manual'),
+                    'occurred_at' => (string) ($row['completed_at'] ?? db($context)->getDriver()->formatDateTime()),
+                    'external_ref' => $row['external_ref'] ?? null,
+                ],
+            ],
+            'claimed_sellers' => $claimedSellers,
+            'source_ref' => (string) $row['uuid'],
+        ]);
     }
 
     private function dispatch(ApplicationContext $context, object $event): void

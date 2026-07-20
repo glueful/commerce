@@ -10,6 +10,7 @@ use Glueful\Extensions\Commerce\Events\OrderPaid;
 use Glueful\Extensions\Commerce\Marketplace\LedgerPostingService;
 use Glueful\Extensions\Commerce\Marketplace\SellerOrderPaymentConfirmation;
 use Glueful\Extensions\Commerce\Marketplace\SellerOrderRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerWebhookOutboxPublisher;
 use Glueful\Events\EventService;
 
 /**
@@ -46,6 +47,7 @@ final class OrderPaymentService
         ?callable $afterPaidHook = null,
         private ?SellerOrderRepository $sellerOrders = null,
         private ?LedgerPostingService $ledgerPosting = null,
+        private ?SellerWebhookOutboxPublisher $webhooks = null,
     ) {
         $this->afterPaidHook = $afterPaidHook ?? static function (
             ApplicationContext $context,
@@ -97,8 +99,21 @@ final class OrderPaymentService
                 $this->confirmation->confirm($context, $tenant, $orderUuid);
             }
 
-            if ($partitioned && $this->sellerOrders !== null && $this->ledgerPosting !== null) {
-                $sellerOrderRows = $this->sellerOrders->forOrder($context, $tenant, $orderUuid);
+            $sellerOrderRows = ($partitioned && $this->sellerOrders !== null)
+                ? $this->sellerOrders->forOrder($context, $tenant, $orderUuid)
+                : [];
+
+            // MV5c-2 Task 4 (design spec §2.4/§4 lock order): capture `order.paid`
+            // BEFORE postSale() below claims any LedgerAccountLock -- markPaid() never
+            // claims a seller revision anywhere else, so this call's own claim (inside
+            // capture(), sorted, ascending seller_uuid) MUST land before any account-lock
+            // claim to preserve the "revision before account lock" global order the
+            // MV5b payout freeze already established for this exact commerce_sellers row.
+            if ($sellerOrderRows !== [] && $this->webhooks !== null) {
+                $this->captureOrderPaid($context, $tenant, $order, $sellerOrderRows);
+            }
+
+            if ($sellerOrderRows !== [] && $this->ledgerPosting !== null) {
                 $this->ledgerPosting->postSale($context, $tenant, $order, $sellerOrderRows);
             }
 
@@ -108,6 +123,48 @@ final class OrderPaymentService
                 $this->dispatch($context, new OrderPaid($order));
             });
         });
+    }
+
+    /**
+     * `order.paid` outbox capture (MV5c-2 Task 4, design spec §2.4). See this class's
+     * own `markPaid()` docblock note for WHY this must run before `postSale()`.
+     * `markPaid()` never holds a caller-side seller-revision claim, so no
+     * `claimed_sellers` hint is passed -- capture() claims fresh, sorted.
+     *
+     * @param array<string,mixed> $order
+     * @param list<array<string,mixed>> $sellerOrderRows
+     */
+    private function captureOrderPaid(
+        ApplicationContext $context,
+        string $tenant,
+        array $order,
+        array $sellerOrderRows
+    ): void {
+        $occurredAt = db($context)->getDriver()->formatDateTime();
+
+        $data = [];
+        foreach ($sellerOrderRows as $row) {
+            $sellerUuid = (string) $row['seller_uuid'];
+            $data[$sellerUuid] = [
+                'order_uuid' => (string) $order['uuid'],
+                'order_number' => (string) ($order['order_number'] ?? ''),
+                'currency' => (string) $row['currency'],
+                'occurred_at' => $occurredAt,
+                'seller_order_uuid' => (string) $row['uuid'],
+                'seller_reference' => (string) $row['seller_reference'],
+                'subtotal' => (int) $row['subtotal'],
+                'allocated_discount' => (int) $row['allocated_discount'],
+                'allocated_shipping' => (int) $row['allocated_shipping'],
+                'allocated_tax' => (int) $row['allocated_tax'],
+                'attributed_total' => (int) $row['attributed_total'],
+                'commission_amount' => (int) ($row['commission_amount'] ?? 0),
+            ];
+        }
+
+        $this->webhooks->capture($context, $tenant, 'order.paid', [
+            'data' => $data,
+            'source_ref' => (string) $order['uuid'],
+        ]);
     }
 
     /** @param array<string,mixed> $payload */

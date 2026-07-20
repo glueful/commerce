@@ -130,6 +130,9 @@ use Glueful\Extensions\Commerce\Marketplace\SellerService;
 use Glueful\Extensions\Commerce\Marketplace\SellerWebhookDeliveryRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerWebhookEndpointRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerWebhookEndpointService;
+use Glueful\Extensions\Commerce\Marketplace\SellerWebhookEventRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerWebhookOutboxPublisher;
+use Glueful\Extensions\Commerce\Marketplace\SellerWebhookPayloadProjector;
 use Glueful\Extensions\Commerce\Marketplace\SellerWebhookSecretService;
 use Glueful\Extensions\Commerce\Orders\OrderNumberGenerator;
 use Glueful\Extensions\Commerce\Orders\CheckoutService;
@@ -427,6 +430,18 @@ final class CommerceServiceProvider extends ServiceProvider
             ],
             SellerWebhookEndpointService::class => [
                 'factory' => [self::class, 'makeSellerWebhookEndpointService'],
+                'shared' => true,
+            ],
+            SellerWebhookEventRepository::class => [
+                'class' => SellerWebhookEventRepository::class,
+                'shared' => true,
+            ],
+            SellerWebhookPayloadProjector::class => [
+                'class' => SellerWebhookPayloadProjector::class,
+                'shared' => true,
+            ],
+            SellerWebhookOutboxPublisher::class => [
+                'factory' => [self::class, 'makeSellerWebhookOutboxPublisher'],
                 'shared' => true,
             ],
             SellerOrderRepository::class => [
@@ -829,7 +844,8 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(SellerRepository::class),
             null,
             self::makePayoutCollector($container),
-            $container->get(PayoutAccountService::class)
+            $container->get(PayoutAccountService::class),
+            $container->get(SellerWebhookOutboxPublisher::class)
         );
     }
 
@@ -942,7 +958,9 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(StockRepository::class),
             self::tenantResolver($container),
             $container->get(VariantRepository::class),
-            $container->get(ProductRepository::class)
+            $container->get(ProductRepository::class),
+            $container->get(SellerRepository::class),
+            $container->get(SellerWebhookOutboxPublisher::class)
         );
     }
 
@@ -1033,7 +1051,8 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(MarketplaceMode::class),
             $container->get(SellerRepository::class),
             $container->get(ProductRepository::class),
-            $container->get(SellerOrderRepository::class)
+            $container->get(SellerOrderRepository::class),
+            webhooks: $container->get(SellerWebhookOutboxPublisher::class)
         );
     }
 
@@ -1081,7 +1100,9 @@ final class CommerceServiceProvider extends ServiceProvider
             self::tenantResolver($container),
             self::makeRefundCollector($container),
             $container->get(MarketplaceRefundGuard::class),
-            $container->get(LedgerPostingService::class)
+            $container->get(LedgerPostingService::class),
+            $container->get(SellerRepository::class),
+            $container->get(SellerWebhookOutboxPublisher::class)
         );
     }
 
@@ -1142,7 +1163,9 @@ final class CommerceServiceProvider extends ServiceProvider
         return new ExpiryService(
             $container->get(OrderRepository::class),
             $container->get(StockRepository::class),
-            self::tenantResolver($container)
+            self::tenantResolver($container),
+            $container->get(SellerOrderRepository::class),
+            $container->get(SellerWebhookOutboxPublisher::class)
         );
     }
 
@@ -1268,7 +1291,10 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(OrderPaymentService::class),
             self::tenantResolver($container),
             $container->get(RefundRepository::class),
-            $container->get(SellerIdentityProvider::class)
+            $container->get(SellerIdentityProvider::class),
+            $container->get(SellerOrderRepository::class),
+            $container->get(SellerOrderFulfillmentService::class),
+            $container->get(SellerWebhookOutboxPublisher::class)
         );
     }
 
@@ -1555,7 +1581,32 @@ final class CommerceServiceProvider extends ServiceProvider
         return new SellerAttributionService(
             $container->get(MarketplaceWorkspaceLock::class),
             $container->get(SellerRepository::class),
-            $container->get(ProductRepository::class)
+            $container->get(ProductRepository::class),
+            null,
+            $container->get(SellerWebhookOutboxPublisher::class)
+        );
+    }
+
+    /**
+     * MV5c-2 Task 4 (design spec §2.4): the shared publisher every real v1
+     * state-change transaction captures through. Every collaborator here is
+     * itself either shared elsewhere in this container ({@see SellerRepository},
+     * {@see SellerWebhookEndpointRepository}, {@see SellerWebhookDeliveryRepository})
+     * or newly registered above ({@see SellerWebhookEventRepository},
+     * {@see SellerWebhookPayloadProjector}) -- {@see MarketplaceMode} is a
+     * stateless config-reader constructed inline, mirroring
+     * {@see self::makeTenantResolver()}'s own "no extra DI surface for a
+     * dependency-free internal" convention.
+     */
+    public static function makeSellerWebhookOutboxPublisher(ContainerInterface $container): SellerWebhookOutboxPublisher
+    {
+        return new SellerWebhookOutboxPublisher(
+            new MarketplaceMode(),
+            $container->get(SellerRepository::class),
+            $container->get(SellerWebhookEndpointRepository::class),
+            $container->get(SellerWebhookEventRepository::class),
+            $container->get(SellerWebhookDeliveryRepository::class),
+            $container->get(SellerWebhookPayloadProjector::class)
         );
     }
 
@@ -1643,7 +1694,9 @@ final class CommerceServiceProvider extends ServiceProvider
     ): SellerOrderFulfillmentService {
         return new SellerOrderFulfillmentService(
             $container->get(OrderRepository::class),
-            $container->get(SellerOrderRepository::class)
+            $container->get(SellerOrderRepository::class),
+            $container->get(SellerRepository::class),
+            $container->get(SellerWebhookOutboxPublisher::class)
         );
     }
 

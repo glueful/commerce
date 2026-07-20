@@ -152,4 +152,74 @@ final class SellerWebhookDeliveryRepository
             ->whereIn('status', ['pending', 'paused'])
             ->update(['status' => 'canceled', 'updated_at' => $updatedAt]);
     }
+
+    // -----------------------------------------------------------------
+    // Outbox writes (MV5c-2 Task 4, design spec §2.4/§2.9): the durable
+    // per-endpoint delivery rows {@see SellerWebhookOutboxPublisher::capture()}
+    // inserts INSIDE the authoritative business transaction, one per matched
+    // ACTIVE endpoint. Deliberately narrow -- these two methods are the only
+    // way a delivery row is ever born; every other mutation in this class
+    // (pause/resume/cancel) only ever transitions an ALREADY-EXISTING row.
+    // -----------------------------------------------------------------
+
+    /**
+     * A brand-new delivery for an ACTIVE seller (design spec §2.4): `status
+     * = 'pending'`, zero attempts, due immediately (`next_attempt_at =
+     * DB_NOW`, passed in by the caller so every row from the same capture()
+     * call shares an identical timestamp).
+     *
+     * @param array{
+     *     uuid: string,
+     *     endpoint_uuid: string,
+     *     webhook_event_uuid: string,
+     *     seller_uuid: string,
+     *     next_attempt_at: string
+     * } $row
+     */
+    public function insertPending(ApplicationContext $context, string $tenant, array $row): void
+    {
+        db($context)->table(self::TABLE)->insert([
+            'uuid' => $row['uuid'],
+            'tenant_uuid' => $tenant,
+            'endpoint_uuid' => $row['endpoint_uuid'],
+            'webhook_event_uuid' => $row['webhook_event_uuid'],
+            'seller_uuid' => $row['seller_uuid'],
+            'status' => 'pending',
+            'attempts' => 0,
+            'next_attempt_at' => $row['next_attempt_at'],
+        ]);
+    }
+
+    /**
+     * A brand-new delivery born ALREADY paused (design spec §2.4/§2.9): the
+     * seller was already `suspended` at the moment capture() re-read its
+     * lifecycle status under the freshly-claimed revision -- `pause_reason =
+     * 'seller_suspended'`, zero attempts, zero `paused_remaining_seconds`
+     * ("new suspended events use zero" -- mirrors {@see SellerWebhookEndpointService::disable()}'s
+     * sibling `endpoint_disabled` pause semantics, never merely expiring
+     * while paused). Reinstatement ({@see self::resumeOne()}) reconstructs
+     * `next_attempt_at` from DB-time at that point; this row starts with none.
+     *
+     * @param array{
+     *     uuid: string,
+     *     endpoint_uuid: string,
+     *     webhook_event_uuid: string,
+     *     seller_uuid: string
+     * } $row
+     */
+    public function insertPaused(ApplicationContext $context, string $tenant, array $row, string $pausedAt): void
+    {
+        db($context)->table(self::TABLE)->insert([
+            'uuid' => $row['uuid'],
+            'tenant_uuid' => $tenant,
+            'endpoint_uuid' => $row['endpoint_uuid'],
+            'webhook_event_uuid' => $row['webhook_event_uuid'],
+            'seller_uuid' => $row['seller_uuid'],
+            'status' => 'paused',
+            'attempts' => 0,
+            'pause_reason' => 'seller_suspended',
+            'paused_at' => $pausedAt,
+            'paused_remaining_seconds' => 0,
+        ]);
+    }
 }

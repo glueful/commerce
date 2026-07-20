@@ -7,6 +7,8 @@ namespace Glueful\Extensions\Commerce\Inventory;
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Catalog\ProductRepository;
 use Glueful\Extensions\Commerce\Catalog\VariantRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerWebhookOutboxPublisher;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Glueful\Http\Exceptions\Client\NotFoundException;
 use Glueful\Validation\ValidationException;
@@ -18,6 +20,15 @@ use Glueful\Validation\ValidationException;
  * collaborators use -- every pre-existing direct-construction call site
  * (tests included) keeps working unchanged. They back
  * {@see self::quantityForSeller()}/{@see self::adjustForSeller()} only.
+ *
+ * `$sellers`/`$webhooks` (MV5c-2 Task 4, design spec §2.3/§2.4): the SAME
+ * convention, backing {@see self::adjust()}'s own `stock.adjusted` capture --
+ * the ONLY real insertion point for this event type (design spec §2.3:
+ * checkout decrements and refund/cancel/expiry restocks -- none of which
+ * ever call this class at all, they call {@see StockRepository} directly --
+ * never emit it). `adjust()` never claims a `LedgerAccountLock` (stock
+ * adjustment posts no ledger entries), so there is no lock-order constraint
+ * on where the capture call lands inside its transaction.
  */
 final class InventoryService
 {
@@ -26,9 +37,12 @@ final class InventoryService
         private CurrentTenantResolver $tenants,
         private ?VariantRepository $variants = null,
         private ?ProductRepository $products = null,
+        private ?SellerRepository $sellers = null,
+        private ?SellerWebhookOutboxPublisher $webhooks = null,
     ) {
         $this->variants ??= new VariantRepository();
         $this->products ??= new ProductRepository();
+        $this->sellers ??= new SellerRepository();
     }
 
     /**
@@ -116,7 +130,68 @@ final class InventoryService
 
             $this->stock->recordMovement($context, $tenant, $variantUuid, $delta, $reason, $reference);
 
-            return $this->stock->quantity($context, $tenant, $variantUuid);
+            $quantityAfter = $this->stock->quantity($context, $tenant, $variantUuid);
+
+            $this->captureStockAdjusted($context, $tenant, $variantUuid, $delta, $quantityAfter, $reason, $reference);
+
+            return $quantityAfter;
         });
+    }
+
+    /**
+     * `stock.adjusted` outbox capture (MV5c-2 Task 4, design spec §2.3/§2.4):
+     * the direct operator/seller adjustment ONLY -- this is the only call
+     * site in this class (and, by construction, the only real place in this
+     * codebase this event type is ever emitted from: every checkout
+     * decrement and every refund/cancel/expiry restock moves stock through
+     * {@see StockRepository} directly, never through this method). Resolves
+     * the owning seller INSIDE this transaction (never claimed/known by a
+     * caller here -- {@see self::adjustForSeller()}'s own ownership check
+     * runs entirely BEFORE this transaction opens); a non-marketplace/
+     * unattributed variant (no owning seller) silently emits nothing.
+     */
+    private function captureStockAdjusted(
+        ApplicationContext $context,
+        string $tenant,
+        string $variantUuid,
+        int $delta,
+        int $quantityAfter,
+        string $reason,
+        ?string $reference
+    ): void {
+        if ($this->webhooks === null) {
+            return;
+        }
+
+        $variant = $this->variants->findByUuid($context, $tenant, $variantUuid);
+        if ($variant === null) {
+            return;
+        }
+
+        $product = $this->products->findLiveByUuid($context, $tenant, (string) $variant['product_uuid']);
+        $sellerUuid = $product !== null ? ($product['seller_uuid'] ?? null) : null;
+        if ($sellerUuid === null || $sellerUuid === '') {
+            return;
+        }
+        $sellerUuid = (string) $sellerUuid;
+
+        $this->sellers->claimRevision($context, $tenant, $sellerUuid);
+
+        $this->webhooks->capture($context, $tenant, 'stock.adjusted', [
+            'data' => [
+                $sellerUuid => [
+                    'product_uuid' => (string) $variant['product_uuid'],
+                    'variant_uuid' => $variantUuid,
+                    'sku' => (string) ($variant['sku'] ?? ''),
+                    'delta' => $delta,
+                    'quantity_after' => $quantityAfter,
+                    'reason' => $reason,
+                    'reference' => $reference,
+                    'occurred_at' => db($context)->getDriver()->formatDateTime(),
+                ],
+            ],
+            'claimed_sellers' => [$sellerUuid],
+            'source_ref' => $variantUuid,
+        ]);
     }
 }

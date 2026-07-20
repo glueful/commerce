@@ -23,6 +23,7 @@ use Glueful\Extensions\Commerce\Marketplace\OwnershipDriftException;
 use Glueful\Extensions\Commerce\Marketplace\SellerAllocationCalculator;
 use Glueful\Extensions\Commerce\Marketplace\SellerOrderRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerWebhookOutboxPublisher;
 use Glueful\Extensions\Commerce\Pricing\PricingEngine;
 use Glueful\Extensions\Commerce\Pricing\ShippingQuote;
 use Glueful\Extensions\Commerce\Pricing\TaxBreakdown;
@@ -77,6 +78,7 @@ final class CheckoutService
         private ?ProductRepository $marketplaceProducts = null,
         private ?SellerOrderRepository $sellerOrders = null,
         ?callable $afterOwnershipSnapshotHook = null,
+        private ?SellerWebhookOutboxPublisher $webhooks = null,
     ) {
         $this->afterOwnershipSnapshotHook = $afterOwnershipSnapshotHook ?? static function (
             ApplicationContext $context,
@@ -348,6 +350,7 @@ final class CheckoutService
                 $sellerAllocations,
                 $sellerRows
             );
+            $this->captureOrderPlaced($context, $tenant, $orderUuid, $number, $storeCurrency, $lines, $sellerRows);
         }
 
         $order = $this->orders->findByUuid($context, $tenant, $orderUuid);
@@ -734,6 +737,82 @@ final class CheckoutService
         }
 
         $this->sellerOrders->insertForOrder($context, $tenant, $sellerOrderRows);
+    }
+
+    /**
+     * `order.placed` outbox capture (MV5c-2 Task 4, design spec §2.4): called
+     * INSIDE this same transaction, immediately after {@see self::writeSellerOrders()}
+     * commits its rows so this reads the just-persisted `commerce_seller_orders`
+     * children back (their own `uuid`/`seller_reference`, never re-derived).
+     * `$sellerRows` is the EXACT claim set {@see self::claimMarketplaceOwnership()}
+     * already claimed (sorted, ascending seller_uuid) earlier in THIS transaction --
+     * passed through as `claimed_sellers` so the publisher reuses those claims
+     * rather than re-claiming (design spec §2.4's shared-claim-helper rule). Checkout
+     * never claims a {@see \Glueful\Extensions\Commerce\Marketplace\LedgerAccountLock}
+     * at all, so there is no lock-order constraint on where in this method this call
+     * lands, unlike the payment/refund/payout capture sites.
+     *
+     * @param list<array<string,mixed>> $lines post-partition lines, each carrying its
+     *     own `seller_uuid` (design spec §2.7 attribution)
+     * @param array<string,array<string,mixed>> $sellerRows keyed by seller_uuid
+     */
+    private function captureOrderPlaced(
+        ApplicationContext $context,
+        string $tenant,
+        string $orderUuid,
+        string $orderNumber,
+        string $currency,
+        array $lines,
+        array $sellerRows
+    ): void {
+        if ($this->webhooks === null || $this->sellerOrders === null) {
+            return;
+        }
+
+        $sellerOrderRows = $this->sellerOrders->forOrder($context, $tenant, $orderUuid);
+        if ($sellerOrderRows === []) {
+            return;
+        }
+
+        $linesBySeller = [];
+        foreach ($lines as $line) {
+            $sellerUuid = (string) ($line['seller_uuid'] ?? '');
+            if ($sellerUuid === '') {
+                continue;
+            }
+            $linesBySeller[$sellerUuid][] = [
+                'sku' => (string) ($line['sku'] ?? ''),
+                'product_name' => (string) ($line['product_name'] ?? ''),
+                'quantity' => (int) ($line['quantity'] ?? 0),
+                'unit_price' => (int) ($line['unit_price'] ?? 0),
+            ];
+        }
+
+        $data = [];
+        foreach ($sellerOrderRows as $row) {
+            $sellerUuid = (string) $row['seller_uuid'];
+            $data[$sellerUuid] = [
+                'order_uuid' => $orderUuid,
+                'order_number' => $orderNumber,
+                'currency' => $currency,
+                'occurred_at' => (string) ($row['created_at'] ?? ''),
+                'seller_order_uuid' => (string) $row['uuid'],
+                'seller_reference' => (string) $row['seller_reference'],
+                'subtotal' => (int) $row['subtotal'],
+                'allocated_discount' => (int) $row['allocated_discount'],
+                'allocated_shipping' => (int) $row['allocated_shipping'],
+                'allocated_tax' => (int) $row['allocated_tax'],
+                'attributed_total' => (int) $row['attributed_total'],
+                'commission_amount' => (int) ($row['commission_amount'] ?? 0),
+                'lines' => $linesBySeller[$sellerUuid] ?? [],
+            ];
+        }
+
+        $this->webhooks->capture($context, $tenant, 'order.placed', [
+            'data' => $data,
+            'claimed_sellers' => array_keys($sellerRows),
+            'source_ref' => $orderUuid,
+        ]);
     }
 
     /** @param array<string,mixed> $order @return array<string,mixed> */

@@ -18,6 +18,7 @@ use Glueful\Extensions\Commerce\Invoices\SellerIdentityProvider;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerOrderFulfillmentService;
 use Glueful\Extensions\Commerce\Marketplace\SellerOrderRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerWebhookOutboxPublisher;
 use Glueful\Extensions\Commerce\Orders\OrderPaymentService;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
 use Glueful\Extensions\Commerce\Orders\OrderStateMachine;
@@ -44,6 +45,7 @@ final class AdminOrderController
         private ?SellerIdentityProvider $sellerIdentity = null,
         private ?SellerOrderRepository $sellerOrders = null,
         private ?SellerOrderFulfillmentService $fulfillment = null,
+        private ?SellerWebhookOutboxPublisher $webhooks = null,
     ) {
         $this->orders ??= app($context, OrderRepository::class);
         $this->stock ??= app($context, StockRepository::class);
@@ -141,6 +143,7 @@ final class AdminOrderController
                 // a non-partitioned order never touches commerce_seller_orders.
                 if ((bool) ($order['marketplace_partitioned'] ?? false)) {
                     $this->sellerOrders->cancelAllForOrder($this->context, $tenant, $uuid);
+                    $this->captureOrderCanceled($tenant, $uuid, 'operator');
                 }
             });
 
@@ -408,6 +411,56 @@ final class AdminOrderController
             'tracking_url' => $row['tracking_url'],
             'status' => (string) $row['status'],
         ];
+    }
+
+    /**
+     * `order.canceled` outbox capture (MV5c-2 Task 4, design spec §2.3/§2.4):
+     * shared by BOTH cancellation authorities the catalog attributes to this
+     * single event type -- this class's own `cancel()` (`$cancellationSource
+     * = 'operator'`) and {@see \Glueful\Extensions\Commerce\Orders\ExpiryService::expireStale()}'s
+     * own identically-shaped call (`'expired'`) -- called AFTER
+     * {@see SellerOrderRepository::cancelAllForOrder()} so the freshly-read
+     * rows already carry `status = 'canceled'`. Neither cancellation
+     * authority claims a seller revision nor a `LedgerAccountLock` anywhere
+     * else in its own transaction (order cancellation posts no ledger
+     * entries), so there is no lock-order constraint on this call's
+     * placement, unlike the payment/refund/payout capture sites.
+     */
+    private function captureOrderCanceled(string $tenant, string $orderUuid, string $cancellationSource): void
+    {
+        if ($this->webhooks === null || $this->sellerOrders === null) {
+            return;
+        }
+
+        $order = $this->orders->findByUuid($this->context, $tenant, $orderUuid);
+        if ($order === null) {
+            return;
+        }
+
+        $sellerOrderRows = $this->sellerOrders->forOrder($this->context, $tenant, $orderUuid);
+        if ($sellerOrderRows === []) {
+            return;
+        }
+
+        $data = [];
+        foreach ($sellerOrderRows as $row) {
+            $sellerUuid = (string) $row['seller_uuid'];
+            $data[$sellerUuid] = [
+                'order_uuid' => $orderUuid,
+                'order_number' => (string) ($order['order_number'] ?? ''),
+                'currency' => (string) $row['currency'],
+                'occurred_at' => (string) ($row['updated_at'] ?? $row['created_at'] ?? ''),
+                'seller_order_uuid' => (string) $row['uuid'],
+                'seller_reference' => (string) $row['seller_reference'],
+                'attributed_total' => (int) $row['attributed_total'],
+                'cancellation_source' => $cancellationSource,
+            ];
+        }
+
+        $this->webhooks->capture($this->context, $tenant, 'order.canceled', [
+            'data' => $data,
+            'source_ref' => $orderUuid,
+        ]);
     }
 
     private function releaseStock(string $tenant, string $orderUuid): void

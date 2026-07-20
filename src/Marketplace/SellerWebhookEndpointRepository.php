@@ -112,6 +112,31 @@ final class SellerWebhookEndpointRepository
     }
 
     /**
+     * The bounded, indexed subscription probe {@see SellerWebhookOutboxPublisher::capture()}
+     * runs per participating seller (design spec §2.4/§6): every currently
+     * `active` (never `disabled`/tombstoned -- the soft-delete auto-filter
+     * excludes a deleted row and this explicit `status` filter excludes a
+     * disabled one) endpoint for the seller, reusing the exact `(tenant_uuid,
+     * seller_uuid, status)` index {@see self::listForSeller()} does not
+     * itself need (it is unfiltered by status). ONE query regardless of the
+     * event catalog's size -- `subscribed_events` membership is checked by
+     * the CALLER in PHP against the already-decoded list this method
+     * returns, never a second per-event-type query.
+     *
+     * @return list<array<string,mixed>>
+     */
+    public function activeForSeller(ApplicationContext $context, string $tenant, string $sellerUuid): array
+    {
+        $rows = db($context)->table(self::ENDPOINTS_TABLE)
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('seller_uuid', '=', $sellerUuid)
+            ->where('status', '=', 'active')
+            ->get();
+
+        return array_map(fn (array $row): array => $this->decodeEndpoint($row), $rows);
+    }
+
+    /**
      * The claimable active-endpoint revision (design spec §2.2/§2.10 lock
      * order: `seller revision -> endpoint revision -> ...`) -- the SAME
      * affected-row-checked `UPDATE ... SET revision = revision + 1` idiom as
