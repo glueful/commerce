@@ -960,7 +960,8 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(VariantRepository::class),
             $container->get(ProductRepository::class),
             $container->get(SellerRepository::class),
-            $container->get(SellerWebhookOutboxPublisher::class)
+            $container->get(SellerWebhookOutboxPublisher::class),
+            $container->get(MarketplaceMode::class)
         );
     }
 

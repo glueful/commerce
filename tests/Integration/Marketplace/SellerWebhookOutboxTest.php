@@ -606,6 +606,36 @@ final class SellerWebhookOutboxTest extends CommerceTestCase
         self::assertSame([], QueryLoggingPdoStatement::$queries);
     }
 
+    public function testMasterOffDirectAdjustPaysNoWebhookPayloadReads(): void
+    {
+        // Off-invariance (design spec §6): with the marketplace master switch
+        // off, InventoryService::adjust() must behave byte-identically to a
+        // pre-MV1 install -- in particular it must NOT run the variant/product
+        // SELECTs that captureStockAdjusted() issues purely to build the
+        // stock.adjusted payload. Seed a real owned product+variant first (so
+        // those reads WOULD find a seller if the guard were missing), THEN
+        // adjust with the switch off.
+        $this->seedSeller('sellerAAAA01', 'Seller A');
+        $product = $this->seedProduct('stock-off', 2000, 'sellerAAAA01', 100);
+        $variantUuid = (string) $product['variants'][0]['uuid'];
+
+        $pdo = $this->connection->getPDO();
+        $pdo->setAttribute(\PDO::ATTR_STATEMENT_CLASS, [QueryLoggingPdoStatement::class]);
+        QueryLoggingPdoStatement::$queries = [];
+
+        // commerce.marketplace.enabled defaults to false -- no activateMarketplace() call.
+        $quantityAfter = $this->inventoryService()->adjust($this->context, $variantUuid, -5, 'shrinkage');
+        self::assertSame(95, $quantityAfter);
+
+        $payloadReads = array_values(array_filter(
+            QueryLoggingPdoStatement::$queries,
+            static fn (string $sql): bool => str_starts_with($sql, 'SELECT')
+                && (str_contains($sql, 'commerce_product_variants') || str_contains($sql, 'commerce_products'))
+        ));
+        self::assertSame([], $payloadReads, 'master-off adjust() must not run the webhook payload variant/product SELECTs');
+        self::assertSame(0, $this->connection->table('commerce_seller_webhook_events')->count());
+    }
+
     public function testActiveMarketplaceWithNoMatchingEndpointRunsExactlyOneEndpointProbeAndWritesNothing(): void
     {
         $this->activateMarketplace();

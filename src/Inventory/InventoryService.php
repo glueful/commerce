@@ -7,6 +7,7 @@ namespace Glueful\Extensions\Commerce\Inventory;
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Catalog\ProductRepository;
 use Glueful\Extensions\Commerce\Catalog\VariantRepository;
+use Glueful\Extensions\Commerce\Marketplace\MarketplaceMode;
 use Glueful\Extensions\Commerce\Marketplace\SellerRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerWebhookOutboxPublisher;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
@@ -39,10 +40,12 @@ final class InventoryService
         private ?ProductRepository $products = null,
         private ?SellerRepository $sellers = null,
         private ?SellerWebhookOutboxPublisher $webhooks = null,
+        private ?MarketplaceMode $marketplaceMode = null,
     ) {
         $this->variants ??= new VariantRepository();
         $this->products ??= new ProductRepository();
         $this->sellers ??= new SellerRepository();
+        $this->marketplaceMode ??= new MarketplaceMode();
     }
 
     /**
@@ -160,6 +163,16 @@ final class InventoryService
         ?string $reference
     ): void {
         if ($this->webhooks === null) {
+            return;
+        }
+
+        // Off-invariance (design spec §6): marketplace master-off is a
+        // config-only, zero-database-query no-op -- checked BEFORE the
+        // variant/product SELECTs this method runs purely to build the
+        // payload, so a non-marketplace install pays nothing per adjust().
+        // (The publisher's own capture() re-checks this, but only after we
+        // would have already issued those two reads -- hence the guard here.)
+        if (!$this->marketplaceMode->installEnabled($context)) {
             return;
         }
 
