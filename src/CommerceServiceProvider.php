@@ -13,6 +13,7 @@ use Glueful\Extensions\Commerce\Catalog\AddonRepository;
 use Glueful\Extensions\Commerce\Catalog\AddonService;
 use Glueful\Extensions\Commerce\Catalog\AttributeRepository;
 use Glueful\Extensions\Commerce\Catalog\AttributeService;
+use Glueful\Extensions\Commerce\Catalog\CatalogReader;
 use Glueful\Extensions\Commerce\Catalog\CatalogService;
 use Glueful\Extensions\Commerce\Catalog\CategoryRepository;
 use Glueful\Extensions\Commerce\Catalog\CategoryService;
@@ -22,6 +23,7 @@ use Glueful\Extensions\Commerce\Catalog\ProductChildrenRepository;
 use Glueful\Extensions\Commerce\Catalog\ProductMediaRepository;
 use Glueful\Extensions\Commerce\Catalog\ProductMediaService;
 use Glueful\Extensions\Commerce\Catalog\ProductRepository;
+use Glueful\Extensions\Commerce\Catalog\ProductRepositoryCatalogReader;
 use Glueful\Extensions\Commerce\Catalog\ReviewRepository;
 use Glueful\Extensions\Commerce\Catalog\ReviewService;
 use Glueful\Extensions\Commerce\Catalog\TagRepository;
@@ -163,6 +165,8 @@ use Glueful\Extensions\Commerce\Shipping\ShippingClassRepository;
 use Glueful\Extensions\Commerce\Shipping\ShippingClassService;
 use Glueful\Extensions\Commerce\Shipping\ShippingZoneRepository;
 use Glueful\Extensions\Commerce\Shipping\ShippingZoneService;
+use Glueful\Extensions\Commerce\Tenancy\CommerceTenantPurge;
+use Glueful\Extensions\Commerce\Tenancy\CommerceTenantResolution;
 use Glueful\Extensions\Commerce\Tenancy\FailClosedTenantResolver;
 use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
 use Glueful\Extensions\Commerce\Tenancy\TenantAdopter;
@@ -213,6 +217,11 @@ final class CommerceServiceProvider extends ServiceProvider
             ProductRepository::class => [
                 'class' => ProductRepository::class,
                 'shared' => true,
+            ],
+            CatalogReader::class => [
+                'class' => ProductRepositoryCatalogReader::class,
+                'shared' => true,
+                'autowire' => true,
             ],
             VariantRepository::class => [
                 'class' => VariantRepository::class,
@@ -381,6 +390,10 @@ final class CommerceServiceProvider extends ServiceProvider
             ],
             TenantAdopter::class => [
                 'class' => TenantAdopter::class,
+                'shared' => true,
+            ],
+            CommerceTenantPurge::class => [
+                'class' => CommerceTenantPurge::class,
                 'shared' => true,
             ],
             MarketplaceMode::class => [
@@ -1081,10 +1094,39 @@ final class CommerceServiceProvider extends ServiceProvider
         return $collector;
     }
 
+    /**
+     * A bound {@see CommerceTenantResolution} host seam always wins, regardless
+     * of `commerce.tenancy.enabled` -- checked first, before the sentinel/shared
+     * selection below. The adapter re-reads the seam on every `tenantUuid()`
+     * call (never captures/latches a value), so a host that mutates its
+     * resolution logic at runtime is reflected immediately. When the seam is
+     * NOT bound, the branches below are the original 1.2.x selection,
+     * unchanged, for byte-for-byte compatibility with existing installs.
+     */
     public static function makeTenantResolver(
         ContainerInterface $container,
         ApplicationContext $context
     ): CurrentTenantResolver {
+        if ($container->has(CommerceTenantResolution::class)) {
+            $seam = $container->get(CommerceTenantResolution::class);
+            if (!$seam instanceof CommerceTenantResolution) {
+                throw new \RuntimeException(
+                    'Configured CommerceTenantResolution seam does not implement CommerceTenantResolution.'
+                );
+            }
+
+            return new class ($seam) implements CurrentTenantResolver {
+                public function __construct(private readonly CommerceTenantResolution $seam)
+                {
+                }
+
+                public function tenantUuid(ApplicationContext $context): string
+                {
+                    return $this->seam->tenantUuid($context);
+                }
+            };
+        }
+
         if (!(bool) config($context, 'commerce.tenancy.enabled', false)) {
             return new SentinelTenantResolver();
         }

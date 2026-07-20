@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+**Theme: host-integration seams for Thallo's commerce adoption** — four additive
+seams a hosting app can plug into to run Commerce as an embedded slice: an
+optional tenant-resolution override, an after-commit product-lifecycle event,
+a read-only cross-domain catalog contract, and a tenant-purge service. No
+schema changes, no new env vars; every seam is inert (byte-identical 1.2.x
+behavior) unless a host explicitly binds into it.
+
+- Added `Glueful\Extensions\Commerce\Tenancy\CommerceTenantResolution`, an optional host-bound seam that `CommerceServiceProvider::makeTenantResolver()` checks first, ahead of the existing sentinel/shared-resolver selection. When bound it wins unconditionally (even over `commerce.tenancy.enabled=false`) and is re-read on every call rather than latched, so a host that changes its resolution logic at runtime is reflected immediately. When nothing is bound, resolution is byte-for-byte the existing 1.2.x behavior.
+- Added `Glueful\Extensions\Commerce\Events\ProductDeleted`, dispatched by `CatalogService::deleteProduct()` via `db($context)->afterCommit(...)` from inside the same transaction that performs the tombstone — exactly once per successful delete, never on an unknown/cross-tenant uuid, a repeat delete, a losing concurrent claim racer, or a rolled-back transaction. Dispatch is fault-isolated (ordinary `dispatch()`, not `dispatchOrFail()`) so a listener failure can never threaten an already-committed tombstone.
+- Added `Glueful\Extensions\Commerce\Catalog\CatalogReader`, a read-only, tenant-scoped, total (never-throws) contract for other domains to check a product's existence/tombstone state without depending on `ProductRepository`/`CatalogService` directly. Registered as a shared service backed by the new `ProductRepositoryCatalogReader` adapter.
+- Added `Glueful\Extensions\Commerce\Tenancy\CommerceTenantPurge`, a shared service that hard-deletes every commerce row for a tenant (`purgeTenant()`) and reports remaining rows per table as a verify step (`countTenantRows()`), iterating `DiagnosticsReport::tenantTables()` inside a single transaction — commerce keeps ownership of that table list, exactly like `TenantAdopter` mirrors it for adoption. Purging the sentinel tenant (`''`) is refused with an `\InvalidArgumentException`. As with adoption, this reaches only the tenant-scoped tables in `tenantTables()`; the schema declares no database-level foreign keys, so non-tenant-scoped child tables outside that list (e.g. `commerce_order_lines`, `commerce_cart_lines`, `commerce_order_events`) are not reached by this purge.
+
 ## [1.2.1] - 2026-07-20 — Marketplace Integrity Fixes
 
 Three marketplace hardening fixes on top of 1.2.0: a ledger-conservation guard on operator

@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Commerce\Catalog;
 
 use Glueful\Bootstrap\ApplicationContext;
+use Glueful\Events\EventService;
+use Glueful\Extensions\Commerce\Events\ProductDeleted;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
 use Glueful\Extensions\Commerce\Marketplace\CommissionPolicyService;
 use Glueful\Extensions\Commerce\Marketplace\CommissionPolicyResolver;
@@ -733,6 +735,17 @@ final class CatalogService
      * rename uniqueness checks deliberately use `findIncludingDeletedBySlug()`).
      * An unknown/cross-tenant product, a losing concurrent racer, and a repeat
      * delete all observe the same non-revealing 404. There is no restore.
+     *
+     * Commerce-Slice-1 Task 2: once `markDeleted()` succeeds, `ProductDeleted`
+     * is registered via `db($context)->afterCommit(...)` from INSIDE this same
+     * transaction -- mirroring {@see \Glueful\Extensions\Commerce\Orders\OrderPaymentService::markPaid()}'s
+     * `OrderPaid` convention -- so it fires exactly once, only after the
+     * successful OUTERMOST commit, even when this call participates in a
+     * caller-owned transaction (a savepoint here). Any of the three 404 paths
+     * above throws BEFORE this registration is reached, so an unknown/cross-
+     * tenant uuid, a repeat delete, and a losing claim racer all dispatch
+     * nothing; a caller-forced rollback of an outer transaction discards the
+     * promoted callback the same way (see `TransactionManager::rollback()`).
      */
     public function deleteProduct(ApplicationContext $context, string $uuid): void
     {
@@ -750,7 +763,27 @@ final class CatalogService
             if (!$this->products->markDeleted($context, $tenant, $uuid)) {
                 throw new NotFoundException('Resource not found.');
             }
+
+            db($context)->afterCommit(function () use ($context, $tenant, $uuid): void {
+                $this->dispatch($context, new ProductDeleted($tenant, $uuid));
+            });
         });
+    }
+
+    /**
+     * Fault-isolated event dispatch (design spec/house idiom, mirrored from
+     * {@see \Glueful\Extensions\Commerce\Orders\OrderPaymentService::dispatch()}):
+     * soft-resolves {@see EventService} and calls the ordinary `dispatch()` --
+     * NOT `dispatchOrFail()` -- so a listener failure never threatens the
+     * already-committed tombstone; reconciliation is the backstop, per the
+     * Task 2 brief.
+     */
+    private function dispatch(ApplicationContext $context, object $event): void
+    {
+        $container = container($context);
+        if ($container->has(EventService::class)) {
+            $container->get(EventService::class)->dispatch($event);
+        }
     }
 
     /**
