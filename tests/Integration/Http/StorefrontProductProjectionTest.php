@@ -41,6 +41,9 @@ final class StorefrontProductProjectionTest extends CommerceTestCase
         'tax_class',
         'updated_at',
         'deleted_at',
+        // Marketplace MV1 (design spec §2.9): no storefront exposure in MV1
+        // -- pinned here regardless of a product's actual attribution state.
+        'seller_uuid',
     ];
 
     private const VARIANT_INTERNAL_FIELDS = [

@@ -11,10 +11,14 @@ use Glueful\Extensions\Commerce\Events\OrderFulfilled;
 use Glueful\Extensions\Commerce\Events\OrderNoteAdded;
 use Glueful\Extensions\Commerce\Http\DTOs\CreateOrderNoteData;
 use Glueful\Extensions\Commerce\Http\DTOs\FulfillOrderData;
+use Glueful\Extensions\Commerce\Http\DTOs\FulfillSellerOrderData;
 use Glueful\Extensions\Commerce\Http\DTOs\OrderListQuery;
 use Glueful\Extensions\Commerce\Invoices\InvoiceData;
 use Glueful\Extensions\Commerce\Invoices\SellerIdentityProvider;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerOrderFulfillmentService;
+use Glueful\Extensions\Commerce\Marketplace\SellerOrderRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerWebhookOutboxPublisher;
 use Glueful\Extensions\Commerce\Orders\OrderPaymentService;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
 use Glueful\Extensions\Commerce\Orders\OrderStateMachine;
@@ -39,6 +43,9 @@ final class AdminOrderController
         private ?CurrentTenantResolver $tenants = null,
         private ?RefundRepository $refunds = null,
         private ?SellerIdentityProvider $sellerIdentity = null,
+        private ?SellerOrderRepository $sellerOrders = null,
+        private ?SellerOrderFulfillmentService $fulfillment = null,
+        private ?SellerWebhookOutboxPublisher $webhooks = null,
     ) {
         $this->orders ??= app($context, OrderRepository::class);
         $this->stock ??= app($context, StockRepository::class);
@@ -48,6 +55,19 @@ final class AdminOrderController
             : new SentinelTenantResolver();
         $this->refunds ??= app($context, RefundRepository::class);
         $this->sellerIdentity ??= app($context, SellerIdentityProvider::class);
+        // Plain `new`, not `app()`: SellerOrderRepository takes no collaborators of its
+        // own, so there is nothing a container resolves that a direct construction
+        // wouldn't -- and staying container-free here keeps every pre-existing
+        // AdminOrderController test call site (none of which pass this new, appended
+        // 8th argument) working unchanged, including ones that DO exercise a real
+        // marketplace_partitioned cancel() (e.g. PaymentConfirmationTest).
+        $this->sellerOrders ??= new SellerOrderRepository();
+        // Same reasoning as $sellerOrders immediately above -- reuses the
+        // already-resolved $this->orders/$this->sellerOrders collaborators
+        // rather than `app()`, so this appended 9th constructor argument
+        // never breaks a pre-existing positional-arg test call site either
+        // (design spec §2.8/§2.9, MV2 Task 9).
+        $this->fulfillment ??= new SellerOrderFulfillmentService($this->orders, $this->sellerOrders);
     }
 
     #[ApiOperation(summary: 'List orders', tags: ['Commerce Admin'])]
@@ -84,6 +104,19 @@ final class AdminOrderController
         $order['events'] = $this->orders->eventsForOrder($this->context, $tenant, $uuid);
         $order['lines'] = $this->linesProjection($tenant, $uuid);
 
+        // Marketplace MV2 operator breakdown (design spec §6.2): keyed off the
+        // ORDER's OWN marketplace_partitioned snapshot (§2.6), never current
+        // activation. `forOrder()` -- not the confirmed-scoped seller read --
+        // because the operator surface is full-visibility: an unconfirmed
+        // (not-yet-paid) child is included too, unlike the seller/customer
+        // surfaces' payment-confirmation gate (§2.12).
+        if ((bool) ($order['marketplace_partitioned'] ?? false)) {
+            $order['seller_orders'] = array_map(
+                fn (array $row): array => $this->sellerOrderProjection($row),
+                $this->sellerOrders->forOrder($this->context, $tenant, $uuid)
+            );
+        }
+
         return Response::success($order, 'Order retrieved');
     }
 
@@ -99,6 +132,19 @@ final class AdminOrderController
                 OrderStateMachine::assertTransition((string) $order['status'], 'canceled');
                 $this->releaseStock($tenant, $uuid);
                 $this->orders->transition($this->context, $tenant, $uuid, 'canceled');
+
+                // Marketplace MV2 whole-order cancellation fan-out (design spec §2.9):
+                // preserved from EITHER supported source state (pending_payment OR
+                // paid, both already gated by the assertTransition() above), in the
+                // SAME transaction as the parent CAS. Partial (single-seller) cancel
+                // is out of scope for MV2 -- every child of a partitioned order is
+                // always canceled together. Keys off the ORDER's OWN
+                // marketplace_partitioned snapshot, never current activation (§2.6);
+                // a non-partitioned order never touches commerce_seller_orders.
+                if ((bool) ($order['marketplace_partitioned'] ?? false)) {
+                    $this->sellerOrders->cancelAllForOrder($this->context, $tenant, $uuid);
+                    $this->captureOrderCanceled($tenant, $uuid, 'operator');
+                }
             });
 
             return Response::success($this->order($uuid), 'Order canceled');
@@ -128,6 +174,31 @@ final class AdminOrderController
     {
         try {
             $tenant = $this->tenants->tenantUuid($this->context);
+
+            // Marketplace MV2 (design spec §2.9): a partitioned order's parent
+            // fulfillment endpoint IS the operator fan-out. The "independent
+            // parent-only fulfillment write" below -- a direct transition that
+            // flips only the parent's own status/fulfillment_status while never
+            // touching a single seller order -- is unreachable here once
+            // partitioned; SellerOrderFulfillmentService::fanOutFulfill() claims
+            // the parent, fulfills every non-canceled child, and rolls the
+            // parent up itself (dispatching its own after-commit events, so no
+            // further transaction/dispatch happens on this branch). A premature
+            // attempt (order not yet `paid`) is rejected through the SAME
+            // OrderStateMachine CAS the rollup's own transition() call already
+            // routes through -- caught by the SAME `\DomainException` -> 409
+            // idiom below, no new guard required.
+            $order = $this->order($uuid);
+            if ((bool) ($order['marketplace_partitioned'] ?? false)) {
+                $this->fulfillment->fanOutFulfill($this->context, $tenant, $uuid, [
+                    'carrier' => null,
+                    'tracking_number' => $input->tracking_ref,
+                    'tracking_url' => null,
+                ], null);
+
+                return Response::success($this->order($uuid), 'Order fulfilled');
+            }
+
             db($this->context)->transaction(function () use ($tenant, $uuid, $input): void {
                 // Same unknown/cross-tenant 404 pre-check as cancel(): without it,
                 // transition()'s missing-order RuntimeException surfaces as a 500.
@@ -142,6 +213,42 @@ final class AdminOrderController
             $this->dispatch(new OrderFulfilled($fulfilled));
 
             return Response::success($fulfilled, 'Order fulfilled');
+        } catch (\DomainException $e) {
+            return Response::error($e->getMessage(), 409);
+        }
+    }
+
+    #[ApiOperation(summary: 'Fulfill a seller order', tags: ['Commerce Admin'])]
+    #[ApiResponse(200, description: 'Seller order fulfilled')]
+    #[ApiResponse(404, description: 'Order or seller order not found')]
+    #[ApiResponse(409, description: 'Seller order is canceled or already fulfilled')]
+    public function fulfillSellerOrder(
+        FulfillSellerOrderData $input,
+        Request $request,
+        string $uuid,
+        string $sellerOrderUuid
+    ): Response {
+        try {
+            $tenant = $this->tenants->tenantUuid($this->context);
+
+            // Operator seller-order fulfill (design spec §6.2): `$actorSellerUuid
+            // = null` -- an operator may fulfill ANY child, unlike the
+            // seller-facing SellerOrderController::fulfill() which pins the
+            // actor to the route {sellerUuid}.
+            $child = $this->fulfillment->fulfill(
+                $this->context,
+                $tenant,
+                $uuid,
+                $sellerOrderUuid,
+                [
+                    'carrier' => $input->carrier,
+                    'tracking_number' => $input->tracking_number,
+                    'tracking_url' => $input->tracking_url,
+                ],
+                null
+            );
+
+            return Response::success($this->sellerOrderProjection($child), 'Seller order fulfilled');
         } catch (\DomainException $e) {
             return Response::error($e->getMessage(), 409);
         }
@@ -249,6 +356,111 @@ final class AdminOrderController
                 'addons' => AddonSnapshot::sanitize(is_array($line['addons'] ?? null) ? $line['addons'] : []),
             ];
         }, $this->orders->linesForOrder($this->context, $tenant, $orderUuid));
+    }
+
+    /**
+     * Operator-trusted seller-order breakdown row (design spec §6.2), shared
+     * by `show()`'s `seller_orders[]` list and `fulfillSellerOrder()`'s own
+     * response. Unlike the seller-facing
+     * {@see \Glueful\Extensions\Commerce\Marketplace\SellerOrderService}'s
+     * projections, the operator surface is FULL-visibility -- `seller_uuid`
+     * is included (a seller already knows which seller it is; an operator
+     * needs to be told), as is every allocated money/fulfillment/status
+     * column. Still built field by field, never a raw row spread -- the
+     * internal `id`, `tenant_uuid`, `order_uuid` (redundant -- already the
+     * enclosing order), and `revision` (a pure concurrency-control internal)
+     * columns are excluded on principle, matching every other projection in
+     * this codebase.
+     *
+     * `commission_amount`/`net` (design spec §6.1, MV3 Task 11): the child's
+     * own immutable checkout-time commission snapshot sum (§2.4) and the
+     * operator-facing net figure derived from it (`attributed_total -
+     * commission_amount`) -- never re-resolved from current policy, exactly
+     * like the ledger's own `commission_reversal` math (§2.8) always derives
+     * from these SAME snapshots, never live policy.
+     *
+     * @param array<string,mixed> $row
+     * @return array<string,mixed>
+     */
+    private function sellerOrderProjection(array $row): array
+    {
+        $attributedTotal = (int) $row['attributed_total'];
+        $commissionAmount = (int) ($row['commission_amount'] ?? 0);
+
+        return [
+            'uuid' => (string) $row['uuid'],
+            'seller_uuid' => (string) $row['seller_uuid'],
+            'seller_name' => (string) $row['seller_name_snapshot'],
+            'partition_number' => (int) $row['partition_number'],
+            'seller_reference' => (string) $row['seller_reference'],
+            'currency' => (string) $row['currency'],
+            'allocated_subtotal' => (int) $row['subtotal'],
+            'allocated_discount' => (int) $row['allocated_discount'],
+            'allocated_shipping_discount' => (int) $row['allocated_shipping_discount'],
+            'allocated_shipping' => (int) $row['allocated_shipping'],
+            'allocated_tax' => (int) $row['allocated_tax'],
+            'attributed_total' => $attributedTotal,
+            'commission_amount' => $commissionAmount,
+            'net' => $attributedTotal - $commissionAmount,
+            'tax_attribution_method' => (string) $row['tax_attribution_method'],
+            'confirmed_at' => $row['confirmed_at'],
+            'fulfillment_status' => (string) $row['fulfillment_status'],
+            'fulfilled_at' => $row['fulfilled_at'],
+            'carrier' => $row['carrier'],
+            'tracking_number' => $row['tracking_number'],
+            'tracking_url' => $row['tracking_url'],
+            'status' => (string) $row['status'],
+        ];
+    }
+
+    /**
+     * `order.canceled` outbox capture (MV5c-2 Task 4, design spec §2.3/§2.4):
+     * shared by BOTH cancellation authorities the catalog attributes to this
+     * single event type -- this class's own `cancel()` (`$cancellationSource
+     * = 'operator'`) and {@see \Glueful\Extensions\Commerce\Orders\ExpiryService::expireStale()}'s
+     * own identically-shaped call (`'expired'`) -- called AFTER
+     * {@see SellerOrderRepository::cancelAllForOrder()} so the freshly-read
+     * rows already carry `status = 'canceled'`. Neither cancellation
+     * authority claims a seller revision nor a `LedgerAccountLock` anywhere
+     * else in its own transaction (order cancellation posts no ledger
+     * entries), so there is no lock-order constraint on this call's
+     * placement, unlike the payment/refund/payout capture sites.
+     */
+    private function captureOrderCanceled(string $tenant, string $orderUuid, string $cancellationSource): void
+    {
+        if ($this->webhooks === null || $this->sellerOrders === null) {
+            return;
+        }
+
+        $order = $this->orders->findByUuid($this->context, $tenant, $orderUuid);
+        if ($order === null) {
+            return;
+        }
+
+        $sellerOrderRows = $this->sellerOrders->forOrder($this->context, $tenant, $orderUuid);
+        if ($sellerOrderRows === []) {
+            return;
+        }
+
+        $data = [];
+        foreach ($sellerOrderRows as $row) {
+            $sellerUuid = (string) $row['seller_uuid'];
+            $data[$sellerUuid] = [
+                'order_uuid' => $orderUuid,
+                'order_number' => (string) ($order['order_number'] ?? ''),
+                'currency' => (string) $row['currency'],
+                'occurred_at' => (string) ($row['updated_at'] ?? $row['created_at'] ?? ''),
+                'seller_order_uuid' => (string) $row['uuid'],
+                'seller_reference' => (string) $row['seller_reference'],
+                'attributed_total' => (int) $row['attributed_total'],
+                'cancellation_source' => $cancellationSource,
+            ];
+        }
+
+        $this->webhooks->capture($this->context, $tenant, 'order.canceled', [
+            'data' => $data,
+            'source_ref' => $orderUuid,
+        ]);
     }
 
     private function releaseStock(string $tenant, string $orderUuid): void

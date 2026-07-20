@@ -50,8 +50,155 @@ final class HttpDocumentationTest extends CommerceTestCase
 
     public function testEveryRegisteredCommerceRouteActionDeclaresOpenApiOperationAndResponse(): void
     {
+        $this->assertEveryCommerceRouteActionIsDocumented($this->freshRouter());
+    }
+
+    /**
+     * Marketplace MV1 (plan Task 5), extended by MV2 (plan Task 10): with
+     * `commerce.marketplace.enabled` off (the default the test above
+     * walks), `routes.php` never registers the `/commerce/admin/marketplace/*`
+     * or `/commerce/seller/*` groups at all -- so the walk above cannot
+     * enforce `#[ApiOperation]`/`#[ApiResponse]` on any of their actions;
+     * there is nothing to find. This second pass flips the master switch ON
+     * before building a fresh `Router`, so every marketplace/seller route
+     * action -- MV1's AND MV2's, since every new seller-order/
+     * admin-seller-order route lives in the SAME `if ($marketplaceEnabled)`
+     * gate (`routes.php`) -- gets the SAME documentation-gate enforcement as
+     * every pre-existing route. `commerceRouteActions()`'s walk is fully
+     * generic (every `[class, method]` handler under the commerce HTTP
+     * namespace, no hand-maintained list), so it automatically picks up new
+     * MV2 actions with zero changes; the explicit path assertions below only
+     * pin that the NEW routes are genuinely present in this pass (never
+     * silently absent), not that they're individually documented.
+     *
+     * MV3 (plan Task 11, gated here by Task 12): the commission-policy /
+     * payout / adjustment / operator-financial / seller-financial routes all
+     * live in the SAME `if ($marketplaceEnabled)` groups (`routes.php`), so
+     * they too fall out of the fully generic walk with zero changes -- the
+     * additional `assertContains` pins below only prove they are genuinely
+     * present in this pass.
+     */
+    public function testEveryCommerceRouteActionIsDocumentedWithMarketplaceEnabled(): void
+    {
+        $this->context->overrideConfig('commerce.marketplace.enabled', true);
         $router = $this->freshRouter();
+
         $actions = $this->commerceRouteActions($router);
+        $paths = array_map(static fn (array $route): string => (string) $route['path'], $router->getAllRoutes());
+
+        self::assertContains('/commerce/admin/marketplace/sellers', $paths);
+        self::assertNotSame(
+            [],
+            array_filter($paths, static fn (string $path): bool => str_starts_with($path, '/commerce/seller')),
+            'Expected at least one seller-scoped route once the master switch is on.'
+        );
+
+        // MV2 Task 10: the new seller-order/admin-seller-order routes
+        // specifically (§6.1/§6.2) -- proves they're genuinely walked by
+        // this pass, not merely covered "in principle" by the generic scan.
+        self::assertContains('/commerce/admin/orders/{uuid}/seller-orders/{sellerOrderUuid}/fulfill', $paths);
+        self::assertContains('/commerce/seller/{sellerUuid}/orders', $paths);
+        self::assertContains('/commerce/seller/{sellerUuid}/orders/{sellerOrderUuid}', $paths);
+        self::assertContains('/commerce/seller/{sellerUuid}/orders/{sellerOrderUuid}/fulfill', $paths);
+
+        // MV3 Task 11/12: the settlement-ledger surfaces -- manual payouts,
+        // operator adjustments, operator financial summary/seller balance/
+        // seller report, and the seller's own financial surfaces (report,
+        // balance, payouts, effective commission policy).
+        self::assertContains('/commerce/admin/marketplace/payouts', $paths);
+        self::assertContains('/commerce/admin/marketplace/adjustments', $paths);
+        self::assertContains('/commerce/admin/marketplace/financials/summary', $paths);
+        self::assertContains('/commerce/admin/marketplace/sellers/{uuid}/balance', $paths);
+        self::assertContains('/commerce/admin/marketplace/sellers/{uuid}/report', $paths);
+        self::assertContains('/commerce/seller/{sellerUuid}/financials/report', $paths);
+        self::assertContains('/commerce/seller/{sellerUuid}/financials/balance', $paths);
+        self::assertContains('/commerce/seller/{sellerUuid}/payouts', $paths);
+        self::assertContains('/commerce/seller/{sellerUuid}/commission-policy', $paths);
+
+        // MV4 Task 11 (GATES): the provider-payout saga surfaces -- operator
+        // single-seller execute/retry, operator payout-account attach/sync, and the
+        // seller's own payout-account readiness read. Every one of these actions
+        // already flows through the fully generic walk below with zero changes
+        // (`commerceRouteActions()` collects every `[class, method]` handler under the
+        // commerce HTTP namespace, no hand-maintained list) -- these `assertContains`
+        // calls only pin that the NEW routes are genuinely present in this pass, so a
+        // future regression that accidentally drops one of them from `routes.php`
+        // fails loudly here rather than silently shrinking the walked set.
+        self::assertContains('/commerce/admin/marketplace/payouts/execute', $paths);
+        self::assertContains('/commerce/admin/marketplace/payouts/{uuid}/retry', $paths);
+        self::assertContains('/commerce/admin/marketplace/payouts/accounts', $paths);
+        self::assertContains('/commerce/admin/marketplace/payouts/accounts/sync', $paths);
+        self::assertContains('/commerce/seller/{sellerUuid}/payouts/accounts', $paths);
+
+        // MV5a Task 17 (GATES): the risk-reserve/chargeback/debt surfaces -- reserve
+        // policy (workspace + per-seller), chargeback ingestion + partial attribution,
+        // manual reserve hold/release, audited debt forgiveness, the operator read of
+        // any seller's reserves + debt, and the seller's own sanitized reserves read.
+        // Every one of these actions already flows through the fully generic walk
+        // below with zero changes -- these `assertContains` calls only pin that the
+        // NEW routes are genuinely present in this pass, so a future regression that
+        // accidentally drops one of them from `routes.php` fails loudly here rather
+        // than silently shrinking the walked set.
+        self::assertContains('/commerce/admin/marketplace/settings/reserves', $paths);
+        self::assertContains('/commerce/admin/marketplace/sellers/{uuid}/reserve-policy', $paths);
+        self::assertContains('/commerce/admin/marketplace/chargebacks', $paths);
+        self::assertContains('/commerce/admin/marketplace/chargebacks/{uuid}/attribution', $paths);
+        self::assertContains('/commerce/admin/marketplace/reserves/holds', $paths);
+        self::assertContains('/commerce/admin/marketplace/reserves/{uuid}/release', $paths);
+        self::assertContains('/commerce/admin/marketplace/sellers/{uuid}/debt/forgive', $paths);
+        self::assertContains('/commerce/admin/marketplace/sellers/{uuid}/reserves', $paths);
+        self::assertContains('/commerce/seller/{sellerUuid}/financials/reserves', $paths);
+
+        // MV5b Task 2/7 (GATES): the seller-lifecycle audit history read. Already
+        // flows through the fully generic walk below with zero changes -- this
+        // `assertContains` only pins that the route is genuinely present in this
+        // pass, so a future regression that drops it from `routes.php` fails
+        // loudly here rather than silently shrinking the walked set.
+        self::assertContains('/commerce/admin/marketplace/sellers/{uuid}/lifecycle', $paths);
+
+        // MV5c-1 Task 6/7 (GATES): the seller self-service API-key management
+        // surface -- create/list/rotate/revoke. Already flows through the fully
+        // generic walk below with zero changes (every action already carries
+        // `#[ApiOperation]`/`#[ApiResponse]`, see `SellerApiKeyController`) --
+        // these `assertContains` calls only pin that the four NEW routes are
+        // genuinely present in this pass, so a future regression that
+        // accidentally drops one of them from `routes.php` fails loudly here
+        // rather than silently shrinking the walked set.
+        self::assertContains('/commerce/seller/{sellerUuid}/api-keys', $paths);
+        self::assertContains('/commerce/seller/{sellerUuid}/api-keys/{lineageUuid}/rotate', $paths);
+        self::assertContains('/commerce/seller/{sellerUuid}/api-keys/{lineageUuid}/revoke', $paths);
+
+        // MV5c-2 Task 7/8 (GATES): the seller self-service outbound-webhook
+        // management surface -- register/list/update/rotate-secret/disable/
+        // enable/delete + delivery history + dead-letter replay. Already
+        // flows through the fully generic walk below with zero changes
+        // (every action already carries `#[ApiOperation]`/`#[ApiResponse]`,
+        // see `SellerWebhookController`) -- these `assertContains` calls only
+        // pin that the nine NEW routes are genuinely present in this pass,
+        // so a future regression that accidentally drops one of them from
+        // `routes.php` fails loudly here rather than silently shrinking the
+        // walked set.
+        self::assertContains('/commerce/seller/{sellerUuid}/webhooks', $paths);
+        self::assertContains('/commerce/seller/{sellerUuid}/webhooks/{uuid}', $paths);
+        self::assertContains('/commerce/seller/{sellerUuid}/webhooks/{uuid}/rotate-secret', $paths);
+        self::assertContains('/commerce/seller/{sellerUuid}/webhooks/{uuid}/disable', $paths);
+        self::assertContains('/commerce/seller/{sellerUuid}/webhooks/{uuid}/enable', $paths);
+        self::assertContains('/commerce/seller/{sellerUuid}/webhooks/{uuid}/deliveries', $paths);
+        self::assertContains(
+            '/commerce/seller/{sellerUuid}/webhooks/{uuid}/deliveries/{deliveryUuid}/replay',
+            $paths
+        );
+
+        $this->assertEveryCommerceRouteActionIsDocumented($router, $actions);
+    }
+
+    /**
+     * @param list<array{0: class-string, 1: string}>|null $actions pass a
+     *     pre-collected manifest to avoid walking the router twice
+     */
+    private function assertEveryCommerceRouteActionIsDocumented(Router $router, ?array $actions = null): void
+    {
+        $actions ??= $this->commerceRouteActions($router);
 
         self::assertNotSame(
             [],

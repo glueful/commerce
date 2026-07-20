@@ -9,6 +9,10 @@ use Glueful\Events\EventService;
 use Glueful\Extensions\Commerce\Events\RefundCompleted;
 use Glueful\Extensions\Commerce\Events\RefundFailed;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
+use Glueful\Extensions\Commerce\Marketplace\LedgerPostingService;
+use Glueful\Extensions\Commerce\Marketplace\MarketplaceRefundGuard;
+use Glueful\Extensions\Commerce\Marketplace\SellerRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerWebhookOutboxPublisher;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
 use Glueful\Extensions\Commerce\Orders\OrderStateMachine;
 use Glueful\Extensions\Contracts\Payments\PayableReference;
@@ -31,6 +35,14 @@ use Glueful\Http\Exceptions\Client\NotFoundException;
  * FINALIZE transaction (`finalize`) claims the order again, then atomically claims the
  * refund out of `pending` via `RefundRepository::claimPending()` — the idempotency point
  * where exactly one finalizer wins and losers get back the already-terminal row.
+ *
+ * `$marketplaceGuard` and `$ledgerPosting` are APPENDED OPTIONAL collaborators (design
+ * spec §2.8, MV3 Task 7) — the same idiom as {@see
+ * \Glueful\Extensions\Commerce\Orders\OrderPaymentService}'s `$sellerOrders`/
+ * `$ledgerPosting` pair: every pre-MV3 direct-construction call site (tests included)
+ * stays source-compatible. Together they let `validate()` tighten/auto-expand a
+ * `marketplace_partitioned` order's refund line attribution and `applyCompletion()` post
+ * the refund's settlement entries, without touching non-partitioned behavior at all.
  */
 final class RefundService
 {
@@ -40,6 +52,10 @@ final class RefundService
         private readonly StockRepository $stock,
         private readonly CurrentTenantResolver $tenants,
         private readonly ?RefundCollector $collector = null,
+        private readonly ?MarketplaceRefundGuard $marketplaceGuard = null,
+        private readonly ?LedgerPostingService $ledgerPosting = null,
+        private readonly ?SellerRepository $sellers = null,
+        private readonly ?SellerWebhookOutboxPublisher $webhooks = null,
     ) {
     }
 
@@ -424,6 +440,17 @@ final class RefundService
 
         $lines = $this->validateLines($c, $tenant, $orderUuid, $input, $amount);
 
+        // Design spec §2.8 (MV3 Task 7): marketplace-aware line-attribution tightening/
+        // auto-expansion for a marketplace_partitioned order, layered ON TOP of the
+        // validateLines() shape validation above — never replacing it. Reads the order's
+        // OWN marketplace_partitioned snapshot, never current activeFor(), so a
+        // non-partitioned refund (or one with no guard wired) never reaches the guard at
+        // all — zero marketplace queries, byte-identical behavior.
+        $partitioned = (bool) ($order['marketplace_partitioned'] ?? false);
+        if ($partitioned && $this->marketplaceGuard !== null) {
+            $lines = $this->marketplaceGuard->validateAndNormalize($c, $tenant, $order, $amount, $lines);
+        }
+
         return [$order, $amount, $lines];
     }
 
@@ -582,6 +609,29 @@ SQL,
             throw new ConcurrentRefundException('Order totals changed concurrently.');
         }
 
+        // Design spec §2.8 (MV3 Task 7): posted INSIDE this same transaction, immediately
+        // after the CAS above — a marketplace_partitioned order with the ledger
+        // collaborator wired posts refund_debit/commission_reversal (per seller) plus any
+        // marketplace-funded remainder before anything else in this method runs. $lines is
+        // already the persisted refund_lines set for both callers (the manual path's
+        // freshly-inserted rows, the gateway finalize path's freshly-read linesFor()), so
+        // this never re-derives attribution. Any LedgerException (or any other throw) rolls
+        // the CAS, the refund row itself (manual path), and every posting back together.
+        // MV5c-2 Task 4 (design spec §2.4/§4 lock order): capture `refund.completed`
+        // BEFORE postRefund() below claims any LedgerAccountLock -- this class never
+        // claims a seller revision anywhere else, so this call's own claim (inside
+        // capture(), sorted, ascending seller_uuid) MUST land before postRefund()'s
+        // per-seller (+ marketplace) account-lock claims to preserve the "revision
+        // before account lock" global order.
+        $partitioned = (bool) ($order['marketplace_partitioned'] ?? false);
+        if ($partitioned) {
+            $this->captureRefundCompleted($c, $tenant, $order, $refund, $lines);
+        }
+
+        if ($partitioned && $this->ledgerPosting !== null) {
+            $this->ledgerPosting->postRefund($c, $tenant, $order, $refund, $lines);
+        }
+
         if ($newTotal === $grandTotal) {
             OrderStateMachine::assertTransition((string) $order['status'], 'refunded');
             $this->orders->transition($c, $tenant, $orderUuid, 'refunded');
@@ -615,6 +665,87 @@ SQL,
                 $this->dispatch($c, new RefundCompleted($orderFresh, $refundFresh));
             });
         }
+    }
+
+    /**
+     * `refund.completed` outbox capture (MV5c-2 Task 4, design spec §2.3/§2.4).
+     * Fans out to every seller who OWNS at least one of this refund's persisted
+     * lines (resolved via `commerce_order_lines.seller_uuid` -- the SAME
+     * per-line attribution {@see \Glueful\Extensions\Commerce\Marketplace\LedgerPostingService::postRefund()}
+     * itself joins against), attributing to each seller ONLY the sum of ITS OWN
+     * lines' refund amounts -- never the refund's whole grand amount, never
+     * another seller's lines, never the internal `delta_R`/commission-reversal
+     * ledger math. See `applyCompletion()`'s own call-site docblock for why
+     * this MUST run before `postRefund()`.
+     *
+     * @param array<string,mixed> $order
+     * @param array<string,mixed> $refund
+     * @param list<array{order_line_uuid:string,quantity:int,amount:int}> $lines
+     */
+    private function captureRefundCompleted(
+        ApplicationContext $c,
+        string $tenant,
+        array $order,
+        array $refund,
+        array $lines
+    ): void {
+        if ($this->webhooks === null || $this->sellers === null || $lines === []) {
+            return;
+        }
+
+        $lineUuids = array_values(array_unique(array_column($lines, 'order_line_uuid')));
+        $orderLines = db($c)->table('commerce_order_lines')
+            ->where('order_uuid', '=', (string) $order['uuid'])
+            ->whereIn('uuid', $lineUuids)
+            ->get();
+
+        $sellerByLine = [];
+        foreach ($orderLines as $orderLine) {
+            $sellerUuid = $orderLine['seller_uuid'] ?? null;
+            if ($sellerUuid !== null && $sellerUuid !== '') {
+                $sellerByLine[(string) $orderLine['uuid']] = (string) $sellerUuid;
+            }
+        }
+
+        $occurredAt = (string) ($refund['completed_at'] ?? db($c)->getDriver()->formatDateTime());
+        $reason = $refund['reason'] ?? null;
+
+        $data = [];
+        foreach ($lines as $line) {
+            $lineUuid = (string) $line['order_line_uuid'];
+            $sellerUuid = $sellerByLine[$lineUuid] ?? null;
+            if ($sellerUuid === null) {
+                continue;
+            }
+
+            if (!isset($data[$sellerUuid])) {
+                $data[$sellerUuid] = [
+                    'order_uuid' => (string) $order['uuid'],
+                    'refund_uuid' => (string) $refund['uuid'],
+                    'currency' => (string) $refund['currency'],
+                    'occurred_at' => $occurredAt,
+                    'reason' => $reason,
+                    'amount' => 0,
+                    'lines' => [],
+                ];
+            }
+
+            $data[$sellerUuid]['amount'] += (int) $line['amount'];
+            $data[$sellerUuid]['lines'][] = [
+                'order_line_uuid' => $lineUuid,
+                'quantity' => (int) $line['quantity'],
+                'amount' => (int) $line['amount'],
+            ];
+        }
+
+        if ($data === []) {
+            return;
+        }
+
+        $this->webhooks->capture($c, $tenant, 'refund.completed', [
+            'data' => $data,
+            'source_ref' => (string) $refund['uuid'],
+        ]);
     }
 
     /**

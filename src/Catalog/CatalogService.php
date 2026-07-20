@@ -6,6 +6,12 @@ namespace Glueful\Extensions\Commerce\Catalog;
 
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
+use Glueful\Extensions\Commerce\Marketplace\CommissionPolicyService;
+use Glueful\Extensions\Commerce\Marketplace\CommissionPolicyResolver;
+use Glueful\Extensions\Commerce\Marketplace\MarketplaceMode;
+use Glueful\Extensions\Commerce\Marketplace\MarketplaceWorkspaceLock;
+use Glueful\Extensions\Commerce\Marketplace\SellerAttributionException;
+use Glueful\Extensions\Commerce\Marketplace\SellerRepository;
 use Glueful\Extensions\Commerce\Shipping\ShippingClassRepository;
 use Glueful\Extensions\Commerce\Support\Money;
 use Glueful\Extensions\Commerce\Support\OpenVocabularySlug;
@@ -46,6 +52,16 @@ use Glueful\Validation\ValidationException;
  * type and each proposed child's fresh type/tenant — a proposed child that failed
  * to claim, or whose fresh type is not physical/digital, is a 422 on the field,
  * never a crash or a stale-state attach.
+ *
+ * **Marketplace attribution policy (design spec §2.2/§2.7, MV1 Task 3).**
+ * `$marketplaceMode`/`$workspaceLock`/`$sellers` are APPENDED OPTIONAL
+ * collaborators so every pre-MV1 direct-construction call site (tests
+ * included) stays source-compatible. They are wired together by
+ * `CommerceServiceProvider` in production; the null default exists ONLY for
+ * legacy direct construction. Whenever ANY of the three is null,
+ * {@see self::createProduct()} behaves EXACTLY as master-off, regardless of
+ * config -- there is no partial/degraded marketplace mode. See
+ * {@see self::createProduct()} for the full policy.
  */
 final class CatalogService
 {
@@ -58,6 +74,10 @@ final class CatalogService
         private ?StockRepository $stock = null,
         private ?ProductChildrenRepository $children = null,
         private ?ShippingClassRepository $shippingClasses = null,
+        private ?MarketplaceMode $marketplaceMode = null,
+        private ?MarketplaceWorkspaceLock $workspaceLock = null,
+        private ?SellerRepository $sellers = null,
+        private ?CommissionPolicyService $commissionPolicy = null,
     ) {
         $this->stock ??= new StockRepository();
         $this->children ??= new ProductChildrenRepository();
@@ -65,12 +85,43 @@ final class CatalogService
     }
 
     /**
+     * MASTER-OFF FAST PATH (design spec §2.2/§4): `installEnabled()` --
+     * config only, zero database reads -- is checked FIRST, before any other
+     * work. OFF (or any marketplace collaborator missing): $sellerUuid MUST
+     * be null (422 otherwise) and the pre-MV1 path runs with ZERO
+     * marketplace-table queries -- byte-identical to a pre-MV1 install.
+     *
+     * ON: the SAME transaction that inserts the product FIRST claims
+     * {@see MarketplaceWorkspaceLock} (design spec §4 lock order --
+     * "workspace-settings claim first"), THEN reads `activeFor()`. An ACTIVE
+     * workspace REQUIRES $sellerUuid (422 when null); an INACTIVE workspace
+     * REQUIRES it be null (422 otherwise -- operators use the dedicated
+     * {@see \Glueful\Extensions\Commerce\Marketplace\SellerAttributionService}
+     * adoption operation instead). An attributed create claims the target
+     * seller and validates it exists, is in-tenant, and is `active` (422 for
+     * unknown/cross-tenant, {@see SellerAttributionException} / 409 for
+     * suspended/closed) BEFORE the product insert. Workspace claim, seller
+     * claim, and product insert all participate in ONE transaction -- see
+     * {@see self::resolveCreateAttribution()}.
+     *
      * @param array<string,mixed> $input
      * @return array<string,mixed>
      */
-    public function createProduct(ApplicationContext $context, array $input): array
+    public function createProduct(ApplicationContext $context, array $input, ?string $sellerUuid = null): array
     {
         $tenant = $this->tenants->tenantUuid($context);
+        $installEnabled = $this->marketplaceMode !== null
+            && $this->workspaceLock !== null
+            && $this->sellers !== null
+            && $this->marketplaceMode->installEnabled($context);
+
+        if (!$installEnabled && $sellerUuid !== null) {
+            throw ValidationException::forField(
+                'seller_uuid',
+                'seller_uuid cannot be set: marketplace mode is not installed.'
+            );
+        }
+
         $storeCurrency = $this->storeCurrency($context);
 
         // Type is decided and validated BEFORE variants: it governs whether
@@ -110,8 +161,14 @@ final class CatalogService
                 $taxClass,
                 $variants,
                 $storeCurrency,
+                $installEnabled,
+                $sellerUuid,
                 &$created
             ): void {
+                $resolvedSellerUuid = $installEnabled
+                    ? $this->resolveCreateAttribution($context, $tenant, $sellerUuid)
+                    : null;
+
                 $this->products->insert($context, [
                     'uuid' => $productUuid,
                     'tenant_uuid' => $tenant,
@@ -123,6 +180,7 @@ final class CatalogService
                     'options' => $input['options'] ?? null,
                     'metadata' => $input['metadata'] ?? null,
                     'tax_class' => $taxClass,
+                    'seller_uuid' => $resolvedSellerUuid,
                 ]);
 
                 $this->claimAndInsertCreatedVariants(
@@ -149,6 +207,82 @@ final class CatalogService
         );
 
         return $product;
+    }
+
+    /**
+     * The marketplace attribution decision for a create (design spec §2.2/
+     * §4 lock order), reached ONLY when the install master switch is on --
+     * see {@see self::createProduct()}. MUST run as the FIRST statement
+     * inside the SAME transaction as the product insert: claiming
+     * {@see MarketplaceWorkspaceLock} BEFORE reading `activeFor()` is what
+     * makes activation-vs-create deterministic (a create commits first and
+     * is seen by activation, or activation commits first and this create
+     * must supply attribution -- design spec §2.2).
+     *
+     * ACTIVE requires $sellerUuid (422 when null, "operators use the
+     * dedicated adoption operation" for an INACTIVE workspace instead);
+     * INACTIVE requires it be null (422 otherwise).
+     */
+    private function resolveCreateAttribution(
+        ApplicationContext $context,
+        string $tenant,
+        ?string $sellerUuid
+    ): ?string {
+        $this->workspaceLock->claim($context, $tenant);
+
+        if ($this->marketplaceMode->activeFor($context, $tenant)) {
+            if ($sellerUuid === null) {
+                throw ValidationException::forField(
+                    'seller_uuid',
+                    'seller_uuid is required: this workspace has activated marketplace mode.'
+                );
+            }
+
+            return $this->claimAndValidateAttributionSeller($context, $tenant, $sellerUuid);
+        }
+
+        if ($sellerUuid !== null) {
+            throw ValidationException::forField(
+                'seller_uuid',
+                'seller_uuid cannot be set while marketplace mode is inactive; '
+                    . 'use the seller adoption operation instead.'
+            );
+        }
+
+        return null;
+    }
+
+    /**
+     * Claims and validates the target seller for an attributed create
+     * (design spec §2.7/§4 lock order): an unknown or cross-tenant
+     * seller_uuid is a 422 {@see ValidationException} (the same
+     * "referenced resource" classification {@see self::claimShippingClassesForCreate()}
+     * uses); a `suspended`/`closed` seller is a 409 {@see SellerAttributionException}.
+     * MUST run after {@see MarketplaceWorkspaceLock::claim()} and before the
+     * product insert, in the SAME transaction (design spec §4 lock order).
+     */
+    private function claimAndValidateAttributionSeller(
+        ApplicationContext $context,
+        string $tenant,
+        string $sellerUuid
+    ): string {
+        $this->sellers->claimRevision($context, $tenant, $sellerUuid);
+
+        $seller = $this->sellers->findByUuid($context, $tenant, $sellerUuid);
+        if ($seller === null) {
+            throw ValidationException::forField(
+                'seller_uuid',
+                'seller_uuid must reference an existing seller in this tenant.'
+            );
+        }
+
+        if ((string) $seller['status'] !== 'active') {
+            throw new SellerAttributionException(
+                "Seller is '{$seller['status']}'; products cannot be attributed to it."
+            );
+        }
+
+        return $sellerUuid;
     }
 
     /**
@@ -274,13 +408,198 @@ final class CatalogService
      * ordinary metadata edits from racing product deletion as well as serializing
      * status and type changes against the same row claim used by bulk operations.
      *
+     * Ordinary update NEVER touches `seller_uuid` (design spec §2.7): a
+     * `seller_uuid` key present ANYWHERE in $changes is rejected with 422 at
+     * THIS layer -- the backstop for any caller that reaches here with the
+     * key still set, mirroring
+     * {@see \Glueful\Extensions\Commerce\Marketplace\SellerService::update()}'s
+     * `slug`-immutability guard. This check runs before any claim/query, so
+     * it costs nothing extra on the master-off fast path. Both HTTP entry
+     * points ({@see \Glueful\Extensions\Commerce\Http\Admin\AdminProductController::update()}
+     * and {@see \Glueful\Extensions\Commerce\Http\Seller\SellerCatalogController::update()})
+     * silently drop a body-supplied `seller_uuid` BEFORE calling this method
+     * -- a full-object read-modify-write PATCH (GET echoing the column back
+     * unchanged) must round-trip cleanly, not 422 -- so this guard is only
+     * ever tripped by a caller that bypasses both controllers. Attribution is
+     * reached only via the create policy or the dedicated
+     * {@see \Glueful\Extensions\Commerce\Marketplace\SellerAttributionService}
+     * adoption/transfer operation.
+     *
+     * Commission policy (design spec §2.3, MV3 Task 4): $changes touching ANY
+     * of {@see CommissionPolicyResolver::FIELDS} is routed through the
+     * injected {@see CommissionPolicyService} (validated, applied, AND
+     * audited in its own transaction) BEFORE the remaining, non-commission
+     * fields (if any) run through the ordinary guarded patch below. Operator
+     * only -- there is no `$sellerUuid` parameter here at all, so this path
+     * is reached exclusively by the platform admin product-update surface;
+     * {@see self::updateSellerProduct()} rejects commission fields outright
+     * before ever delegating here.
+     *
      * @param array<string,mixed> $changes
      */
-    public function updateProduct(ApplicationContext $context, string $productUuid, array $changes): void
-    {
+    public function updateProduct(
+        ApplicationContext $context,
+        string $productUuid,
+        array $changes,
+        ?string $actorUuid = null
+    ): void {
+        if (array_key_exists('seller_uuid', $changes)) {
+            throw ValidationException::forField(
+                'seller_uuid',
+                'seller_uuid cannot be changed via update; use the marketplace adoption/transfer operation instead.'
+            );
+        }
+
         $tenant = $this->tenants->tenantUuid($context);
 
-        $this->applyGuardedProductPatch($context, $tenant, $productUuid, $changes);
+        $commission = CommissionPolicyResolver::extractFromChanges($changes);
+        if ($commission !== null) {
+            if ($this->commissionPolicy === null) {
+                throw ValidationException::forField(
+                    'commission_kind',
+                    'Commission policy management is not available.'
+                );
+            }
+            $this->commissionPolicy->setProduct($context, $tenant, $productUuid, $commission, $actorUuid);
+        }
+
+        $remaining = CommissionPolicyResolver::withoutFields($changes);
+        if ($commission === null || $remaining !== []) {
+            $this->applyGuardedProductPatch($context, $tenant, $productUuid, $remaining);
+        }
+    }
+
+    /**
+     * Seller-scoped product read (design spec §2.8, MV1 Task 4): tenant AND
+     * seller are both part of the read predicate at the SERVICE layer -- a
+     * live product that belongs to a DIFFERENT seller is the exact same
+     * non-revealing 404 {@see NotFoundException} as a product that doesn't
+     * exist at all, never a distinguishable "wrong seller" response.
+     *
+     * @return array<string,mixed>
+     */
+    public function sellerProduct(ApplicationContext $context, string $sellerUuid, string $productUuid): array
+    {
+        $tenant = $this->tenants->tenantUuid($context);
+        $product = $this->requireSellerOwnedProduct($context, $tenant, $sellerUuid, $productUuid);
+
+        $product['variants'] = $this->shippingClasses->attachResolvedSlugs(
+            $context,
+            $tenant,
+            $this->variants->forProduct($context, $tenant, $productUuid)
+        );
+
+        return $product;
+    }
+
+    /**
+     * Seller-scoped product listing (design spec §2.8, MV1 Task 4): the
+     * `seller_uuid` predicate is baked into {@see ProductRepository::paginatedForSeller()}'s
+     * count and row queries -- a seller can never see another seller's
+     * products through this read, regardless of filters.
+     *
+     * @param array<string,mixed> $filters 'status'/'type' (exact) and/or 'q' (literal substring on name)
+     * @return array{items: list<array<string,mixed>>, total: int}
+     */
+    public function listSellerProducts(
+        ApplicationContext $context,
+        string $sellerUuid,
+        array $filters,
+        int $page,
+        int $perPage
+    ): array {
+        $tenant = $this->tenants->tenantUuid($context);
+
+        return $this->products->paginatedForSeller($context, $tenant, $sellerUuid, $filters, $page, $perPage);
+    }
+
+    /**
+     * Seller-scoped product update (design spec §2.8, MV1 Task 4): confirms
+     * $productUuid is LIVE and owned by $sellerUuid at the SERVICE layer
+     * BEFORE delegating to {@see self::updateProduct()}'s existing guarded
+     * patch (which already rejects any `seller_uuid` key present anywhere in
+     * $changes). A wrong-seller product uuid is the same non-revealing 404
+     * as an unknown one -- never a 403 that would confirm the product exists
+     * under a different seller.
+     *
+     * Commission-field rejection backstop (design spec §2.3, MV3 Task 4):
+     * sellers can NEVER set their own commission policy. `SellerCatalogController::update()`
+     * already inspects the raw request body and rejects a commission field
+     * with a field-specific 422 before it ever reaches this method -- this
+     * is the service-level backstop for any caller that bypasses that
+     * controller, checked BEFORE the ownership claim so it costs nothing
+     * extra on the ordinary (no commission field) path.
+     *
+     * @param array<string,mixed> $changes
+     */
+    public function updateSellerProduct(
+        ApplicationContext $context,
+        string $sellerUuid,
+        string $productUuid,
+        array $changes
+    ): void {
+        $this->rejectCommissionFields($changes);
+
+        $tenant = $this->tenants->tenantUuid($context);
+        $this->requireSellerOwnedProduct($context, $tenant, $sellerUuid, $productUuid);
+
+        $this->updateProduct($context, $productUuid, $changes);
+    }
+
+    /**
+     * @param array<string,mixed> $changes
+     */
+    private function rejectCommissionFields(array $changes): void
+    {
+        foreach (CommissionPolicyResolver::FIELDS as $field) {
+            if (array_key_exists($field, $changes)) {
+                throw ValidationException::forField(
+                    $field,
+                    'Sellers cannot set commission policy; only platform operators may change it.'
+                );
+            }
+        }
+    }
+
+    /**
+     * Seller-scoped variant create (design spec §2.8, MV1 Task 4): the
+     * variant is reached ONLY through its parent product's seller-scoped
+     * ownership check -- there is no standalone seller-scoped variant route.
+     *
+     * @param array<string,mixed> $input
+     * @return array<string,mixed>
+     */
+    public function createSellerVariant(
+        ApplicationContext $context,
+        string $sellerUuid,
+        string $productUuid,
+        array $input
+    ): array {
+        $tenant = $this->tenants->tenantUuid($context);
+        $this->requireSellerOwnedProduct($context, $tenant, $sellerUuid, $productUuid);
+
+        return $this->createVariant($context, $productUuid, $input);
+    }
+
+    /**
+     * The shared seller-ownership read {@see self::sellerProduct()},
+     * {@see self::updateSellerProduct()}, and {@see self::createSellerVariant()}
+     * all funnel through: live + tenant + seller in one predicate.
+     *
+     * @return array<string,mixed>
+     */
+    private function requireSellerOwnedProduct(
+        ApplicationContext $context,
+        string $tenant,
+        string $sellerUuid,
+        string $productUuid
+    ): array {
+        $product = $this->products->findLiveByUuid($context, $tenant, $productUuid);
+        if ($product === null || (string) ($product['seller_uuid'] ?? '') !== $sellerUuid) {
+            throw new NotFoundException('Resource not found.');
+        }
+
+        return $product;
     }
 
     /**

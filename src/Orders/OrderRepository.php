@@ -6,6 +6,7 @@ namespace Glueful\Extensions\Commerce\Orders;
 
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Helpers\Utils;
+use Glueful\Http\Exceptions\Client\NotFoundException;
 
 final class OrderRepository
 {
@@ -135,6 +136,40 @@ SQL,
     }
 
     /**
+     * Affected-row-checked serialization primitive for the parent side of the
+     * fulfillment rollup (design spec §2.8): claimed FIRST, before touching
+     * any `commerce_seller_orders` child, by BOTH
+     * {@see \Glueful\Extensions\Commerce\Marketplace\SellerOrderFulfillmentService::fulfill()}
+     * and its `fanOutFulfill()` sibling -- concurrent child fulfillments
+     * therefore serialize on this same row, so every rollup is computed on
+     * committed state. Independent from `refund_revision`
+     * ({@see claimOrderFinancialMutation()}) -- a disjoint concern (design
+     * spec §4). Unlike that sibling, this THROWS rather than returning a
+     * bool: every caller in the fulfillment chain treats an unknown or
+     * cross-tenant order identically (a non-revealing 404), so there is no
+     * caller that needs to distinguish/handle a false return.
+     */
+    public function claimFulfillmentMutation(ApplicationContext $context, string $tenant, string $uuid): void
+    {
+        $affected = db($context)->table('commerce_orders')->executeModification(
+            <<<'SQL'
+UPDATE commerce_orders
+SET fulfillment_revision = fulfillment_revision + 1, updated_at = ?
+WHERE tenant_uuid = ? AND uuid = ?
+SQL,
+            [
+                db($context)->getDriver()->formatDateTime(),
+                $tenant,
+                $uuid,
+            ]
+        );
+
+        if ($affected !== 1) {
+            throw new NotFoundException('Resource not found.');
+        }
+    }
+
+    /**
      * Guarded stamp of `user_uuid` onto a guest order (design spec §7, guest
      * linking, `commerce:customers:link-guests`): only when the order is
      * CURRENTLY unlinked, so a concurrent link/checkout race can't silently
@@ -188,6 +223,49 @@ SQL,
         }
 
         $this->recordEvent($context, $uuid, 'status:' . $to);
+    }
+
+    /**
+     * The §2.8 rollup write: applies a freshly computed parent
+     * `fulfillment_status` to `commerce_orders`. When the rollup reaches
+     * `fulfilled` this routes through the existing state-CAS
+     * ({@see transition()}), so the parent order's own `status` flips
+     * `paid -> fulfilled` guarded exactly like every other lifecycle
+     * transition; for `unfulfilled`/`partial` it is a plain scoped UPDATE of
+     * the `fulfillment_status` column alone -- that column sits outside
+     * {@see OrderStateMachine} (design spec §2.8), so no CAS is needed here,
+     * only the caller's own prior `claimFulfillmentMutation()` already
+     * serializes concurrent writers.
+     *
+     * @return bool true iff this call transitioned the parent order's own
+     *     `status` to `fulfilled` (the caller's signal to dispatch
+     *     `OrderFulfilled` exactly once).
+     */
+    public function applyFulfillmentRollup(
+        ApplicationContext $context,
+        string $tenant,
+        string $uuid,
+        string $parentStatus
+    ): bool {
+        FulfillmentStatus::assertParent($parentStatus);
+
+        if ($parentStatus === FulfillmentStatus::PARENT_FULFILLED) {
+            $this->transition($context, $tenant, $uuid, 'fulfilled', [
+                'fulfillment_status' => $parentStatus,
+            ]);
+
+            return true;
+        }
+
+        db($context)->table('commerce_orders')
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('uuid', '=', $uuid)
+            ->update([
+                'fulfillment_status' => $parentStatus,
+                'updated_at' => db($context)->getDriver()->formatDateTime(),
+            ]);
+
+        return false;
     }
 
     /** @param array<string,mixed> $payload */
@@ -266,6 +344,28 @@ SQL,
      * finds; NULL means "not applicable", `[]` means "digital, no active
      * downloads at checkout time" (design spec §2). Never re-derived here.
      *
+     * Marketplace attribution (design spec §2.11/§3.1, MV2): the order line's
+     * OWN `uuid` persists the incoming cart-line `line_uuid` when present
+     * (`CartService::pricedLines()` stamps it, and it threads unmodified
+     * through `CheckoutService::placeOrder()`) rather than minting a fresh
+     * one — so the `taxByLine`/discount-allocation maps built against that
+     * same `line_uuid` address the real, immutable order line. `seller_uuid`
+     * (immutable seller snapshot), `discount_amount` (allocated value-discount
+     * share), and `tax_amount` (per-line merchandise tax, `line_detailed`
+     * only) are additive keys `CheckoutService`'s partition branch attaches
+     * to each line before calling `insert()`; a non-partitioned checkout
+     * never sets them, so they default to null/0 exactly as the schema does.
+     *
+     * Marketplace commission snapshot (design spec §2.4, MV3): `commission_source`
+     * is the provenance signal -- ONLY `CheckoutService`'s commission-resolution
+     * step (partitioned checkout only) ever sets it, so its presence (not the
+     * mere presence of `commission_kind`/`commission_bps`/`commission_fixed`,
+     * which `CartService::pricedLines()` ALSO populates from the product's raw,
+     * unresolved override on every line, partitioned or not) is what gates
+     * persisting the other five commission columns here. A non-partitioned
+     * checkout therefore always writes null/0 commission columns regardless
+     * of what a product's own raw commission override happens to hold.
+     *
      * @param array<string,mixed> $order
      * @param array<string,mixed> $line
      * @return array<string,mixed>
@@ -276,9 +376,10 @@ SQL,
         $unitPrice = (int) $line['unit_price'];
         $addons = is_array($line['addons'] ?? null) ? $line['addons'] : [];
         $downloads = $line['downloads'] ?? null;
+        $commissionSource = isset($line['commission_source']) ? (string) $line['commission_source'] : null;
 
         return [
-            'uuid' => Utils::generateNanoID(),
+            'uuid' => (string) ($line['line_uuid'] ?? Utils::generateNanoID()),
             'order_uuid' => (string) $order['uuid'],
             'variant_uuid' => (string) $line['variant_uuid'],
             'product_name' => (string) $line['product_name'],
@@ -287,6 +388,17 @@ SQL,
             'unit_price' => $unitPrice,
             'quantity' => $quantity,
             'line_total' => $unitPrice * $quantity,
+            'seller_uuid' => isset($line['seller_uuid']) ? (string) $line['seller_uuid'] : null,
+            'discount_amount' => (int) ($line['discount_amount'] ?? 0),
+            'tax_amount' => (int) ($line['tax_amount'] ?? 0),
+            'commission_source' => $commissionSource,
+            'commission_kind' => $commissionSource !== null ? (string) $line['commission_kind'] : null,
+            'commission_bps' => $commissionSource !== null && $line['commission_bps'] !== null
+                ? (int) $line['commission_bps'] : null,
+            'commission_fixed' => $commissionSource !== null && $line['commission_fixed'] !== null
+                ? (int) $line['commission_fixed'] : null,
+            'commission_basis' => $commissionSource !== null ? (int) $line['commission_basis'] : 0,
+            'commission_amount' => $commissionSource !== null ? (int) $line['commission_amount'] : 0,
             'addons' => $addons === [] ? null : json_encode($addons, JSON_THROW_ON_ERROR),
             'downloads' => is_array($downloads) ? json_encode($downloads, JSON_THROW_ON_ERROR) : null,
         ];

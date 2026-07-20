@@ -15,11 +15,19 @@ use Glueful\Extensions\Commerce\Pricing\TaxQuote;
  * this interface; checkout dispatches to `quoteDetailed()` via `instanceof`
  * when available, otherwise falls back to the existing aggregate call
  * byte-identically (see {@see \Glueful\Extensions\Commerce\Orders\CheckoutService}).
+ *
+ * The returned `TaxQuote` MAY carry a
+ * {@see \Glueful\Extensions\Commerce\Pricing\TaxBreakdown} (design spec
+ * §2.4): a calculator attaches one only when it genuinely computed tax per
+ * line, keyed by each input row's `line_uuid`; an aggregate/allocated result
+ * (e.g. a flat-rate fallback that only ever reconstructs one opaque base)
+ * leaves the breakdown null. Downstream attribution-method detection is by
+ * breakdown PRESENCE, never `instanceof` against this interface.
  */
 interface LineTaxCalculator
 {
     /**
-     * @param list<array{taxable_amount:int, tax_class:string, quantity:int}> $taxableLines
+     * @param list<array{taxable_amount:int, tax_class:string, quantity:int, line_uuid:string}> $taxableLines
      *        post-discount EXTENDED line totals (already multiplied by quantity --
      *        implementations MUST NOT multiply `taxable_amount` by `quantity` again)
      * @param array<string,mixed> $shippingAddress

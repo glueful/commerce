@@ -164,19 +164,23 @@ final class ReviewService
     }
 
     /**
-     * The storefront live+active product guard shared by
+     * The storefront buyer-availability product guard shared by
      * {@see self::createForStorefront()} and {@see self::listForStorefront()}
-     * (design spec Layer 6 §2 decision 6): draft and tombstoned products
+     * (design spec Layer 6 §2 decision 6; §2.3/MV5b): draft, tombstoned, AND
+     * (as of MV5b) a suspended/onboarding/closed seller's product all
      * collapse to the SAME non-revealing 404 as an unknown slug --
-     * `findLiveBySlug()` already excludes tombstones, so only the explicit
-     * `status === 'active'` check is needed to also exclude drafts (and any
-     * other non-active status the product vocabulary may carry).
+     * `findBuyerAvailableBySlug()` already excludes tombstones and a
+     * non-active seller's rows, so only the explicit `status === 'active'`
+     * check is needed to also exclude drafts (and any other non-active
+     * status the product vocabulary may carry). This is the genuinely
+     * public submit/read path; {@see self::create()} above (admin/importer)
+     * deliberately keeps using `findLiveByUuid()`.
      *
      * @return array<string,mixed>
      */
     private function resolveLiveActiveProduct(ApplicationContext $c, string $tenant, string $slug): array
     {
-        $product = $this->products->findLiveBySlug($c, $tenant, $slug);
+        $product = $this->products->findBuyerAvailableBySlug($c, $tenant, $slug);
         if ($product === null || ($product['status'] ?? '') !== 'active') {
             throw new NotFoundException('Resource not found.');
         }

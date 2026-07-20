@@ -28,6 +28,16 @@ abstract class CommerceTestCase extends TestCase
         \Glueful\Extensions\Commerce\Database\Migrations\CreateCommerceCatalogBreadthTables::class,
         \Glueful\Extensions\Commerce\Database\Migrations\CreateCommerceCustomerDeliveryTables::class,
         \Glueful\Extensions\Commerce\Database\Migrations\CreateCommerceShippingTaxTables::class,
+        \Glueful\Extensions\Commerce\Database\Migrations\CreateMarketplaceSellerTables::class,
+        \Glueful\Extensions\Commerce\Database\Migrations\CreateSellerOrderTables::class,
+        \Glueful\Extensions\Commerce\Database\Migrations\CreateMarketplaceLedgerTables::class,
+        \Glueful\Extensions\Commerce\Database\Migrations\CreatePayoutTable::class,
+        \Glueful\Extensions\Commerce\Database\Migrations\CreateSellerPayoutAccountsTable::class,
+        \Glueful\Extensions\Commerce\Database\Migrations\CreateSellerReservesTable::class,
+        \Glueful\Extensions\Commerce\Database\Migrations\CreateChargebacksTable::class,
+        \Glueful\Extensions\Commerce\Database\Migrations\CreateSellerLifecycleEventsTable::class,
+        \Glueful\Extensions\Commerce\Database\Migrations\CreateSellerApiKeysTables::class,
+        \Glueful\Extensions\Commerce\Database\Migrations\CreateSellerWebhookTables::class,
     ];
 
     protected function setUp(): void

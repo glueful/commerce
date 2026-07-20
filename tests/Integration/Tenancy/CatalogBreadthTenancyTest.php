@@ -19,6 +19,13 @@ use Glueful\Extensions\Commerce\Catalog\ReviewService;
 use Glueful\Extensions\Commerce\Catalog\TagRepository;
 use Glueful\Extensions\Commerce\Catalog\TagService;
 use Glueful\Extensions\Commerce\Catalog\VariantRepository;
+use Glueful\Extensions\Commerce\Marketplace\MarketplaceActivationService;
+use Glueful\Extensions\Commerce\Marketplace\MarketplaceMode;
+use Glueful\Extensions\Commerce\Marketplace\MarketplaceWorkspaceLock;
+use Glueful\Extensions\Commerce\Marketplace\SellerLifecycleEventRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerMembershipRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerService;
 use Glueful\Extensions\Commerce\Support\DiagnosticsReport;
 use Glueful\Extensions\Commerce\Tenancy\TenantAdopter;
 use Glueful\Extensions\Commerce\Tests\Support\CommerceTestCase;
@@ -301,14 +308,112 @@ final class CatalogBreadthTenancyTest extends CommerceTestCase
     }
 
     // -----------------------------------------------------------------
+    // Marketplace MV1 (design spec §2.1/§2.4/§6 "Tenancy": two-tenant
+    // isolation incl. same seller slug both tenants): sellers, memberships,
+    // and per-workspace settings are fully isolated per tenant, mirroring
+    // the same `tenantAAAA01`/`tenantBBBB02` convention this file already
+    // uses for the six catalog-breadth tables. `TenantAdopterTest` already
+    // covers the adopt-CLI rekey side for these three tables with the
+    // master switch off -- not repeated here.
+    // -----------------------------------------------------------------
+
+    public function testSameSellerSlugCoexistsAcrossTenantsWithFullyIsolatedMembershipsAndSettings(): void
+    {
+        $sellerA = $this->sellers()->create(
+            $this->context,
+            self::TENANT_A,
+            'shared-seller',
+            'Seller A',
+            null,
+            'ownerUserA01'
+        );
+        $sellerB = $this->sellers()->create(
+            $this->context,
+            self::TENANT_B,
+            'shared-seller',
+            'Seller B',
+            null,
+            'ownerUserB01'
+        );
+
+        self::assertNotSame($sellerA['uuid'], $sellerB['uuid']);
+        self::assertSame('shared-seller', $sellerA['slug']);
+        self::assertSame('shared-seller', $sellerB['slug']);
+
+        // Seller rows are fully tenant-scoped: tenant B cannot see or reach
+        // tenant A's seller through its own tenant-scoped lookup.
+        self::assertNull((new SellerRepository())->findByUuid($this->context, self::TENANT_B, $sellerA['uuid']));
+        try {
+            $this->sellers()->show($this->context, self::TENANT_B, $sellerA['uuid']);
+            self::fail('expected NotFoundException: a seller surface must be non-revealing across tenants');
+        } catch (NotFoundException $e) {
+        }
+
+        // Membership isolation: each seller's first-owner membership is
+        // scoped to its own tenant; the "my sellers" read for A's owner in
+        // tenant B's scope is empty even though the SAME user_uuid strings
+        // are never actually reused here -- the real proof is the seller
+        // row itself never crosses tenant boundaries (checked above) and
+        // each membership row carries its OWN tenant_uuid.
+        $membershipA = $this->connection->table('commerce_seller_memberships')
+            ->where('seller_uuid', '=', $sellerA['uuid'])->first();
+        $membershipB = $this->connection->table('commerce_seller_memberships')
+            ->where('seller_uuid', '=', $sellerB['uuid'])->first();
+        self::assertSame(self::TENANT_A, $membershipA['tenant_uuid']);
+        self::assertSame(self::TENANT_B, $membershipB['tenant_uuid']);
+        self::assertNotSame($membershipA['uuid'], $membershipB['uuid']);
+
+        // Settings isolation: activating tenant A's workspace must leave
+        // tenant B's workspace completely untouched.
+        $activation = new MarketplaceActivationService(
+            new MarketplaceWorkspaceLock(),
+            new SellerRepository(),
+            new ProductRepository()
+        );
+        $activation->activate($this->context, self::TENANT_A);
+
+        $mode = new MarketplaceMode();
+        self::assertTrue($mode->activeFor($this->context, self::TENANT_A));
+        self::assertFalse($mode->activeFor($this->context, self::TENANT_B));
+        self::assertNull(
+            $this->connection->table('commerce_marketplace_settings')
+                ->where('tenant_uuid', '=', self::TENANT_B)->first(),
+            'tenant B must gain no settings row at all from tenant A activating'
+        );
+    }
+
+    private function sellers(): SellerService
+    {
+        return new SellerService(
+            new SellerRepository(),
+            new SellerMembershipRepository(),
+            new SellerLifecycleEventRepository()
+        );
+    }
+
+    // -----------------------------------------------------------------
     // Registry + adopter coverage.
     // -----------------------------------------------------------------
 
     public function testDiagnosticsReportAndAdopterCoverAllSixCatalogBreadthTables(): void
     {
         // Exact list, not a subset check -- pins every tenant table this layer
-        // knows about (the pre-existing ten plus the six added in Layer 2), so a
-        // future accidental removal/addition is caught here as well as locally.
+        // knows about (the pre-existing ten plus the six added in Layer 2, plus the
+        // three Marketplace MV1 foundation tables added in migration 010, the
+        // MV2 `commerce_seller_orders` table added in migration 011, the four
+        // MV3 settlement-ledger tables added in migrations 012/013, the MV4
+        // `commerce_seller_payout_accounts` table added in migration 014, the
+        // four MV5a reserve/chargeback tables added in migrations 015/016, the
+        // MV5b `commerce_seller_lifecycle_events` audit table added in
+        // migration 017, the three MV5c-1 seller-API-key tables
+        // (`commerce_seller_api_keys`, `commerce_seller_api_key_credentials`,
+        // `commerce_seller_api_key_events`) added in migration 018, and the
+        // five MV5c-2 seller-webhook tables (`commerce_seller_webhook_endpoints`,
+        // `commerce_seller_webhook_secrets`, `commerce_seller_webhook_events`,
+        // `commerce_seller_webhook_deliveries`,
+        // `commerce_seller_webhook_endpoint_events`) added in migration 019),
+        // so a future accidental removal/addition is caught here as well as
+        // locally.
         self::assertSame([
             'commerce_products',
             'commerce_variants',
@@ -333,11 +438,34 @@ final class CatalogBreadthTenancyTest extends CommerceTestCase
             'commerce_shipping_zones',
             'commerce_shipping_classes',
             'commerce_tax_rates',
+            'commerce_marketplace_settings',
+            'commerce_sellers',
+            'commerce_seller_memberships',
+            'commerce_seller_orders',
+            'commerce_marketplace_ledger',
+            'commerce_ledger_account_locks',
+            'commerce_commission_policy_events',
+            'commerce_payouts',
+            'commerce_seller_payout_accounts',
+            'commerce_seller_reserves',
+            'commerce_reserve_policy_events',
+            'commerce_chargebacks',
+            'commerce_chargeback_lines',
+            'commerce_seller_lifecycle_events',
+            'commerce_seller_api_keys',
+            'commerce_seller_api_key_credentials',
+            'commerce_seller_api_key_events',
+            'commerce_seller_webhook_endpoints',
+            'commerce_seller_webhook_secrets',
+            'commerce_seller_webhook_events',
+            'commerce_seller_webhook_deliveries',
+            'commerce_seller_webhook_endpoint_events',
         ], DiagnosticsReport::tenantTables());
 
         // The join/child tables added alongside the six must never be treated as
         // tenant tables (they carry no tenant_uuid column of their own).
-        foreach ([
+        foreach (
+            [
             'commerce_product_categories',
             'commerce_product_tags',
             'commerce_attribute_values',
@@ -345,7 +473,8 @@ final class CatalogBreadthTenancyTest extends CommerceTestCase
             'commerce_product_children',
             'commerce_shipping_zone_locations',
             'commerce_shipping_methods',
-        ] as $joinTable) {
+            ] as $joinTable
+        ) {
             self::assertNotContains($joinTable, DiagnosticsReport::tenantTables());
         }
 

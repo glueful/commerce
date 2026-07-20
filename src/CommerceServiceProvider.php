@@ -7,6 +7,7 @@ namespace Glueful\Extensions\Commerce;
 use Glueful\Auth\Contracts\UserProviderInterface;
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Database\Migrations\MigrationPriority;
+use Glueful\Encryption\EncryptionService;
 use Glueful\Events\EventService;
 use Glueful\Extensions\Commerce\Catalog\AddonRepository;
 use Glueful\Extensions\Commerce\Catalog\AddonService;
@@ -36,6 +37,7 @@ use Glueful\Extensions\Commerce\Customers\AddressBookService;
 use Glueful\Extensions\Commerce\Customers\CustomerAggregationRepository;
 use Glueful\Extensions\Commerce\Discounts\DiscountRepository;
 use Glueful\Extensions\Commerce\Discounts\DiscountService;
+use Glueful\Extensions\Commerce\Events\Listeners\ProviderChargebackListener;
 use Glueful\Extensions\Commerce\Events\OrderFulfilled;
 use Glueful\Extensions\Commerce\Events\OrderNoteAdded;
 use Glueful\Extensions\Commerce\Events\OrderPaid;
@@ -48,17 +50,30 @@ use Glueful\Extensions\Commerce\Http\Admin\AdminCustomerController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminDiscountController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminDownloadController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminGrantController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminMarketplaceFinancialController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminMediaController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminOrderController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminPayoutController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminProductController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminRefundController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminReportController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminReserveController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminReviewController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminShippingClassController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminShippingZoneController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminStockController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminTagController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminTaxRateController;
+use Glueful\Extensions\Commerce\Http\Admin\MarketplaceAdminController;
+use Glueful\Extensions\Commerce\Http\Middleware\InteractiveSessionMiddleware;
+use Glueful\Extensions\Commerce\Http\Middleware\SellerMemberMiddleware;
+use Glueful\Extensions\Commerce\Http\Seller\SellerApiKeyController;
+use Glueful\Extensions\Commerce\Http\Seller\SellerCatalogController;
+use Glueful\Extensions\Commerce\Http\Seller\SellerFinancialController;
+use Glueful\Extensions\Commerce\Http\Seller\SellerInventoryController;
+use Glueful\Extensions\Commerce\Http\Seller\SellerMembershipController;
+use Glueful\Extensions\Commerce\Http\Seller\SellerOrderController;
+use Glueful\Extensions\Commerce\Http\Seller\SellerWebhookController;
 use Glueful\Extensions\Commerce\Http\Storefront\AccountAddressController;
 use Glueful\Extensions\Commerce\Http\Storefront\CartController;
 use Glueful\Extensions\Commerce\Http\Storefront\CategoryController;
@@ -74,6 +89,53 @@ use Glueful\Extensions\Commerce\Inventory\StockRepository;
 use Glueful\Extensions\Commerce\Mail\CommerceMailer;
 use Glueful\Extensions\Commerce\Mail\NotificationCommerceMailer;
 use Glueful\Extensions\Commerce\Mail\OrderMailListener;
+use Glueful\Extensions\Commerce\Marketplace\AdjustmentService;
+use Glueful\Extensions\Commerce\Marketplace\ChargebackRepository;
+use Glueful\Extensions\Commerce\Marketplace\ChargebackService;
+use Glueful\Extensions\Commerce\Marketplace\CommissionPolicyEventRepository;
+use Glueful\Extensions\Commerce\Marketplace\CommissionPolicyService;
+use Glueful\Extensions\Commerce\Marketplace\Contracts\SellerRoleAuthority;
+use Glueful\Extensions\Commerce\Marketplace\FixedSellerRoleAuthority;
+use Glueful\Extensions\Commerce\Marketplace\LedgerAccountLock;
+use Glueful\Extensions\Commerce\Marketplace\LedgerPostingService;
+use Glueful\Extensions\Commerce\Marketplace\LedgerRepository;
+use Glueful\Extensions\Commerce\Marketplace\MarketplaceActivationService;
+use Glueful\Extensions\Commerce\Marketplace\MarketplaceMode;
+use Glueful\Extensions\Commerce\Marketplace\MarketplaceRefundGuard;
+use Glueful\Extensions\Commerce\Marketplace\MarketplaceWorkspaceLock;
+use Glueful\Extensions\Commerce\Marketplace\PayoutAccountRepository;
+use Glueful\Extensions\Commerce\Marketplace\PayoutAccountService;
+use Glueful\Extensions\Commerce\Marketplace\PayoutRepository;
+use Glueful\Extensions\Commerce\Marketplace\PayoutService;
+use Glueful\Extensions\Commerce\Marketplace\ReconciliationService;
+use Glueful\Extensions\Commerce\Marketplace\ReserveConsumptionService;
+use Glueful\Extensions\Commerce\Marketplace\ReservePolicyEventRepository;
+use Glueful\Extensions\Commerce\Marketplace\ReservePolicyService;
+use Glueful\Extensions\Commerce\Marketplace\ReserveRepository;
+use Glueful\Extensions\Commerce\Marketplace\ReserveService;
+use Glueful\Extensions\Commerce\Marketplace\SellerApiKeyAuthorizer;
+use Glueful\Extensions\Commerce\Marketplace\SellerApiKeyRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerApiKeyScopeValidator;
+use Glueful\Extensions\Commerce\Marketplace\SellerApiKeyService;
+use Glueful\Extensions\Commerce\Marketplace\SellerAttributionService;
+use Glueful\Extensions\Commerce\Marketplace\SellerBalanceService;
+use Glueful\Extensions\Commerce\Marketplace\SellerLifecycleEventRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerMembershipRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerMembershipService;
+use Glueful\Extensions\Commerce\Marketplace\SellerOrderFulfillmentService;
+use Glueful\Extensions\Commerce\Marketplace\SellerOrderPaymentConfirmation;
+use Glueful\Extensions\Commerce\Marketplace\SellerOrderRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerOrderService;
+use Glueful\Extensions\Commerce\Marketplace\SellerRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerService;
+use Glueful\Extensions\Commerce\Marketplace\SellerWebhookDeliveryRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerWebhookDeliveryService;
+use Glueful\Extensions\Commerce\Marketplace\SellerWebhookEndpointRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerWebhookEndpointService;
+use Glueful\Extensions\Commerce\Marketplace\SellerWebhookEventRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerWebhookOutboxPublisher;
+use Glueful\Extensions\Commerce\Marketplace\SellerWebhookPayloadProjector;
+use Glueful\Extensions\Commerce\Marketplace\SellerWebhookSecretService;
 use Glueful\Extensions\Commerce\Orders\OrderNumberGenerator;
 use Glueful\Extensions\Commerce\Orders\CheckoutService;
 use Glueful\Extensions\Commerce\Orders\Downloads\CommerceDownloadBlobPolicy;
@@ -92,6 +154,7 @@ use Glueful\Extensions\Commerce\Pricing\PricingEngine;
 use Glueful\Extensions\Commerce\Reports\CustomerReportRepository;
 use Glueful\Extensions\Commerce\Reports\ProductSalesReportRepository;
 use Glueful\Extensions\Commerce\Reports\SalesReportRepository;
+use Glueful\Extensions\Commerce\Reports\SellerFinancialReportRepository;
 use Glueful\Extensions\Commerce\Reports\StockReportRepository;
 use Glueful\Extensions\Commerce\Shipping\ConfigShippingRateProvider;
 use Glueful\Extensions\Commerce\Shipping\DbShippingRateProvider;
@@ -112,8 +175,12 @@ use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Glueful\Extensions\Contracts\Tenancy\TenantTableRegistry;
 use Glueful\Extensions\Contracts\Payments\PaymentCollector;
 use Glueful\Extensions\Contracts\Payments\PaymentConfirmationHandler;
+use Glueful\Extensions\Contracts\Payments\PayoutCollector;
+use Glueful\Extensions\Contracts\Payments\ProviderChargebackEvent;
 use Glueful\Extensions\Contracts\Payments\RefundCollector;
 use Glueful\Extensions\ServiceProvider;
+use Glueful\Http\Client;
+use Glueful\Http\Security\SafeOutboundTargetResolver;
 use Glueful\Repository\BlobRepository;
 use Glueful\Uploader\Contracts\BlobAccessPolicyRegistry;
 use Glueful\Uploader\Contracts\BlobPublicUrlProvider;
@@ -316,6 +383,253 @@ final class CommerceServiceProvider extends ServiceProvider
                 'class' => TenantAdopter::class,
                 'shared' => true,
             ],
+            MarketplaceMode::class => [
+                'class' => MarketplaceMode::class,
+                'shared' => true,
+            ],
+            MarketplaceWorkspaceLock::class => [
+                'class' => MarketplaceWorkspaceLock::class,
+                'shared' => true,
+            ],
+            SellerRepository::class => [
+                'class' => SellerRepository::class,
+                'shared' => true,
+            ],
+            SellerMembershipRepository::class => [
+                'class' => SellerMembershipRepository::class,
+                'shared' => true,
+            ],
+            SellerLifecycleEventRepository::class => [
+                'class' => SellerLifecycleEventRepository::class,
+                'shared' => true,
+            ],
+            SellerApiKeyRepository::class => [
+                'class' => SellerApiKeyRepository::class,
+                'shared' => true,
+            ],
+            SellerApiKeyScopeValidator::class => [
+                'factory' => [self::class, 'makeSellerApiKeyScopeValidator'],
+                'shared' => true,
+            ],
+            SellerApiKeyService::class => [
+                'factory' => [self::class, 'makeSellerApiKeyService'],
+                'shared' => true,
+            ],
+            SellerApiKeyAuthorizer::class => [
+                'factory' => [self::class, 'makeSellerApiKeyAuthorizer'],
+                'shared' => true,
+            ],
+            SellerWebhookEndpointRepository::class => [
+                'class' => SellerWebhookEndpointRepository::class,
+                'shared' => true,
+            ],
+            SellerWebhookDeliveryRepository::class => [
+                'class' => SellerWebhookDeliveryRepository::class,
+                'shared' => true,
+            ],
+            SellerWebhookSecretService::class => [
+                'factory' => [self::class, 'makeSellerWebhookSecretService'],
+                'shared' => true,
+            ],
+            SellerWebhookEndpointService::class => [
+                'factory' => [self::class, 'makeSellerWebhookEndpointService'],
+                'shared' => true,
+            ],
+            SellerWebhookEventRepository::class => [
+                'class' => SellerWebhookEventRepository::class,
+                'shared' => true,
+            ],
+            SellerWebhookPayloadProjector::class => [
+                'class' => SellerWebhookPayloadProjector::class,
+                'shared' => true,
+            ],
+            SellerWebhookOutboxPublisher::class => [
+                'factory' => [self::class, 'makeSellerWebhookOutboxPublisher'],
+                'shared' => true,
+            ],
+            SellerWebhookDeliveryService::class => [
+                'factory' => [self::class, 'makeSellerWebhookDeliveryService'],
+                'shared' => true,
+            ],
+            SellerOrderRepository::class => [
+                'class' => SellerOrderRepository::class,
+                'shared' => true,
+            ],
+            SellerOrderPaymentConfirmation::class => [
+                'class' => SellerOrderPaymentConfirmation::class,
+                'shared' => true,
+            ],
+            LedgerRepository::class => [
+                'class' => LedgerRepository::class,
+                'shared' => true,
+            ],
+            LedgerAccountLock::class => [
+                'class' => LedgerAccountLock::class,
+                'shared' => true,
+            ],
+            LedgerPostingService::class => [
+                'class' => LedgerPostingService::class,
+                'shared' => true,
+                'autowire' => true,
+            ],
+            SellerBalanceService::class => [
+                'class' => SellerBalanceService::class,
+                'shared' => true,
+                'autowire' => true,
+            ],
+            PayoutRepository::class => [
+                'class' => PayoutRepository::class,
+                'shared' => true,
+            ],
+            PayoutAccountRepository::class => [
+                'class' => PayoutAccountRepository::class,
+                'shared' => true,
+            ],
+            PayoutAccountService::class => [
+                'factory' => [self::class, 'makePayoutAccountService'],
+                'shared' => true,
+            ],
+            PayoutService::class => [
+                'factory' => [self::class, 'makePayoutService'],
+                'shared' => true,
+            ],
+            AdjustmentService::class => [
+                'class' => AdjustmentService::class,
+                'shared' => true,
+                'autowire' => true,
+            ],
+            ReconciliationService::class => [
+                'class' => ReconciliationService::class,
+                'shared' => true,
+            ],
+            AdminPayoutController::class => [
+                'factory' => [self::class, 'makeAdminPayoutController'],
+                'shared' => true,
+            ],
+            MarketplaceRefundGuard::class => [
+                'class' => MarketplaceRefundGuard::class,
+                'shared' => true,
+                'autowire' => true,
+            ],
+            SellerOrderFulfillmentService::class => [
+                'factory' => [self::class, 'makeSellerOrderFulfillmentService'],
+                'shared' => true,
+            ],
+            SellerOrderService::class => [
+                'factory' => [self::class, 'makeSellerOrderService'],
+                'shared' => true,
+            ],
+            SellerRoleAuthority::class => [
+                'class' => FixedSellerRoleAuthority::class,
+                'shared' => true,
+            ],
+            CommissionPolicyEventRepository::class => [
+                'class' => CommissionPolicyEventRepository::class,
+                'shared' => true,
+            ],
+            CommissionPolicyService::class => [
+                'factory' => [self::class, 'makeCommissionPolicyService'],
+                'shared' => true,
+            ],
+            ReservePolicyEventRepository::class => [
+                'class' => ReservePolicyEventRepository::class,
+                'shared' => true,
+            ],
+            ReservePolicyService::class => [
+                'factory' => [self::class, 'makeReservePolicyService'],
+                'shared' => true,
+            ],
+            ReserveRepository::class => [
+                'class' => ReserveRepository::class,
+                'shared' => true,
+            ],
+            ReserveService::class => [
+                'class' => ReserveService::class,
+                'shared' => true,
+                'autowire' => true,
+            ],
+            ReserveConsumptionService::class => [
+                'class' => ReserveConsumptionService::class,
+                'shared' => true,
+                'autowire' => true,
+            ],
+            ChargebackRepository::class => [
+                'class' => ChargebackRepository::class,
+                'shared' => true,
+            ],
+            ChargebackService::class => [
+                'class' => ChargebackService::class,
+                'shared' => true,
+                'autowire' => true,
+            ],
+            ProviderChargebackListener::class => [
+                'factory' => [self::class, 'makeProviderChargebackListener'],
+                'shared' => true,
+            ],
+            AdminReserveController::class => [
+                'factory' => [self::class, 'makeAdminReserveController'],
+                'shared' => true,
+            ],
+            SellerService::class => [
+                'factory' => [self::class, 'makeSellerService'],
+                'shared' => true,
+            ],
+            SellerMembershipService::class => [
+                'factory' => [self::class, 'makeSellerMembershipService'],
+                'shared' => true,
+            ],
+            SellerAttributionService::class => [
+                'factory' => [self::class, 'makeSellerAttributionService'],
+                'shared' => true,
+            ],
+            MarketplaceActivationService::class => [
+                'factory' => [self::class, 'makeMarketplaceActivationService'],
+                'shared' => true,
+            ],
+            MarketplaceAdminController::class => [
+                'factory' => [self::class, 'makeMarketplaceAdminController'],
+                'shared' => true,
+            ],
+            'commerce_seller' => [
+                'factory' => [self::class, 'makeSellerMemberMiddleware'],
+                'shared' => true,
+            ],
+            SellerMemberMiddleware::class => [
+                'factory' => [self::class, 'makeSellerMemberMiddleware'],
+                'shared' => true,
+            ],
+            'interactive_session' => [
+                'factory' => [self::class, 'makeInteractiveSessionMiddleware'],
+                'shared' => true,
+            ],
+            InteractiveSessionMiddleware::class => [
+                'factory' => [self::class, 'makeInteractiveSessionMiddleware'],
+                'shared' => true,
+            ],
+            SellerApiKeyController::class => [
+                'factory' => [self::class, 'makeSellerApiKeyController'],
+                'shared' => true,
+            ],
+            SellerWebhookController::class => [
+                'factory' => [self::class, 'makeSellerWebhookController'],
+                'shared' => true,
+            ],
+            SellerCatalogController::class => [
+                'factory' => [self::class, 'makeSellerCatalogController'],
+                'shared' => true,
+            ],
+            SellerInventoryController::class => [
+                'factory' => [self::class, 'makeSellerInventoryController'],
+                'shared' => true,
+            ],
+            SellerMembershipController::class => [
+                'factory' => [self::class, 'makeSellerMembershipController'],
+                'shared' => true,
+            ],
+            SellerOrderController::class => [
+                'factory' => [self::class, 'makeSellerOrderController'],
+                'shared' => true,
+            ],
             ExpiryService::class => [
                 'factory' => [self::class, 'makeExpiryService'],
                 'shared' => true,
@@ -433,6 +747,18 @@ final class CommerceServiceProvider extends ServiceProvider
                 'factory' => [self::class, 'makeAdminReportController'],
                 'shared' => true,
             ],
+            SellerFinancialReportRepository::class => [
+                'class' => SellerFinancialReportRepository::class,
+                'shared' => true,
+            ],
+            SellerFinancialController::class => [
+                'factory' => [self::class, 'makeSellerFinancialController'],
+                'shared' => true,
+            ],
+            AdminMarketplaceFinancialController::class => [
+                'factory' => [self::class, 'makeAdminMarketplaceFinancialController'],
+                'shared' => true,
+            ],
             AddressBookRepository::class => [
                 'class' => AddressBookRepository::class,
                 'shared' => true,
@@ -492,8 +818,74 @@ final class CommerceServiceProvider extends ServiceProvider
             self::tenantResolver($container),
             $container->get(StockRepository::class),
             $container->get(ProductChildrenRepository::class),
-            $container->get(ShippingClassRepository::class)
+            $container->get(ShippingClassRepository::class),
+            $container->get(MarketplaceMode::class),
+            $container->get(MarketplaceWorkspaceLock::class),
+            $container->get(SellerRepository::class),
+            $container->get(CommissionPolicyService::class)
         );
+    }
+
+    public static function makeCommissionPolicyService(ContainerInterface $container): CommissionPolicyService
+    {
+        return new CommissionPolicyService(
+            $container->get(ProductRepository::class),
+            $container->get(SellerRepository::class),
+            $container->get(MarketplaceWorkspaceLock::class),
+            $container->get(CommissionPolicyEventRepository::class)
+        );
+    }
+
+    public static function makeReservePolicyService(ContainerInterface $container): ReservePolicyService
+    {
+        return new ReservePolicyService(
+            $container->get(SellerRepository::class),
+            $container->get(MarketplaceWorkspaceLock::class),
+            $container->get(ReservePolicyEventRepository::class)
+        );
+    }
+
+    public static function makePayoutService(ContainerInterface $container): PayoutService
+    {
+        return new PayoutService(
+            $container->get(PayoutRepository::class),
+            $container->get(LedgerRepository::class),
+            $container->get(LedgerAccountLock::class),
+            $container->get(SellerBalanceService::class),
+            $container->get(SellerRepository::class),
+            null,
+            self::makePayoutCollector($container),
+            $container->get(PayoutAccountService::class),
+            $container->get(SellerWebhookOutboxPublisher::class)
+        );
+    }
+
+    public static function makePayoutAccountService(ContainerInterface $container): PayoutAccountService
+    {
+        return new PayoutAccountService(
+            $container->get(PayoutAccountRepository::class),
+            null,
+            self::makePayoutCollector($container)
+        );
+    }
+
+    /**
+     * Soft-resolved, same pattern as {@see self::makeRefundCollector()}: the provider-payout
+     * port (design spec §2.9) is provider-injected by the host; with nothing bound, provider
+     * payouts stay unavailable (422) while manual payouts + ledger semantics keep working.
+     */
+    private static function makePayoutCollector(ContainerInterface $container): ?PayoutCollector
+    {
+        if (!$container->has(PayoutCollector::class)) {
+            return null;
+        }
+
+        $collector = $container->get(PayoutCollector::class);
+        if (!$collector instanceof PayoutCollector) {
+            throw new \RuntimeException('Configured payout collector does not implement PayoutCollector.');
+        }
+
+        return $collector;
     }
 
     public static function makeProductMediaService(ContainerInterface $container): ProductMediaService
@@ -575,7 +967,12 @@ final class CommerceServiceProvider extends ServiceProvider
     {
         return new InventoryService(
             $container->get(StockRepository::class),
-            self::tenantResolver($container)
+            self::tenantResolver($container),
+            $container->get(VariantRepository::class),
+            $container->get(ProductRepository::class),
+            $container->get(SellerRepository::class),
+            $container->get(SellerWebhookOutboxPublisher::class),
+            $container->get(MarketplaceMode::class)
         );
     }
 
@@ -662,7 +1059,12 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(OrderRepository::class),
             $container->get(DownloadRepository::class),
             self::makePaymentCollector($container),
-            self::tenantResolver($container)
+            self::tenantResolver($container),
+            $container->get(MarketplaceMode::class),
+            $container->get(SellerRepository::class),
+            $container->get(ProductRepository::class),
+            $container->get(SellerOrderRepository::class),
+            webhooks: $container->get(SellerWebhookOutboxPublisher::class)
         );
     }
 
@@ -708,7 +1110,11 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(RefundRepository::class),
             $container->get(StockRepository::class),
             self::tenantResolver($container),
-            self::makeRefundCollector($container)
+            self::makeRefundCollector($container),
+            $container->get(MarketplaceRefundGuard::class),
+            $container->get(LedgerPostingService::class),
+            $container->get(SellerRepository::class),
+            $container->get(SellerWebhookOutboxPublisher::class)
         );
     }
 
@@ -769,7 +1175,9 @@ final class CommerceServiceProvider extends ServiceProvider
         return new ExpiryService(
             $container->get(OrderRepository::class),
             $container->get(StockRepository::class),
-            self::tenantResolver($container)
+            self::tenantResolver($container),
+            $container->get(SellerOrderRepository::class),
+            $container->get(SellerWebhookOutboxPublisher::class)
         );
     }
 
@@ -895,7 +1303,10 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(OrderPaymentService::class),
             self::tenantResolver($container),
             $container->get(RefundRepository::class),
-            $container->get(SellerIdentityProvider::class)
+            $container->get(SellerIdentityProvider::class),
+            $container->get(SellerOrderRepository::class),
+            $container->get(SellerOrderFulfillmentService::class),
+            $container->get(SellerWebhookOutboxPublisher::class)
         );
     }
 
@@ -906,6 +1317,40 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(OrderRepository::class),
             $container->get(RefundRepository::class),
             $container->get(RefundService::class),
+            self::tenantResolver($container)
+        );
+    }
+
+    public static function makeAdminPayoutController(ContainerInterface $container): AdminPayoutController
+    {
+        return new AdminPayoutController(
+            $container->get(ApplicationContext::class),
+            $container->get(PayoutService::class),
+            $container->get(AdjustmentService::class),
+            self::tenantResolver($container),
+            $container->get(PayoutAccountService::class)
+        );
+    }
+
+    public static function makeProviderChargebackListener(ContainerInterface $container): ProviderChargebackListener
+    {
+        return new ProviderChargebackListener(
+            $container->get(ApplicationContext::class),
+            $container->get(ChargebackService::class)
+        );
+    }
+
+    public static function makeAdminReserveController(ContainerInterface $container): AdminReserveController
+    {
+        return new AdminReserveController(
+            $container->get(ApplicationContext::class),
+            $container->get(ReservePolicyService::class),
+            $container->get(ChargebackService::class),
+            $container->get(ReserveService::class),
+            $container->get(AdjustmentService::class),
+            $container->get(SellerBalanceService::class),
+            $container->get(SellerRepository::class),
+            $container->get(MarketplaceMode::class),
             self::tenantResolver($container)
         );
     }
@@ -1000,6 +1445,19 @@ final class CommerceServiceProvider extends ServiceProvider
         );
     }
 
+    public static function makeAdminMarketplaceFinancialController(
+        ContainerInterface $container
+    ): AdminMarketplaceFinancialController {
+        return new AdminMarketplaceFinancialController(
+            $container->get(ApplicationContext::class),
+            $container->get(SellerBalanceService::class),
+            $container->get(LedgerRepository::class),
+            $container->get(SellerFinancialReportRepository::class),
+            $container->get(SellerRepository::class),
+            self::tenantResolver($container)
+        );
+    }
+
     public static function makeAddressBookService(ContainerInterface $container): AddressBookService
     {
         return new AddressBookService(
@@ -1064,6 +1522,260 @@ final class CommerceServiceProvider extends ServiceProvider
         return new AdminTaxRateController(
             $container->get(ApplicationContext::class),
             $container->get(TaxRateService::class)
+        );
+    }
+
+    public static function makeSellerService(ContainerInterface $container): SellerService
+    {
+        return new SellerService(
+            $container->get(SellerRepository::class),
+            $container->get(SellerMembershipRepository::class),
+            $container->get(SellerLifecycleEventRepository::class),
+            null,
+            $container->get(CommissionPolicyService::class),
+            $container->get(SellerWebhookEndpointRepository::class),
+            $container->get(SellerWebhookDeliveryRepository::class)
+        );
+    }
+
+    public static function makeSellerMembershipService(ContainerInterface $container): SellerMembershipService
+    {
+        return new SellerMembershipService(
+            $container->get(SellerRepository::class),
+            $container->get(SellerMembershipRepository::class),
+            $container->get(SellerRoleAuthority::class)
+        );
+    }
+
+    public static function makeSellerApiKeyScopeValidator(ContainerInterface $container): SellerApiKeyScopeValidator
+    {
+        return new SellerApiKeyScopeValidator($container->get(SellerRoleAuthority::class));
+    }
+
+    public static function makeSellerApiKeyService(ContainerInterface $container): SellerApiKeyService
+    {
+        return new SellerApiKeyService(
+            $container->get(SellerRepository::class),
+            $container->get(SellerMembershipRepository::class),
+            $container->get(SellerApiKeyRepository::class),
+            $container->get(SellerRoleAuthority::class),
+            $container->get(SellerApiKeyScopeValidator::class)
+        );
+    }
+
+    public static function makeSellerApiKeyAuthorizer(ContainerInterface $container): SellerApiKeyAuthorizer
+    {
+        return new SellerApiKeyAuthorizer($container->get(SellerApiKeyRepository::class));
+    }
+
+    public static function makeSellerWebhookSecretService(ContainerInterface $container): SellerWebhookSecretService
+    {
+        return new SellerWebhookSecretService(
+            $container->get(SellerWebhookEndpointRepository::class),
+            $container->get(EncryptionService::class)
+        );
+    }
+
+    public static function makeSellerWebhookEndpointService(
+        ContainerInterface $container
+    ): SellerWebhookEndpointService {
+        return new SellerWebhookEndpointService(
+            $container->get(SellerRepository::class),
+            $container->get(SellerMembershipRepository::class),
+            $container->get(SellerWebhookEndpointRepository::class),
+            $container->get(SellerWebhookDeliveryRepository::class),
+            $container->get(SellerRoleAuthority::class),
+            $container->get(SellerWebhookSecretService::class),
+            new SafeOutboundTargetResolver()
+        );
+    }
+
+    public static function makeSellerAttributionService(ContainerInterface $container): SellerAttributionService
+    {
+        return new SellerAttributionService(
+            $container->get(MarketplaceWorkspaceLock::class),
+            $container->get(SellerRepository::class),
+            $container->get(ProductRepository::class),
+            null,
+            $container->get(SellerWebhookOutboxPublisher::class)
+        );
+    }
+
+    /**
+     * MV5c-2 Task 4 (design spec §2.4): the shared publisher every real v1
+     * state-change transaction captures through. Every collaborator here is
+     * itself either shared elsewhere in this container ({@see SellerRepository},
+     * {@see SellerWebhookEndpointRepository}, {@see SellerWebhookDeliveryRepository})
+     * or newly registered above ({@see SellerWebhookEventRepository},
+     * {@see SellerWebhookPayloadProjector}) -- {@see MarketplaceMode} is a
+     * stateless config-reader constructed inline, mirroring
+     * {@see self::makeTenantResolver()}'s own "no extra DI surface for a
+     * dependency-free internal" convention.
+     */
+    public static function makeSellerWebhookOutboxPublisher(ContainerInterface $container): SellerWebhookOutboxPublisher
+    {
+        return new SellerWebhookOutboxPublisher(
+            new MarketplaceMode(),
+            $container->get(SellerRepository::class),
+            $container->get(SellerWebhookEndpointRepository::class),
+            $container->get(SellerWebhookEventRepository::class),
+            $container->get(SellerWebhookDeliveryRepository::class),
+            $container->get(SellerWebhookPayloadProjector::class)
+        );
+    }
+
+    public static function makeSellerWebhookDeliveryService(ContainerInterface $container): SellerWebhookDeliveryService
+    {
+        return new SellerWebhookDeliveryService(
+            $container->get(SellerRepository::class),
+            $container->get(SellerWebhookEndpointRepository::class),
+            $container->get(SellerWebhookDeliveryRepository::class),
+            $container->get(SellerWebhookEventRepository::class),
+            $container->get(SellerWebhookSecretService::class),
+            $container->get(Client::class)
+        );
+    }
+
+    public static function makeMarketplaceActivationService(
+        ContainerInterface $container
+    ): MarketplaceActivationService {
+        return new MarketplaceActivationService(
+            $container->get(MarketplaceWorkspaceLock::class),
+            $container->get(SellerRepository::class),
+            $container->get(ProductRepository::class)
+        );
+    }
+
+    public static function makeMarketplaceAdminController(ContainerInterface $container): MarketplaceAdminController
+    {
+        return new MarketplaceAdminController(
+            $container->get(ApplicationContext::class),
+            $container->get(SellerService::class),
+            $container->get(SellerMembershipService::class),
+            self::tenantResolver($container),
+            $container->get(MarketplaceActivationService::class),
+            $container->get(SellerAttributionService::class),
+            $container->get(CommissionPolicyService::class),
+            $container->get(MarketplaceMode::class),
+            $container->get(SellerLifecycleEventRepository::class)
+        );
+    }
+
+    public static function makeSellerMemberMiddleware(ContainerInterface $container): SellerMemberMiddleware
+    {
+        return new SellerMemberMiddleware(
+            $container->get(ApplicationContext::class),
+            $container->get(SellerRepository::class),
+            $container->get(SellerMembershipRepository::class),
+            $container->get(SellerRoleAuthority::class),
+            $container->get(MarketplaceMode::class),
+            self::tenantResolver($container),
+            $container->get(SellerApiKeyAuthorizer::class)
+        );
+    }
+
+    public static function makeInteractiveSessionMiddleware(ContainerInterface $container): InteractiveSessionMiddleware
+    {
+        return new InteractiveSessionMiddleware();
+    }
+
+    public static function makeSellerApiKeyController(ContainerInterface $container): SellerApiKeyController
+    {
+        return new SellerApiKeyController(
+            $container->get(ApplicationContext::class),
+            $container->get(SellerApiKeyService::class),
+            $container->get(SellerApiKeyRepository::class),
+            self::tenantResolver($container)
+        );
+    }
+
+    /**
+     * MV5c-2 Task 7 (design spec §2.10/§5): a REAL {@see SellerWebhookController}
+     * wired against the REAL {@see SellerWebhookEndpointService}/
+     * {@see SellerWebhookEndpointRepository}/{@see SellerWebhookDeliveryRepository}/
+     * {@see SellerWebhookDeliveryService} stack -- every collaborator is already
+     * shared elsewhere in this container -- mirroring
+     * {@see self::makeSellerApiKeyController()}'s identical shape.
+     */
+    public static function makeSellerWebhookController(ContainerInterface $container): SellerWebhookController
+    {
+        return new SellerWebhookController(
+            $container->get(ApplicationContext::class),
+            $container->get(SellerWebhookEndpointService::class),
+            $container->get(SellerWebhookEndpointRepository::class),
+            $container->get(SellerWebhookDeliveryRepository::class),
+            $container->get(SellerWebhookDeliveryService::class),
+            self::tenantResolver($container)
+        );
+    }
+
+    public static function makeSellerCatalogController(ContainerInterface $container): SellerCatalogController
+    {
+        return new SellerCatalogController(
+            $container->get(ApplicationContext::class),
+            $container->get(CatalogService::class)
+        );
+    }
+
+    public static function makeSellerInventoryController(ContainerInterface $container): SellerInventoryController
+    {
+        return new SellerInventoryController(
+            $container->get(ApplicationContext::class),
+            $container->get(InventoryService::class)
+        );
+    }
+
+    public static function makeSellerMembershipController(ContainerInterface $container): SellerMembershipController
+    {
+        return new SellerMembershipController(
+            $container->get(ApplicationContext::class),
+            $container->get(SellerMembershipService::class),
+            $container->get(SellerMembershipRepository::class),
+            self::tenantResolver($container)
+        );
+    }
+
+    public static function makeSellerOrderFulfillmentService(
+        ContainerInterface $container
+    ): SellerOrderFulfillmentService {
+        return new SellerOrderFulfillmentService(
+            $container->get(OrderRepository::class),
+            $container->get(SellerOrderRepository::class),
+            $container->get(SellerRepository::class),
+            $container->get(SellerWebhookOutboxPublisher::class)
+        );
+    }
+
+    public static function makeSellerOrderService(ContainerInterface $container): SellerOrderService
+    {
+        return new SellerOrderService(
+            $container->get(SellerOrderRepository::class),
+            $container->get(OrderRepository::class),
+            self::tenantResolver($container)
+        );
+    }
+
+    public static function makeSellerOrderController(ContainerInterface $container): SellerOrderController
+    {
+        return new SellerOrderController(
+            $container->get(ApplicationContext::class),
+            $container->get(SellerOrderService::class),
+            $container->get(SellerOrderFulfillmentService::class),
+            self::tenantResolver($container)
+        );
+    }
+
+    public static function makeSellerFinancialController(ContainerInterface $container): SellerFinancialController
+    {
+        return new SellerFinancialController(
+            $container->get(ApplicationContext::class),
+            $container->get(SellerFinancialReportRepository::class),
+            $container->get(SellerBalanceService::class),
+            $container->get(PayoutRepository::class),
+            $container->get(MarketplaceMode::class),
+            self::tenantResolver($container),
+            $container->get(PayoutAccountRepository::class),
+            $container->get(ReserveService::class)
         );
     }
 
@@ -1160,6 +1872,21 @@ final class CommerceServiceProvider extends ServiceProvider
                     $events->addListener(OrderFulfilled::class, [$listener, 'onOrderFulfilled']);
                     $events->addListener(RefundCompleted::class, [$listener, 'onRefundCompleted']);
                     $events->addListener(OrderNoteAdded::class, [$listener, 'onOrderNoteAdded']);
+
+                    // MV5a Task 16 (design spec §2.4/§2.11/§5): the chargeback listener is
+                    // added directly to EventService here too -- the extension has no
+                    // config/events.php, mirroring the OrderMailListener block above exactly.
+                    // Payvia dispatches ProviderChargebackEvent through the STRICT
+                    // EventService::dispatchOrFail() (framework 1.71.0), never the
+                    // fault-isolated dispatch() the mail events above use -- this
+                    // registration is deliberately on the SAME ListenerProvider either way,
+                    // since dispatchOrFail() only changes how the dispatcher walks the SAME
+                    // listener list, not where listeners are registered.
+                    $chargebackListener = $container->get(ProviderChargebackListener::class);
+                    $events->addListener(
+                        ProviderChargebackEvent::class,
+                        [$chargebackListener, 'onProviderChargeback']
+                    );
                 }
             }
         } catch (\Throwable $e) {

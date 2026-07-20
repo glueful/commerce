@@ -215,6 +215,34 @@ final class DiscountAllocationTest extends TestCase
         self::assertSame('reduced', $taxable[0]['tax_class']);
     }
 
+    // -----------------------------------------------------------------
+    // line_uuid preserved in taxableLines() rows (design spec §2.4/§5)
+    // -----------------------------------------------------------------
+
+    public function testTaxableLinesPreservesLineUuid(): void
+    {
+        $lines = [$this->line('l1', 'p1', 1000, 1), $this->line('l2', 'p2', 500, 2)];
+
+        $taxable = DiscountAllocation::taxableLines($lines, null, 0);
+
+        self::assertSame('l1', $taxable[0]['line_uuid']);
+        self::assertSame('l2', $taxable[1]['line_uuid']);
+    }
+
+    public function testTaxableLinesPreservesLineUuidAlongsideDiscountAllocation(): void
+    {
+        $lines = [
+            $this->line('l1', 'p1', 1000, 1),
+            $this->line('l2', 'p2', 1000, 1),
+        ];
+        $discount = ['type' => 'fixed', 'value' => 500, 'product_scope' => ['p1']];
+
+        $taxable = DiscountAllocation::taxableLines($lines, $discount, 500);
+
+        self::assertSame('l1', $taxable[0]['line_uuid']);
+        self::assertSame('l2', $taxable[1]['line_uuid']);
+    }
+
     /** @return array<string,mixed> */
     private function line(string $lineUuid, string $productUuid, int $unitPrice, int $quantity, string $taxClass = 'standard'): array
     {

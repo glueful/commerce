@@ -208,7 +208,11 @@ final class ProductController
     public function show(Request $request, string $slug): Response
     {
         $tenant = $this->tenants->tenantUuid($this->context);
-        $product = $this->products->findLiveBySlug($this->context, $tenant, $slug);
+        // Buyer-context direct read (design spec §2.3, MV5b): a suspended/
+        // onboarding/closed seller's product is unavailable here exactly
+        // like a delisted/tombstoned one, via the centralized buyer
+        // predicate -- never `findLiveBySlug()` (admin/internal only).
+        $product = $this->products->findBuyerAvailableBySlug($this->context, $tenant, $slug);
         if ($product === null || ($product['status'] ?? '') !== 'active') {
             throw new NotFoundException('Resource not found.');
         }

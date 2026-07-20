@@ -189,6 +189,63 @@ final class DiagnosticsReport
             'commerce_shipping_methods',
             'commerce_shipping_classes',
             'commerce_tax_rates',
+            // Marketplace MV1 foundation (design spec §3). Marketplace-aware
+            // REGARDLESS of `commerce.marketplace.enabled`: data created before
+            // a switch-off must stay coherent for diagnostics and tenant
+            // adoption (design spec §2.1 explicit exceptions).
+            'commerce_marketplace_settings',
+            'commerce_sellers',
+            'commerce_seller_memberships',
+            // Marketplace MV2 shared checkout (design spec §3.3, §7). Marketplace-aware
+            // REGARDLESS of `commerce.marketplace.enabled` for the same reason as the MV1
+            // trio immediately above: a partitioned order's seller partitions must stay
+            // coherent for diagnostics and tenant adoption even after the switch flips off.
+            'commerce_seller_orders',
+            // Marketplace MV3 commission & settlement ledger (design spec §3.2-§3.5,
+            // §3.7). Marketplace-aware REGARDLESS of `commerce.marketplace.enabled` for
+            // the same reason as the MV1/MV2 tables above. All four carry `tenant_uuid`
+            // and are therefore swept by `tenantTables()` below by omission from its
+            // exclusion list -- no addition to that list needed.
+            'commerce_marketplace_ledger',
+            'commerce_ledger_account_locks',
+            'commerce_commission_policy_events',
+            'commerce_payouts',
+            // Marketplace MV4 provider-payout destination accounts (design spec
+            // §3.2). Marketplace-aware REGARDLESS of `commerce.marketplace.enabled`
+            // for the same reason as the MV1-MV3 tables above.
+            'commerce_seller_payout_accounts',
+            // Marketplace MV5a rolling reserves + policy audit (design spec §3.2).
+            // Marketplace-aware REGARDLESS of `commerce.marketplace.enabled` for the
+            // same reason as the MV1-MV4 tables above.
+            'commerce_seller_reserves',
+            'commerce_reserve_policy_events',
+            // Marketplace MV5a chargebacks + attribution lines (design spec §3.3).
+            // Marketplace-aware REGARDLESS of `commerce.marketplace.enabled` for the
+            // same reason as the MV1-MV4 tables above. An already-partitioned
+            // historical order's chargeback still processes after workspace
+            // deactivation (design spec §2.4/§7).
+            'commerce_chargebacks',
+            'commerce_chargeback_lines',
+            // Marketplace MV5b seller-lifecycle audit trail (design spec §3.2).
+            // Marketplace-aware REGARDLESS of `commerce.marketplace.enabled` for the
+            // same reason as the MV1-MV5a tables above.
+            'commerce_seller_lifecycle_events',
+            // Marketplace MV5c-1 seller API key binding + credential + audit
+            // trail (design spec §3). Marketplace-aware REGARDLESS of
+            // `commerce.marketplace.enabled` for the same reason as the
+            // MV1-MV5b tables above.
+            'commerce_seller_api_keys',
+            'commerce_seller_api_key_credentials',
+            'commerce_seller_api_key_events',
+            // Marketplace MV5c-2 seller outbound-webhook endpoint + secret +
+            // event-snapshot + delivery + audit trail (design spec §3).
+            // Marketplace-aware REGARDLESS of `commerce.marketplace.enabled`
+            // for the same reason as the MV1-MV5c-1 tables above.
+            'commerce_seller_webhook_endpoints',
+            'commerce_seller_webhook_secrets',
+            'commerce_seller_webhook_events',
+            'commerce_seller_webhook_deliveries',
+            'commerce_seller_webhook_endpoint_events',
         ];
     }
 

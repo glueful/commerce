@@ -10,6 +10,7 @@ use Glueful\Extensions\Commerce\Customers\AddressBookRepository;
 use Glueful\Extensions\Commerce\Http\DTOs\CheckoutPlaceData;
 use Glueful\Extensions\Commerce\Http\DTOs\CheckoutQuoteData;
 use Glueful\Extensions\Commerce\Orders\CheckoutService;
+use Glueful\Extensions\Commerce\Marketplace\CheckoutConflictException;
 use Glueful\Extensions\Commerce\Orders\InsufficientStockException;
 use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
@@ -91,6 +92,8 @@ final class CheckoutController
                     'sku' => $e->sku,
                 ]],
             ]);
+        } catch (CheckoutConflictException $e) {
+            return Response::error('Checkout conflict', 409, ['code' => $e->errorCode]);
         } catch (ValidationException $e) {
             return Response::validation($e->firstErrors());
         }
