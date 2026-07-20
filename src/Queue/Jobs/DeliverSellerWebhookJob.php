@@ -17,16 +17,21 @@ use Glueful\Queue\Job;
  * and by {@see \Glueful\Extensions\Commerce\Console\SweepSellerWebhooksCommand}
  * (re-enqueuing due `pending` rows whose original wake-up was lost).
  *
- * **No tenant in the job payload (design spec §2.4 CARRY-FORWARD).** The
- * outbox's own queue hint carries only `['delivery_uuid' => ...]` -- no
- * tenant -- so this job resolves which tenant the hinted uuid belongs to via
- * {@see SellerWebhookDeliveryRepository::findByUuidAnyTenant()} (the ONE
- * unscoped read in this whole subsystem, used ONLY for that resolution
- * step) before delegating to the fully tenant-scoped
- * {@see SellerWebhookDeliveryService::deliver()}, whose every subsequent
- * read/write is `tenant_uuid`-scoped again. A delivery_uuid that no longer
- * exists (already finalized/canceled/purged) is a silent no-op -- the
- * durable row, not the hint, is the authority (design spec §2.4).
+ * **Tenant-scoped resolution.** Every hint pushed since 1.2.x carries
+ * `['delivery_uuid' => ..., 'tenant_uuid' => ...]`, and this job resolves
+ * the row by that (tenant, uuid) PAIR -- delivery uuids carry no
+ * cross-tenant uniqueness constraint (migration 019), so uuid-only
+ * resolution could route a hypothetical cross-tenant collision to the
+ * wrong tenant's row and leave the intended one waiting for the sweep.
+ * A payload WITHOUT `tenant_uuid` (a hint enqueued by a pre-fix 1.2.0
+ * install that upgrades with jobs still in flight) falls back to the
+ * legacy unscoped {@see SellerWebhookDeliveryRepository::findByUuidAnyTenant()}
+ * resolution -- the ONE unscoped read in this whole subsystem, kept ONLY
+ * for that in-flight-payload compatibility. Either way every subsequent
+ * read/write in {@see SellerWebhookDeliveryService::deliver()} is
+ * `tenant_uuid`-scoped. A delivery_uuid that no longer exists (already
+ * finalized/canceled/purged) is a silent no-op -- the durable row, not
+ * the hint, is the authority (design spec §2.4).
  */
 final class DeliverSellerWebhookJob extends Job
 {
@@ -45,13 +50,23 @@ final class DeliverSellerWebhookJob extends Job
             return;
         }
 
-        $deliveryUuid = $this->getData()['delivery_uuid'] ?? null;
+        $data = $this->getData();
+        $deliveryUuid = $data['delivery_uuid'] ?? null;
         if (!is_string($deliveryUuid) || $deliveryUuid === '') {
             return;
         }
 
         $repository = app($this->context, SellerWebhookDeliveryRepository::class);
-        $row = $repository->findByUuidAnyTenant($this->context, $deliveryUuid);
+
+        // Tenant-scoped resolution by the (tenant, uuid) pair; the unscoped
+        // read remains ONLY as the legacy fallback for hints enqueued by a
+        // pre-fix install with jobs still in flight (see class docblock).
+        // `tenant_uuid` may legitimately be '' (tenancy-off sentinel), so the
+        // discriminator is key PRESENCE, not non-emptiness.
+        $tenantUuid = $data['tenant_uuid'] ?? null;
+        $row = is_string($tenantUuid)
+            ? $repository->findByUuid($this->context, $tenantUuid, $deliveryUuid)
+            : $repository->findByUuidAnyTenant($this->context, $deliveryUuid);
         if ($row === null) {
             return;
         }

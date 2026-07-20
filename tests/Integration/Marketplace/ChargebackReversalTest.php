@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Glueful\Extensions\Commerce\Tests\Integration\Marketplace;
 
+use Glueful\Extensions\Commerce\Marketplace\ChargebackAttributionException;
 use Glueful\Extensions\Commerce\Marketplace\ChargebackRepository;
 use Glueful\Extensions\Commerce\Marketplace\ChargebackService;
 use Glueful\Extensions\Commerce\Marketplace\LedgerAccountLock;
@@ -508,6 +509,110 @@ final class ChargebackReversalTest extends CommerceTestCase
 
         self::assertCount(0, $this->chargebackLinesFor($chargebackUuid));
         self::assertCount(0, $this->ledgerRowsForChargeback($chargebackUuid));
+    }
+
+    // -----------------------------------------------------------------
+    // 4b. Conservation guard: every attribution line amount must be
+    //     strictly positive. A signed mix like {-50, +150} sums to the
+    //     chargeback amount (100), yet pre-guard it would post a 150
+    //     chargeback_debit against one seller while the negative line is
+    //     silently skipped by the `$debit > 0` posting gate -- 150 of
+    //     ledger movement for 100 of chargeback cash. Must be rejected as
+    //     caller input: nothing posts, no lines persist, the chargeback
+    //     stays awaiting_attribution.
+    // -----------------------------------------------------------------
+
+    public function testPartialChargebackRejectsNonPositiveLineAmounts(): void
+    {
+        $this->seedOrder(['uuid' => 'orderCBNEG01', 'grand_total' => 1000]);
+        $this->seedSellerOrder([
+            'uuid' => 'selordCBN001',
+            'order_uuid' => 'orderCBNEG01',
+            'seller_uuid' => 'sellerCBNEGA',
+            'currency' => 'USD',
+            'subtotal' => 200,
+            'attributed_total' => 200,
+            'partition_number' => 1,
+        ]);
+        $this->seedSellerOrder([
+            'uuid' => 'selordCBN002',
+            'order_uuid' => 'orderCBNEG01',
+            'seller_uuid' => 'sellerCBNEGB',
+            'currency' => 'USD',
+            'subtotal' => 800,
+            'attributed_total' => 800,
+            'partition_number' => 2,
+        ]);
+        $this->seedOrderLine([
+            'uuid' => 'lineCBNEGA01',
+            'order_uuid' => 'orderCBNEG01',
+            'seller_uuid' => 'sellerCBNEGA',
+            'line_total' => 200,
+            'commission_basis' => 200,
+            'commission_amount' => 20,
+        ]);
+        $this->seedOrderLine([
+            'uuid' => 'lineCBNEGB01',
+            'order_uuid' => 'orderCBNEG01',
+            'seller_uuid' => 'sellerCBNEGB',
+            'line_total' => 800,
+            'commission_basis' => 800,
+            'commission_amount' => 80,
+        ]);
+        $this->seedSaleLedger('orderCBNEG01', 'sellerCBNEGA', 'USD', 200, 20);
+        $this->seedSaleLedger('orderCBNEG01', 'sellerCBNEGB', 'USD', 800, 80);
+
+        $ingested = $this->service->ingest($this->context, $this->chargebackEvent([
+            'providerEventId' => 'evt_partial_negline_1',
+            'amount' => 100,
+            'payable' => ['id' => 'orderCBNEG01', 'amount' => 1000],
+        ]));
+        self::assertSame('awaiting_attribution', $ingested['status']);
+        $chargebackUuid = (string) $ingested['uuid'];
+
+        try {
+            $this->service->attributeAndPost($this->context, self::TENANT, $chargebackUuid, [
+                ['order_line_uuid' => 'lineCBNEGA01', 'amount' => -50],
+                ['order_line_uuid' => 'lineCBNEGB01', 'amount' => 150],
+            ]);
+            self::fail('Expected ChargebackAttributionException for a negative attribution line amount.');
+        } catch (ChargebackAttributionException $e) {
+            self::assertStringContainsString('positive', $e->getMessage());
+        }
+
+        // A zero line is equally rejected (0 + 100 also sums to the amount).
+        try {
+            $this->service->attributeAndPost($this->context, self::TENANT, $chargebackUuid, [
+                ['order_line_uuid' => 'lineCBNEGA01', 'amount' => 0],
+                ['order_line_uuid' => 'lineCBNEGB01', 'amount' => 100],
+            ]);
+            self::fail('Expected ChargebackAttributionException for a zero attribution line amount.');
+        } catch (ChargebackAttributionException $e) {
+            self::assertStringContainsString('positive', $e->getMessage());
+        }
+
+        // Conservation regression: NOTHING posted or persisted by either
+        // attempt, and the chargeback is still attributable with valid lines.
+        $row = $this->chargebackRow($chargebackUuid);
+        self::assertNotNull($row);
+        self::assertSame('awaiting_attribution', $row['status']);
+        self::assertCount(0, $this->chargebackLinesFor($chargebackUuid));
+        self::assertCount(0, $this->ledgerRowsForChargeback($chargebackUuid));
+
+        // A subsequent well-formed attribution still posts exactly the
+        // chargeback amount -- total signed ledger debits === -amount.
+        $posted = $this->service->attributeAndPost($this->context, self::TENANT, $chargebackUuid, [
+            ['order_line_uuid' => 'lineCBNEGB01', 'amount' => 100],
+        ]);
+        self::assertSame('posted', $posted['status']);
+        $ledger = $this->ledgerRowsForChargeback($chargebackUuid);
+        $debitTotal = 0;
+        foreach ($ledger as $entry) {
+            if ((string) $entry['entry_type'] === 'chargeback_debit') {
+                $debitTotal += (int) $entry['amount'];
+            }
+        }
+        self::assertSame(-100, $debitTotal, 'posted chargeback debits must sum to exactly -amount');
     }
 
     // -----------------------------------------------------------------

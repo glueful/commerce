@@ -381,8 +381,8 @@ final class SellerWebhookDeliveryService
         // the durable `pending` row committed above is the authority
         // regardless of whether this hint is ever delivered.
         $replayUuid = (string) $replay['uuid'];
-        db($c)->afterCommit(function () use ($c, $replayUuid): void {
-            $this->enqueueHint($c, $replayUuid);
+        db($c)->afterCommit(function () use ($c, $tenant, $replayUuid): void {
+            $this->enqueueHint($c, $tenant, $replayUuid);
         });
 
         return $replay;
@@ -393,8 +393,13 @@ final class SellerWebhookDeliveryService
      * {@see SellerWebhookOutboxPublisher::pushQueueHints()}'s exact
      * swallow-and-log idiom: a lost/failed push here NEVER threatens
      * correctness -- the durable `pending` row is the authority regardless.
+     *
+     * The payload carries `tenant_uuid` so the job resolves the row by the
+     * (tenant, uuid) PAIR -- delivery uuids carry no cross-tenant uniqueness
+     * constraint (migration 019), so uuid-only resolution could route a
+     * hypothetical collision to the wrong tenant's row.
      */
-    public function enqueueHint(ApplicationContext $c, string $deliveryUuid): void
+    public function enqueueHint(ApplicationContext $c, string $tenant, string $deliveryUuid): void
     {
         $container = container($c);
         if (!$container->has(QueueManager::class)) {
@@ -409,6 +414,7 @@ final class SellerWebhookDeliveryService
         try {
             $queue->push('Glueful\\Extensions\\Commerce\\Queue\\Jobs\\DeliverSellerWebhookJob', [
                 'delivery_uuid' => $deliveryUuid,
+                'tenant_uuid' => $tenant,
             ]);
         } catch (\Throwable $e) {
             error_log(
@@ -607,12 +613,34 @@ final class SellerWebhookDeliveryService
             // never embeds a resolved internal address.
             return $this->outcome('terminal', null, 'Webhook delivery blocked by safety validation.', null);
         } catch (TransportExceptionInterface $e) {
-            // A genuine network/timeout failure -- retryable.
-            return $this->outcome('retryable', null, 'Network error: ' . $e->getMessage(), null);
+            // A genuine network/timeout failure -- retryable. The raw
+            // transport message can embed resolved addresses/transport
+            // internals, and `last_error` is seller-visible through the
+            // deliveries read -- log the detail internally, persist a
+            // bounded generic message.
+            error_log(
+                '[Commerce][SellerWebhookDeliveryService] Transport failure delivering '
+                    . "'{$claimed['delivery_uuid']}': " . $e->getMessage()
+            );
+
+            return $this->outcome(
+                'retryable',
+                null,
+                'Network error contacting the endpoint (connection failed or timed out).',
+                null
+            );
         } catch (\Throwable $e) {
             // Fail-safe: never let an unexpected exception crash the worker;
-            // treat as retryable so the attempt budget still governs it.
-            return $this->outcome('retryable', null, 'Unexpected delivery error: ' . $e->getMessage(), null);
+            // treat as retryable so the attempt budget still governs it. An
+            // unexpected internal exception's message can disclose
+            // implementation details -- same log-internally/persist-generic
+            // split as the transport branch above.
+            error_log(
+                '[Commerce][SellerWebhookDeliveryService] Unexpected failure delivering '
+                    . "'{$claimed['delivery_uuid']}': " . get_class($e) . ': ' . $e->getMessage()
+            );
+
+            return $this->outcome('retryable', null, 'Unexpected delivery error.', null);
         }
 
         $this->consumeBounded($response, $maxResponseBytes);

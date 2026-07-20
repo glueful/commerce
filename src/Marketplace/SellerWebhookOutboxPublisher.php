@@ -224,8 +224,8 @@ final class SellerWebhookOutboxPublisher
         }
 
         if ($pendingDeliveryUuids !== []) {
-            db($c)->afterCommit(function () use ($c, $pendingDeliveryUuids): void {
-                $this->pushQueueHints($c, $pendingDeliveryUuids);
+            db($c)->afterCommit(function () use ($c, $tenant, $pendingDeliveryUuids): void {
+                $this->pushQueueHints($c, $tenant, $pendingDeliveryUuids);
             });
         }
     }
@@ -237,9 +237,15 @@ final class SellerWebhookOutboxPublisher
      * discovers/enqueues any row whose hint was lost, dropped, or never
      * ran (process crash between commit and this callback).
      *
+     * The payload carries `tenant_uuid` alongside `delivery_uuid` so the job
+     * resolves the row by the (tenant, uuid) PAIR -- delivery uuids carry no
+     * uniqueness constraint across tenants (migration 019), so uuid-only
+     * resolution could route a hypothetical cross-tenant collision to the
+     * wrong tenant's row and leave the intended one waiting for the sweep.
+     *
      * @param list<string> $deliveryUuids
      */
-    private function pushQueueHints(ApplicationContext $c, array $deliveryUuids): void
+    private function pushQueueHints(ApplicationContext $c, string $tenant, array $deliveryUuids): void
     {
         $container = container($c);
         if (!$container->has(QueueManager::class)) {
@@ -257,6 +263,7 @@ final class SellerWebhookOutboxPublisher
                 // push() only persists this string, it is never autoloaded/instantiated here.
                 $queue->push('Glueful\\Extensions\\Commerce\\Queue\\Jobs\\DeliverSellerWebhookJob', [
                     'delivery_uuid' => $deliveryUuid,
+                    'tenant_uuid' => $tenant,
                 ]);
             } catch (\Throwable $e) {
                 error_log(
