@@ -170,6 +170,34 @@ SQL,
         return $affected === 1;
     }
 
+    /**
+     * The PERMISSIVE revision claim (MV5c-2 Task 5, design spec §2.7/§2.9):
+     * unlike {@see self::claimActiveRevision()}, this does NOT exclude a
+     * tombstoned (`status = 'deleted'`) endpoint -- the delivery-finalize and
+     * sweep-reclaim protocols must still be able to serialize against, and
+     * observe, an endpoint that was deleted WHILE a delivery was already
+     * `delivering` (design spec §2.9: "an in-flight HTTP delivery that
+     * started before closure may finish and record its result"). A brand
+     * new delivery attempt must never START against a tombstoned endpoint
+     * (that path uses {@see self::claimActiveRevision()} instead); this
+     * method exists only for finishing/recording an ALREADY-in-flight one.
+     */
+    public function claimRevision(ApplicationContext $context, string $tenant, string $uuid): bool
+    {
+        $utcNow = UtcNowSql::expression(db($context)->getDriverName());
+
+        $affected = db($context)->table(self::ENDPOINTS_TABLE)->executeModification(
+            <<<SQL
+UPDATE commerce_seller_webhook_endpoints
+SET revision = revision + 1, updated_at = {$utcNow}
+WHERE tenant_uuid = ? AND uuid = ?
+SQL,
+            [$tenant, $uuid]
+        );
+
+        return $affected === 1;
+    }
+
     /** @param array<string,mixed> $changes */
     public function update(ApplicationContext $context, string $tenant, string $uuid, array $changes): void
     {

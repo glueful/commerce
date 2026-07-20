@@ -253,9 +253,9 @@ final class SellerWebhookOutboxPublisher
 
         foreach ($deliveryUuids as $deliveryUuid) {
             try {
-                // Job class Task 5 will define; push() only persists this string, it is
-                // never autoloaded/instantiated here.
-                $queue->push('Glueful\\Extensions\\Commerce\\Marketplace\\Jobs\\DeliverSellerWebhookJob', [
+                // Glueful\Extensions\Commerce\Queue\Jobs\DeliverSellerWebhookJob (Task 5);
+                // push() only persists this string, it is never autoloaded/instantiated here.
+                $queue->push('Glueful\\Extensions\\Commerce\\Queue\\Jobs\\DeliverSellerWebhookJob', [
                     'delivery_uuid' => $deliveryUuid,
                 ]);
             } catch (\Throwable $e) {

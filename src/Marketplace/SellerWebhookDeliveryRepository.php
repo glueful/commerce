@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Commerce\Marketplace;
 
 use Glueful\Bootstrap\ApplicationContext;
+use Glueful\Extensions\Commerce\Support\UtcNowSql;
 
 /**
  * Seller-webhook delivery lifecycle PRIMITIVES (design spec §2.4/§2.7/§2.9,
@@ -221,5 +222,221 @@ final class SellerWebhookDeliveryRepository
             'paused_at' => $pausedAt,
             'paused_remaining_seconds' => 0,
         ]);
+    }
+
+    // -----------------------------------------------------------------
+    // Crash-safe claim lease + token-checked finalize (MV5c-2 Task 5,
+    // design spec §2.7/§2.9): the CAS primitives {@see SellerWebhookDeliveryService}
+    // drives through claim -> HTTP attempt -> finalize/reclaim. Every write
+    // here is an affected-row-checked CAS -- never a blind update -- so a
+    // stale worker (its lease already reclaimed by the sweep, or a
+    // concurrent finalize that already ran) always loses the race silently
+    // (0 rows affected) rather than corrupting a newer attempt.
+    // -----------------------------------------------------------------
+
+    /**
+     * Tenant-scoped point read used by claim/finalize/reclaim to load a
+     * delivery's current row before mutating it.
+     *
+     * @return array<string,mixed>|null
+     */
+    public function findByUuid(ApplicationContext $context, string $tenant, string $uuid): ?array
+    {
+        return db($context)->table(self::TABLE)
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('uuid', '=', $uuid)
+            ->first();
+    }
+
+    /**
+     * Tenant-UNSCOPED point read (design spec §2.4 CARRY-FORWARD): Task 4's
+     * `SellerWebhookOutboxPublisher::pushQueueHints()` afterCommit() hint
+     * pushes ONLY `['delivery_uuid' => ...]` -- no tenant -- so
+     * {@see \Glueful\Extensions\Commerce\Queue\Jobs\DeliverSellerWebhookJob}
+     * has no tenant to scope by until it first resolves which tenant a
+     * hinted delivery_uuid belongs to. Used ONLY for that one resolution
+     * step; every subsequent read/write in the claim/finalize protocol is
+     * fully tenant-scoped again from that point on, so a hypothetical
+     * cross-tenant uuid collision can never cause a cross-tenant mutation --
+     * the CAS predicates below always include `tenant_uuid = ?`.
+     *
+     * @return array<string,mixed>|null
+     */
+    public function findByUuidAnyTenant(ApplicationContext $context, string $uuid): ?array
+    {
+        return db($context)->table(self::TABLE)
+            ->where('uuid', '=', $uuid)
+            ->first();
+    }
+
+    /**
+     * Unlocked candidate discovery (design spec §2.7): every `pending` row
+     * whose `next_attempt_at` is due, oldest-first, batch-limited. Candidate
+     * selection is NOT the claim -- {@see self::claimForDelivery()} is the
+     * actual CAS a worker must win before delivering.
+     *
+     * @return list<array<string,mixed>>
+     */
+    public function duePending(ApplicationContext $context, string $tenant, int $limit): array
+    {
+        $utcNow = UtcNowSql::expression(db($context)->getDriverName());
+
+        return db($context)->table(self::TABLE)
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('status', '=', 'pending')
+            ->whereRaw("next_attempt_at <= {$utcNow}")
+            ->orderBy('next_attempt_at', 'ASC')
+            ->orderBy('uuid', 'ASC')
+            ->limit($limit)
+            ->get();
+    }
+
+    /**
+     * Unlocked candidate discovery for the recovery sweep (design spec §2.7):
+     * every `delivering` row whose crash-safe claim lease has expired,
+     * oldest-first, batch-limited. {@see self::reclaimExpired()} is the
+     * actual CAS a sweep must win before touching one of these rows.
+     *
+     * @return list<array<string,mixed>>
+     */
+    public function dueDelivering(ApplicationContext $context, string $tenant, int $limit): array
+    {
+        $utcNow = UtcNowSql::expression(db($context)->getDriverName());
+
+        return db($context)->table(self::TABLE)
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('status', '=', 'delivering')
+            ->whereRaw("claim_expires_at <= {$utcNow}")
+            ->orderBy('claim_expires_at', 'ASC')
+            ->orderBy('uuid', 'ASC')
+            ->limit($limit)
+            ->get();
+    }
+
+    /**
+     * The crash-safe claim CAS (design spec §2.7): `pending` -> `delivering`,
+     * a fresh random `claim_token` + `claim_expires_at`, `attempts + 1`
+     * (atomic increment, raw SQL -- never a read-then-write), and
+     * `last_attempt_at`. Guarded by `status = 'pending'` so a row already
+     * claimed by a concurrent worker (or reclaimed out from under a dead one
+     * and re-claimed already) loses this race with 0 affected rows. This
+     * commit -- BEFORE any HTTP I/O runs -- is the in-flight linearization
+     * point (design spec §2.9).
+     */
+    public function claimForDelivery(
+        ApplicationContext $context,
+        string $tenant,
+        string $uuid,
+        string $claimToken,
+        string $claimExpiresAt,
+        string $nowStr
+    ): bool {
+        $utcNow = UtcNowSql::expression(db($context)->getDriverName());
+
+        $affected = db($context)->table(self::TABLE)->executeModification(
+            <<<SQL
+UPDATE commerce_seller_webhook_deliveries
+SET status = 'delivering',
+    claim_token = ?,
+    claim_expires_at = ?,
+    attempts = attempts + 1,
+    last_attempt_at = ?,
+    updated_at = {$utcNow}
+WHERE tenant_uuid = ? AND uuid = ? AND status = 'pending'
+SQL,
+            [$claimToken, $claimExpiresAt, $nowStr, $tenant, $uuid]
+        );
+
+        return $affected === 1;
+    }
+
+    /**
+     * Token-checked finalize (design spec §2.7/§2.9): `WHERE status =
+     * 'delivering' AND claim_token = ?` -- a stale worker whose lease was
+     * already reclaimed (a new token, or the row moved on entirely) always
+     * affects 0 rows here and MUST treat that as "do not touch counters or
+     * endpoint state" (see {@see SellerWebhookDeliveryService}). NOT
+     * expiry-gated -- an in-time finalize's lease has not expired yet, so
+     * gating on `claim_expires_at` here would wrongly reject a healthy
+     * on-time completion; {@see self::reclaimExpired()} is the sweep's
+     * separate, expiry-gated sibling. `$changes` always determines the
+     * landing `status` (`delivered|pending|dead_letter`); claim fields are
+     * ALWAYS cleared on an accepted finalize.
+     *
+     * @param array<string,mixed> $changes
+     */
+    public function finalize(
+        ApplicationContext $context,
+        string $tenant,
+        string $uuid,
+        string $claimToken,
+        array $changes,
+        string $updatedAt
+    ): bool {
+        $changes['claim_token'] = null;
+        $changes['claim_expires_at'] = null;
+        $changes['updated_at'] = $updatedAt;
+
+        $affected = db($context)->table(self::TABLE)
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('uuid', '=', $uuid)
+            ->where('status', '=', 'delivering')
+            ->where('claim_token', '=', $claimToken)
+            ->update($changes);
+
+        return $affected === 1;
+    }
+
+    /**
+     * The sweep's reclaim CAS (design spec §2.7): `WHERE status =
+     * 'delivering' AND claim_token = ? AND claim_expires_at <= {utcNow}` --
+     * the SAME token check as {@see self::finalize()}, PLUS an expiry gate
+     * so the sweep can never reclaim a lease that is still healthy (only
+     * {@see self::dueDelivering()}'s own unlocked candidate read raced a
+     * lease renewal that never actually happens in this design, belt and
+     * suspenders). Never touches `attempts` -- the claim already incremented
+     * it (design spec §2.7: "an expired claim counts as the already-
+     * incremented attempt").
+     *
+     * Raw SQL (like {@see self::claimForDelivery()}), NOT the fluent
+     * `->update()` builder: the framework query builder does not yet support
+     * a raw/complex WHERE predicate (the `claim_expires_at <= {utcNow}`
+     * comparison) combined with an UPDATE. `$changes`' keys are always
+     * internal, fixed column names from THIS class's own call sites (never
+     * user input), so building the SET clause from them is safe.
+     *
+     * @param array<string,mixed> $changes
+     */
+    public function reclaimExpired(
+        ApplicationContext $context,
+        string $tenant,
+        string $uuid,
+        string $claimToken,
+        array $changes,
+        string $updatedAt
+    ): bool {
+        $changes['claim_token'] = null;
+        $changes['claim_expires_at'] = null;
+        $changes['updated_at'] = $updatedAt;
+
+        $utcNow = UtcNowSql::expression(db($context)->getDriverName());
+
+        $setClauses = [];
+        $bindings = [];
+        foreach ($changes as $column => $value) {
+            $setClauses[] = "{$column} = ?";
+            $bindings[] = $value;
+        }
+        $bindings[] = $tenant;
+        $bindings[] = $uuid;
+        $bindings[] = $claimToken;
+
+        $sql = 'UPDATE commerce_seller_webhook_deliveries SET ' . implode(', ', $setClauses)
+            . " WHERE tenant_uuid = ? AND uuid = ? AND status = 'delivering' AND claim_token = ?"
+            . " AND claim_expires_at <= {$utcNow}";
+
+        $affected = db($context)->table(self::TABLE)->executeModification($sql, $bindings);
+
+        return $affected === 1;
     }
 }

@@ -128,6 +128,7 @@ use Glueful\Extensions\Commerce\Marketplace\SellerOrderService;
 use Glueful\Extensions\Commerce\Marketplace\SellerRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerService;
 use Glueful\Extensions\Commerce\Marketplace\SellerWebhookDeliveryRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerWebhookDeliveryService;
 use Glueful\Extensions\Commerce\Marketplace\SellerWebhookEndpointRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerWebhookEndpointService;
 use Glueful\Extensions\Commerce\Marketplace\SellerWebhookEventRepository;
@@ -177,6 +178,7 @@ use Glueful\Extensions\Contracts\Payments\PayoutCollector;
 use Glueful\Extensions\Contracts\Payments\ProviderChargebackEvent;
 use Glueful\Extensions\Contracts\Payments\RefundCollector;
 use Glueful\Extensions\ServiceProvider;
+use Glueful\Http\Client;
 use Glueful\Http\Security\SafeOutboundTargetResolver;
 use Glueful\Repository\BlobRepository;
 use Glueful\Uploader\Contracts\BlobAccessPolicyRegistry;
@@ -442,6 +444,10 @@ final class CommerceServiceProvider extends ServiceProvider
             ],
             SellerWebhookOutboxPublisher::class => [
                 'factory' => [self::class, 'makeSellerWebhookOutboxPublisher'],
+                'shared' => true,
+            ],
+            SellerWebhookDeliveryService::class => [
+                'factory' => [self::class, 'makeSellerWebhookDeliveryService'],
                 'shared' => true,
             ],
             SellerOrderRepository::class => [
@@ -1608,6 +1614,18 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(SellerWebhookEventRepository::class),
             $container->get(SellerWebhookDeliveryRepository::class),
             $container->get(SellerWebhookPayloadProjector::class)
+        );
+    }
+
+    public static function makeSellerWebhookDeliveryService(ContainerInterface $container): SellerWebhookDeliveryService
+    {
+        return new SellerWebhookDeliveryService(
+            $container->get(SellerRepository::class),
+            $container->get(SellerWebhookEndpointRepository::class),
+            $container->get(SellerWebhookDeliveryRepository::class),
+            $container->get(SellerWebhookEventRepository::class),
+            $container->get(SellerWebhookSecretService::class),
+            $container->get(Client::class)
         );
     }
 
