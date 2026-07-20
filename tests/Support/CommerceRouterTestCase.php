@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Commerce\Tests\Support;
 
 use Glueful\Bootstrap\ApplicationContext;
+use Glueful\Encryption\EncryptionService;
 use Glueful\Extensions\Commerce\Catalog\CatalogService;
 use Glueful\Extensions\Commerce\Catalog\ProductChildrenRepository;
 use Glueful\Extensions\Commerce\Catalog\ProductRepository;
@@ -17,6 +18,7 @@ use Glueful\Extensions\Commerce\Http\Seller\SellerFinancialController;
 use Glueful\Extensions\Commerce\Http\Seller\SellerInventoryController;
 use Glueful\Extensions\Commerce\Http\Seller\SellerMembershipController;
 use Glueful\Extensions\Commerce\Http\Seller\SellerOrderController;
+use Glueful\Extensions\Commerce\Http\Seller\SellerWebhookController;
 use Glueful\Extensions\Commerce\Inventory\InventoryService;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
 use Glueful\Extensions\Commerce\Marketplace\FixedSellerRoleAuthority;
@@ -38,14 +40,25 @@ use Glueful\Extensions\Commerce\Marketplace\SellerOrderRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerOrderService;
 use Glueful\Extensions\Commerce\Marketplace\SellerRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerService;
+use Glueful\Extensions\Commerce\Marketplace\SellerWebhookDeliveryRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerWebhookDeliveryService;
+use Glueful\Extensions\Commerce\Marketplace\SellerWebhookEndpointRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerWebhookEndpointService;
+use Glueful\Extensions\Commerce\Marketplace\SellerWebhookEventRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerWebhookSecretService;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
 use Glueful\Extensions\Commerce\Reports\SellerFinancialReportRepository;
 use Glueful\Extensions\Commerce\Shipping\ShippingClassRepository;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
+use Glueful\Http\Client;
 use Glueful\Http\Exceptions\Handler as ExceptionHandler;
 use Glueful\Http\Response;
+use Glueful\Http\Security\SafeOutboundTargetResolver;
 use Glueful\Routing\RouteMiddleware;
 use Glueful\Routing\Router;
+use Psr\Log\NullLogger;
+use Symfony\Component\HttpClient\MockHttpClient;
+use Symfony\Component\HttpClient\Response\MockResponse;
 use Symfony\Component\HttpFoundation\Request;
 
 /**
@@ -84,6 +97,20 @@ abstract class CommerceRouterTestCase extends CommerceTestCase
 {
     protected string $tenant = 'sellerRteT01';
 
+    /**
+     * Fixed hostname -> IP DNS convention {@see self::buildSellerWebhookController()}
+     * uses for BOTH registration-time and delivery-time SSRF resolution --
+     * any hostname not listed here resolves to a single genuinely public,
+     * non-reserved address. A test may mutate this map BEFORE calling
+     * {@see self::freshRouter()} to simulate a DNS rebind between
+     * registration and a later `enable()` re-validation, mirroring
+     * {@see \Glueful\Extensions\Commerce\Tests\Integration\Marketplace\SellerWebhookEndpointTest::service()}'s
+     * identical `$dnsMap` convention.
+     *
+     * @var array<string,list<string>>
+     */
+    protected array $webhookDnsMap = [];
+
     protected function freshRouter(): Router
     {
         $this->bind(ApplicationContext::class, $this->context);
@@ -94,6 +121,7 @@ abstract class CommerceRouterTestCase extends CommerceTestCase
         $this->bind(SellerOrderController::class, $this->buildSellerOrderController());
         $this->bind(SellerFinancialController::class, $this->buildSellerFinancialController());
         $this->bind(SellerApiKeyController::class, $this->buildSellerApiKeyController());
+        $this->bind(SellerWebhookController::class, $this->buildSellerWebhookController());
         $this->bind('interactive_session', new InteractiveSessionMiddleware());
 
         $router = new Router($this->contextContainer());
@@ -348,6 +376,78 @@ abstract class CommerceRouterTestCase extends CommerceTestCase
             $apiKeys,
             $this->fixedTenant()
         );
+    }
+
+    /**
+     * Seller self-service webhook management surface (design spec §2.10,
+     * MV5c-2 Task 7): a REAL {@see SellerWebhookController} wired against a
+     * REAL {@see SellerWebhookEndpointService}/{@see SellerWebhookDeliveryService}
+     * stack sharing the SAME {@see SellerWebhookEndpointRepository}/
+     * {@see SellerWebhookDeliveryRepository} instances -- mirrors every
+     * other `build*Controller()` helper above. The delivery service's HTTP
+     * client is a {@see MockHttpClient} that is never actually expected to
+     * be called by this surface's own tests (`replay()` only inserts a new
+     * `pending` row; it never performs delivery I/O itself) -- a 500
+     * placeholder response guards against a silent behavior change if that
+     * ever stops being true.
+     */
+    protected function buildSellerWebhookController(): SellerWebhookController
+    {
+        $endpoints = new SellerWebhookEndpointRepository();
+        $deliveries = new SellerWebhookDeliveryRepository();
+        $secrets = new SellerWebhookSecretService($endpoints, $this->webhookEncryptionService());
+
+        $map = $this->webhookDnsMap;
+        $resolver = new SafeOutboundTargetResolver(static fn (string $host): array => $map[$host] ?? ['1.1.1.1']);
+
+        $endpointService = new SellerWebhookEndpointService(
+            new SellerRepository(),
+            new SellerMembershipRepository(),
+            $endpoints,
+            $deliveries,
+            new FixedSellerRoleAuthority(),
+            $secrets,
+            $resolver
+        );
+
+        $httpClient = new Client(
+            new MockHttpClient(static fn (): MockResponse => new MockResponse('', ['http_code' => 500])),
+            new NullLogger(),
+            $this->context,
+            $resolver
+        );
+        $deliveryService = new SellerWebhookDeliveryService(
+            new SellerRepository(),
+            $endpoints,
+            $deliveries,
+            new SellerWebhookEventRepository(),
+            $secrets,
+            $httpClient
+        );
+
+        return new SellerWebhookController(
+            $this->context,
+            $endpointService,
+            $endpoints,
+            $deliveries,
+            $deliveryService,
+            $this->fixedTenant()
+        );
+    }
+
+    /**
+     * Mirrors {@see \Glueful\Extensions\Commerce\Tests\Integration\Marketplace\SellerWebhookEndpointTest::encryptionService()}'s
+     * identical process-lifetime-cached fixed-key convention.
+     */
+    protected function webhookEncryptionService(): EncryptionService
+    {
+        static $encryption = null;
+        if ($encryption === null) {
+            $this->context->overrideConfig('encryption.key', 'base64:' . base64_encode(str_repeat('k', 32)));
+            $encryption = new EncryptionService($this->context);
+        }
+
+        return $encryption;
     }
 
     protected function buildSellerMiddleware(): SellerMemberMiddleware

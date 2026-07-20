@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Commerce\Tests\Integration\Marketplace;
 
 use Glueful\Bootstrap\ApplicationContext;
+use Glueful\Encryption\EncryptionService;
 use Glueful\Extensions\Commerce\Cart\CartRepository;
 use Glueful\Extensions\Commerce\Cart\CartService;
 use Glueful\Extensions\Commerce\Catalog\AddonRepository;
@@ -22,6 +23,7 @@ use Glueful\Extensions\Commerce\Contracts\TaxCalculator;
 use Glueful\Extensions\Commerce\Discounts\DiscountRepository;
 use Glueful\Extensions\Commerce\Discounts\DiscountService;
 use Glueful\Extensions\Commerce\Console\PurgeApiKeyDenialsCommand;
+use Glueful\Extensions\Commerce\Console\PurgeSellerWebhooksCommand;
 use Glueful\Extensions\Commerce\Http\Admin\AdminOrderController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminProductController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminReportController;
@@ -31,9 +33,11 @@ use Glueful\Extensions\Commerce\Http\DTOs\FulfillOrderData;
 use Glueful\Extensions\Commerce\Http\DTOs\ProductListQuery;
 use Glueful\Extensions\Commerce\Http\DTOs\ProductVariantData;
 use Glueful\Extensions\Commerce\Http\DTOs\ReportWindowQuery;
+use Glueful\Extensions\Commerce\Http\Middleware\InteractiveSessionMiddleware;
 use Glueful\Extensions\Commerce\Http\Middleware\SellerMemberMiddleware;
 use Glueful\Extensions\Commerce\Http\Seller\SellerFinancialController;
 use Glueful\Extensions\Commerce\Http\Seller\SellerOrderController;
+use Glueful\Extensions\Commerce\Http\Seller\SellerWebhookController;
 use Glueful\Extensions\Commerce\Http\Storefront\CartController;
 use Glueful\Extensions\Commerce\Http\Storefront\OrderController;
 use Glueful\Extensions\Commerce\Http\Storefront\ProductController;
@@ -65,6 +69,14 @@ use Glueful\Extensions\Commerce\Marketplace\SellerOrderRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerOrderService;
 use Glueful\Extensions\Commerce\Marketplace\SellerRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerService;
+use Glueful\Extensions\Commerce\Marketplace\SellerWebhookDeliveryRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerWebhookDeliveryService;
+use Glueful\Extensions\Commerce\Marketplace\SellerWebhookEndpointRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerWebhookEndpointService;
+use Glueful\Extensions\Commerce\Marketplace\SellerWebhookEventRepository;
+use Glueful\Extensions\Commerce\Marketplace\SellerWebhookOutboxPublisher;
+use Glueful\Extensions\Commerce\Marketplace\SellerWebhookPayloadProjector;
+use Glueful\Extensions\Commerce\Marketplace\SellerWebhookSecretService;
 use Glueful\Extensions\Commerce\Orders\CheckoutService;
 use Glueful\Extensions\Commerce\Orders\OrderNumberGenerator;
 use Glueful\Extensions\Commerce\Orders\OrderPaymentService;
@@ -86,11 +98,16 @@ use Glueful\Extensions\Commerce\Tests\Support\CommerceTestCase;
 use Glueful\Extensions\Commerce\Tests\Support\QueryLoggingPdoStatement;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Glueful\Helpers\Utils;
+use Glueful\Http\Client;
 use Glueful\Http\Exceptions\Handler as ExceptionHandler;
 use Glueful\Http\Response;
+use Glueful\Http\Security\SafeOutboundTargetResolver;
 use Glueful\Routing\RouteMiddleware;
 use Glueful\Routing\Router;
+use Psr\Log\NullLogger;
 use Symfony\Component\Console\Tester\CommandTester;
+use Symfony\Component\HttpClient\MockHttpClient;
+use Symfony\Component\HttpClient\Response\MockResponse;
 use Symfony\Component\HttpFoundation\Request;
 
 /**
@@ -177,6 +194,17 @@ final class MarketplaceRegressionTest extends CommerceTestCase
         'commerce_seller_api_key_credentials',
         'commerce_seller_api_key_events',
     ];
+
+    /** MV5c-2 Task 8 (design spec §3): the five brand-new seller-webhook tables. */
+    private const MV5C2_TABLES = [
+        'commerce_seller_webhook_endpoints',
+        'commerce_seller_webhook_secrets',
+        'commerce_seller_webhook_events',
+        'commerce_seller_webhook_deliveries',
+        'commerce_seller_webhook_endpoint_events',
+    ];
+
+    private int $webhookEndpointSeq = 0;
 
     // =====================================================================
     // 1. Route manifest: flag off == pre-MV1, byte for byte.
@@ -478,7 +506,14 @@ final class MarketplaceRegressionTest extends CommerceTestCase
         // and the authorizer itself is a proven zero-query no-op for every
         // one of these session-authenticated paths (design spec §6 --
         // `auth_method != 'api_key'` short-circuits before any key-table
-        // query; see `SellerApiKeyAuthorizer::authorize()`).
+        // query; see `SellerApiKeyAuthorizer::authorize()`). MV5c-2 Task 8
+        // (GATES) adds the five new seller-webhook tables: no ordinary path
+        // above touches them either -- they are written ONLY by a REAL
+        // `SellerWebhookOutboxPublisher::capture()` call a business service
+        // was explicitly wired with, and `capture()` itself is a proven
+        // zero-query no-op while the master switch is off (design spec §6;
+        // see `SellerWebhookOutboxTest::testMasterOffCaptureIsAZeroQueryNoOp()`
+        // and this file's own `testMasterOff...WebhookPublisherWired...()` below).
         $marketplaceTables = [
             'commerce_marketplace_settings',
             'commerce_sellers',
@@ -492,6 +527,7 @@ final class MarketplaceRegressionTest extends CommerceTestCase
             ...self::MV5A_TABLES,
             self::MV5B_LIFECYCLE_TABLE,
             ...self::MV5C1_TABLES,
+            ...self::MV5C2_TABLES,
         ];
         foreach (QueryLoggingPdoStatement::$queries as $sql) {
             foreach ($marketplaceTables as $table) {
@@ -2161,6 +2197,465 @@ final class MarketplaceRegressionTest extends CommerceTestCase
         );
     }
 
+    // =====================================================================
+    // 11. MV5c-2 Task 8 GATES (design spec §2.4/§2.6/§3/§6): no new route
+    //    leaks into the manifest with the master switch off; the five new
+    //    seller-webhook tables join the SAME maintenance guarantees the
+    //    MV1-MV5c-1 tables already have (§4) -- confirming they are already
+    //    registered from Task 2/the zero-query table list above; a REAL
+    //    `SellerWebhookOutboxPublisher`, genuinely wired into a business
+    //    branch, is a zero-webhook-table-query no-op while the master switch
+    //    is off and stays byte-identical; an ACTIVE marketplace with no
+    //    matching endpoint runs exactly one bounded probe and writes
+    //    nothing; the per-seller isolation poison-string proof at the REAL
+    //    checkout BRANCH level, closed by a REAL seller HTTP delivery-history
+    //    read (`SellerWebhookController::deliveries()`) that never leaks a
+    //    poison marker either; the retention purge command.
+    // =====================================================================
+
+    public function testSellerWebhookRoutesNeverLeakIntoTheManifestWithTheMasterSwitchOff(): void
+    {
+        self::assertFalse((bool) config($this->context, 'commerce.marketplace.enabled', false));
+
+        $router = $this->freshRouter();
+        $paths = array_map(static fn (array $route): string => (string) $route['path'], $router->getAllRoutes());
+
+        foreach (
+            [
+                '/commerce/seller/{sellerUuid}/webhooks',
+                '/commerce/seller/{sellerUuid}/webhooks/{uuid}',
+                '/commerce/seller/{sellerUuid}/webhooks/{uuid}/rotate-secret',
+                '/commerce/seller/{sellerUuid}/webhooks/{uuid}/disable',
+                '/commerce/seller/{sellerUuid}/webhooks/{uuid}/enable',
+                '/commerce/seller/{sellerUuid}/webhooks/{uuid}/deliveries',
+                '/commerce/seller/{sellerUuid}/webhooks/{uuid}/deliveries/{deliveryUuid}/replay',
+            ] as $mv5c2Route
+        ) {
+            self::assertNotContains(
+                $mv5c2Route,
+                $paths,
+                "{$mv5c2Route} must not leak into the manifest with the master switch off."
+            );
+        }
+    }
+
+    /**
+     * Confirms the five new tables are ALREADY registered from Task 2 (they
+     * already joined `assertNoMarketplaceQueries()`'s table list above) --
+     * this is the SAME `DiagnosticsReport::tenantTables()`-driven maintenance
+     * guarantee every prior MV's own table set already carries.
+     */
+    public function testDiagnosticsReportListsAllFiveSellerWebhookTablesAsPresentWithTheSwitchOff(): void
+    {
+        self::assertFalse((bool) config($this->context, 'commerce.marketplace.enabled', false));
+
+        $present = DiagnosticsReport::build($this->context)['database']['commerce_tables_present'];
+
+        foreach (self::MV5C2_TABLES as $table) {
+            self::assertArrayHasKey($table, $present);
+            self::assertTrue(
+                $present[$table],
+                "DiagnosticsReport must list {$table} as present regardless of the switch"
+            );
+        }
+    }
+
+    /**
+     * MV5c-2 Task 8: `commerce:tenancy:adopt` rekeys all five new
+     * seller-webhook tables too -- {@see DiagnosticsReport::tenantTables()}
+     * already lists them unconditionally (confirmed already registered from
+     * Task 2), so {@see TenantAdopter} picks them up mechanically; this pins
+     * that behaviorally, mirroring the MV3-MV5c-1 siblings above exactly,
+     * switch off (the default).
+     */
+    public function testTenantAdoptRekeysAllFiveSellerWebhookTablesEvenWhenTheMasterSwitchIsOff(): void
+    {
+        self::assertFalse(
+            (bool) config($this->context, 'commerce.marketplace.enabled', false),
+            'this test relies on the master switch being off (the default)'
+        );
+
+        $this->connection->table('commerce_seller_webhook_endpoints')->insert([
+            'uuid' => 'mv5c2adpep1',
+            'tenant_uuid' => '',
+            'seller_uuid' => 'mv5c2adpsl1',
+            'url' => 'https://example.test/hook',
+            'subscribed_events' => json_encode(['order.placed'], JSON_THROW_ON_ERROR),
+            'status' => 'active',
+            'created_by' => 'creatorADP01',
+        ]);
+        $this->connection->table('commerce_seller_webhook_secrets')->insert([
+            'uuid' => 'mv5c2adpsc1',
+            'tenant_uuid' => '',
+            'endpoint_uuid' => 'mv5c2adpep1',
+            'secret_ciphertext' => 'ciphertext-placeholder',
+            'relationship' => 'current',
+        ]);
+        $this->connection->table('commerce_seller_webhook_events')->insert([
+            'uuid' => 'mv5c2adpev1',
+            'tenant_uuid' => '',
+            'seller_uuid' => 'mv5c2adpsl1',
+            'event_type' => 'order.placed',
+            'payload' => json_encode(['order_uuid' => 'mv5c2adpord'], JSON_THROW_ON_ERROR),
+            'occurred_at' => gmdate('Y-m-d H:i:s'),
+        ]);
+        $this->connection->table('commerce_seller_webhook_deliveries')->insert([
+            'uuid' => 'mv5c2adpdl1',
+            'tenant_uuid' => '',
+            'endpoint_uuid' => 'mv5c2adpep1',
+            'webhook_event_uuid' => 'mv5c2adpev1',
+            'seller_uuid' => 'mv5c2adpsl1',
+            'status' => 'pending',
+        ]);
+        $this->connection->table('commerce_seller_webhook_endpoint_events')->insert([
+            'uuid' => 'mv5c2adpae1',
+            'tenant_uuid' => '',
+            'endpoint_uuid' => 'mv5c2adpep1',
+            'seller_uuid' => 'mv5c2adpsl1',
+            'action' => 'register',
+            'actor_uuid' => 'creatorADP01',
+        ]);
+
+        $result = (new TenantAdopter())->adopt($this->context, 'tenantMV5c2099');
+
+        foreach (self::MV5C2_TABLES as $table) {
+            self::assertSame(1, $result['tables'][$table], "{$table} must report exactly 1 rekeyed row");
+            self::assertSame(
+                0,
+                $this->connection->table($table)->where('tenant_uuid', '=', '')->count(),
+                "{$table} must have no sentinel rows left behind"
+            );
+            self::assertSame(
+                1,
+                $this->connection->table($table)->where('tenant_uuid', '=', 'tenantMV5c2099')->count(),
+                "{$table} row must be rekeyed to the adopted tenant"
+            );
+        }
+    }
+
+    /**
+     * Design spec §6: unlike the earlier `assertNoMarketplaceQueries()`
+     * scenarios above (which all use a null-webhooks `checkoutService()`, so
+     * `capture()` never even runs), this wires a REAL
+     * `SellerWebhookOutboxPublisher` into a REAL checkout with the master
+     * switch OFF -- proving `capture()`'s own off-invariance guard fires
+     * genuinely, not merely because no collaborator was ever attached, and
+     * that the placed order stays byte-identical (same shape/fields as the
+     * non-partitioned baseline every other master-off checkout test in this
+     * file already pins).
+     */
+    public function testMasterOffCheckoutWithARealSellerWebhookPublisherWiredIssuesZeroWebhookTableQueriesAndStaysByteIdentical(): void
+    {
+        self::assertFalse((bool) config($this->context, 'commerce.marketplace.enabled', false));
+
+        $product = $this->seedLegacyProduct('regress-mv5c2-off-webhook');
+        $cartService = $this->cartService();
+        ['cart' => $cart, 'token' => $token] = $cartService->create($this->context);
+        $cartService->addLine($this->context, $cart, (string) $product['variants'][0]['uuid'], 1);
+
+        $placed = null;
+        $this->assertNoMarketplaceQueries(function () use ($token, &$placed): void {
+            $placed = $this->checkoutService($this->sellerWebhookOutboxPublisher())
+                ->placeOrder($this->context, $token, $this->buyer(), $this->addresses(), 'std');
+        });
+
+        self::assertFalse((bool) $placed['order']['marketplace_partitioned']);
+        self::assertArrayNotHasKey('seller_groups', $placed['order']);
+        self::assertSame(0, $this->connection->table('commerce_seller_webhook_events')->count());
+        self::assertSame(0, $this->connection->table('commerce_seller_webhook_deliveries')->count());
+    }
+
+    /**
+     * Design spec §6/§2.4: an ACTIVE marketplace with NO matching endpoint
+     * for the participating seller permits at most ONE bounded indexed
+     * subscription probe and writes nothing -- run here through a REAL
+     * partitioned checkout branch (never a directly-constructed publisher
+     * call, closing the loop `SellerWebhookOutboxTest`'s own identical-intent
+     * unit already proves at the publisher level).
+     */
+    public function testActiveMarketplaceSellerWithNoMatchingWebhookEndpointRunsExactlyOneProbeAndWritesNothing(): void
+    {
+        $this->enableMarketplace();
+        $this->activateWorkspace(self::TENANT);
+        $seller = $this->seedActiveSeller('regress-mv5c2-noep-seller');
+        $product = $this->seedAttributedProduct('regress-mv5c2-noep-prod', $seller['uuid']);
+        (new StockRepository())->increment(
+            $this->context,
+            self::TENANT,
+            (string) $product['variants'][0]['uuid'],
+            10
+        );
+        // Deliberately no webhook endpoint registered for this seller at all.
+
+        $cartService = $this->cartService();
+        ['cart' => $cart, 'token' => $token] = $cartService->create($this->context);
+        $cartService->addLine($this->context, $cart, (string) $product['variants'][0]['uuid'], 1);
+
+        $pdo = $this->connection->getPDO();
+        $pdo->setAttribute(\PDO::ATTR_STATEMENT_CLASS, [QueryLoggingPdoStatement::class]);
+        QueryLoggingPdoStatement::$queries = [];
+
+        $placed = $this->marketplaceCheckoutService($this->sellerWebhookOutboxPublisher())
+            ->placeOrder($this->context, $token, $this->buyer(), $this->addresses(), 'std');
+        self::assertTrue((bool) $placed['order']['marketplace_partitioned']);
+
+        $endpointSelects = array_values(array_filter(
+            QueryLoggingPdoStatement::$queries,
+            static fn (string $sql): bool => str_starts_with($sql, 'SELECT')
+                && str_contains($sql, 'commerce_seller_webhook_endpoints')
+        ));
+        self::assertCount(1, $endpointSelects, 'exactly one bounded indexed subscription probe');
+        self::assertSame(0, $this->connection->table('commerce_seller_webhook_events')->count());
+        self::assertSame(0, $this->connection->table('commerce_seller_webhook_deliveries')->count());
+    }
+
+    /**
+     * The flagship security proof, run at TWO levels together (design spec
+     * §2.3, T8 brief "at the BRANCH level ... any surface"): (1) the durable
+     * event snapshot a REAL, genuinely-partitioned checkout writes for seller
+     * A carries NONE of seller B's poison marker/uuid/name, and (2) seller
+     * A's OWN JWT-interactive delivery-history HTTP read
+     * ({@see SellerWebhookController::deliveries()}) -- a completely
+     * independent surface, reached through the real `interactive_session` +
+     * `commerce_seller` route gate -- never leaks it either, even though its
+     * sanitized projection never includes the payload at all (defense in
+     * depth: the absence holds at the outermost boundary too, not merely
+     * inside the database row).
+     */
+    public function testMultiSellerOrderPlacedWebhookIsolatesEachSellersPoisonDataAtTheCheckoutBranchAndAcrossTheSellerDeliveryHistorySurface(): void
+    {
+        $this->enableMarketplace();
+        $this->activateWorkspace(self::TENANT);
+        $sellerA = $this->seedActiveSeller('regress-mv5c2-iso-a');
+        $sellerB = $this->seedActiveSeller('regress-mv5c2-iso-b-poison9f3a');
+        $productA = $this->seedAttributedProduct('regress-mv5c2-iso-prod-a', $sellerA['uuid']);
+        $productB = $this->seedAttributedProduct('regress-mv5c2-iso-prod-b-poisonb2c7', $sellerB['uuid']);
+        $stock = new StockRepository();
+        $stock->increment($this->context, self::TENANT, (string) $productA['variants'][0]['uuid'], 10);
+        $stock->increment($this->context, self::TENANT, (string) $productB['variants'][0]['uuid'], 10);
+
+        $endpointA = $this->seedWebhookEndpoint($sellerA['uuid'], ['order.placed']);
+        $this->seedWebhookEndpoint($sellerB['uuid'], ['order.placed']);
+
+        $cartService = $this->cartService();
+        ['cart' => $cart, 'token' => $token] = $cartService->create($this->context);
+        $cartService->addLine($this->context, $cart, (string) $productA['variants'][0]['uuid'], 1);
+        $cartService->addLine($this->context, $cart, (string) $productB['variants'][0]['uuid'], 1);
+
+        $this->marketplaceCheckoutService($this->sellerWebhookOutboxPublisher())
+            ->placeOrder($this->context, $token, $this->buyer(), $this->addresses(), 'std');
+
+        // (1) BRANCH-LEVEL proof: the durable event snapshot itself.
+        $eventA = $this->connection->table('commerce_seller_webhook_events')
+            ->where('seller_uuid', '=', $sellerA['uuid'])->first();
+        self::assertNotNull($eventA);
+        $rawA = (string) $eventA['payload'];
+        self::assertStringNotContainsString('poison9f3a', $rawA);
+        self::assertStringNotContainsString('poisonb2c7', $rawA);
+        self::assertStringNotContainsString($sellerB['uuid'], $rawA);
+
+        // Seller B legitimately keeps its OWN data -- this is an isolation
+        // proof, never a "nothing is ever captured" false negative.
+        $eventB = $this->connection->table('commerce_seller_webhook_events')
+            ->where('seller_uuid', '=', $sellerB['uuid'])->first();
+        self::assertNotNull($eventB);
+        self::assertStringContainsString('poisonb2c7', (string) $eventB['payload']);
+
+        // (2) ANY-SURFACE proof: seller A's own JWT-interactive delivery
+        // history HTTP read never leaks seller B's poison marker either.
+        $router = $this->freshSellerWebhookRouter();
+        $ownerA = $this->ownerUuidFor($sellerA['uuid']);
+        $response = $this->dispatch($router, $this->jwtWebhookRequestFor(
+            $ownerA,
+            'GET',
+            "/commerce/seller/{$sellerA['uuid']}/webhooks/{$endpointA}/deliveries"
+        ));
+        self::assertSame(200, $response->getStatusCode());
+        $body = (string) $response->getContent();
+        self::assertStringNotContainsString('poison9f3a', $body);
+        self::assertStringNotContainsString('poisonb2c7', $body);
+        self::assertStringNotContainsString($sellerB['uuid'], $body);
+        $rows = json_decode($body, true)['data'];
+        self::assertCount(1, $rows, 'seller A must see exactly its own delivery, never seller B\'s');
+    }
+
+    /**
+     * Design spec §2.7/§2.9, T8 brief retention matrix: purges `delivered` +
+     * `dead_letter` + `canceled` deliveries (and their now-orphaned event
+     * snapshots) older than `commerce.marketplace.webhooks.retention_days`;
+     * KEEPS `paused` and `delivering` (including one whose crash-safe claim
+     * lease has ALREADY EXPIRED -- only the recovery sweep may touch that,
+     * never this command) regardless of age; a FRESH `dead_letter` well
+     * within the window survives; a tombstoned endpoint + its audit trail are
+     * NEVER touched (their own longer, separate audit policy); the sweep is
+     * cross-tenant, scoped per-DELETE by tenant.
+     */
+    public function testPurgeSellerWebhooksCommandPurgesStaleTerminalRowsButKeepsPendingPausedDeliveringAndTombstones(): void
+    {
+        self::assertSame(
+            90,
+            (int) config($this->context, 'commerce.marketplace.webhooks.retention_days', 90),
+            'sanity: the default retention window must be 90 days'
+        );
+
+        $staleAt = gmdate('Y-m-d H:i:s', strtotime('-91 days'));
+        $freshNow = gmdate('Y-m-d H:i:s');
+        $seller = 'mv5c2rtsl01';
+
+        // A tombstoned endpoint -- stale, but NEVER purged by this command.
+        $endpointUuid = 'mv5c2rtep01';
+        $this->connection->table('commerce_seller_webhook_endpoints')->insert([
+            'uuid' => $endpointUuid,
+            'tenant_uuid' => self::TENANT,
+            'seller_uuid' => $seller,
+            'url' => 'https://example.test/hook',
+            'subscribed_events' => json_encode(['order.placed'], JSON_THROW_ON_ERROR),
+            'status' => 'deleted',
+            'deleted_at' => $staleAt,
+            'created_by' => 'creatorRT001',
+        ]);
+        $this->connection->table('commerce_seller_webhook_endpoint_events')->insert([
+            'uuid' => 'mv5c2rtae01',
+            'tenant_uuid' => self::TENANT,
+            'endpoint_uuid' => $endpointUuid,
+            'seller_uuid' => $seller,
+            'action' => 'delete',
+            'actor_uuid' => 'operatorRT01',
+            'created_at' => $staleAt,
+        ]);
+
+        // Stale `delivered`: its ONLY delivery -- purged, and (once orphaned)
+        // its event snapshot too.
+        [$eventDelivered, $deliveredUuid] = $this->seedRetentionDelivery(
+            $endpointUuid,
+            $seller,
+            'delivered',
+            $staleAt,
+            $staleAt
+        );
+
+        // Stale-dated event, but `paused` (kept) -- so the event must stay
+        // too (still referenced).
+        [$eventPaused, $pausedUuid] = $this->seedRetentionDelivery(
+            $endpointUuid,
+            $seller,
+            'paused',
+            $staleAt,
+            $staleAt,
+            ['pause_reason' => 'seller_suspended']
+        );
+
+        // `delivering` with an EXPIRED claim lease -- must NEVER be purged;
+        // only the recovery sweep may touch it.
+        [$eventDelivering, $deliveringUuid] = $this->seedRetentionDelivery(
+            $endpointUuid,
+            $seller,
+            'delivering',
+            $staleAt,
+            $staleAt,
+            ['claim_token' => 'staletoken1', 'claim_expires_at' => $staleAt]
+        );
+
+        // A FRESH dead_letter (well within retention) -- must survive.
+        [, $freshDeadLetterUuid] = $this->seedRetentionDelivery(
+            $endpointUuid,
+            $seller,
+            'dead_letter',
+            $freshNow,
+            $freshNow
+        );
+
+        // A DIFFERENT tenant's equally-stale `delivered` row -- also purged
+        // (cross-tenant sweep, each DELETE scoped by its own tenant_uuid).
+        $otherTenant = 'otherTenantW';
+        $otherEndpoint = 'mv5c2rtepX1';
+        $this->connection->table('commerce_seller_webhook_endpoints')->insert([
+            'uuid' => $otherEndpoint,
+            'tenant_uuid' => $otherTenant,
+            'seller_uuid' => 'mv5c2rtslX1',
+            'url' => 'https://example.test/hook',
+            'subscribed_events' => json_encode(['order.placed'], JSON_THROW_ON_ERROR),
+            'status' => 'active',
+            'created_by' => 'creatorRTX01',
+        ]);
+        [$otherEvent, $otherDeliveredUuid] = $this->seedRetentionDelivery(
+            $otherEndpoint,
+            'mv5c2rtslX1',
+            'delivered',
+            $staleAt,
+            $staleAt,
+            [],
+            $otherTenant
+        );
+
+        $command = new PurgeSellerWebhooksCommand($this->context->getContainer(), $this->context);
+        $tester = new CommandTester($command);
+        $exitCode = $tester->execute([]);
+        self::assertSame(0, $exitCode);
+
+        // Stale delivered -> purged, and its now-orphaned event snapshot too.
+        self::assertSame(
+            0,
+            $this->connection->table('commerce_seller_webhook_deliveries')->where('uuid', '=', $deliveredUuid)->count()
+        );
+        self::assertSame(
+            0,
+            $this->connection->table('commerce_seller_webhook_events')->where('uuid', '=', $eventDelivered)->count()
+        );
+
+        // Paused (kept) -- and its still-referenced event snapshot too.
+        self::assertSame(
+            1,
+            $this->connection->table('commerce_seller_webhook_deliveries')->where('uuid', '=', $pausedUuid)->count()
+        );
+        self::assertSame(
+            1,
+            $this->connection->table('commerce_seller_webhook_events')->where('uuid', '=', $eventPaused)->count()
+        );
+
+        // Delivering with an EXPIRED lease (kept) -- retention never touches it.
+        self::assertSame(
+            1,
+            $this->connection->table('commerce_seller_webhook_deliveries')
+                ->where('uuid', '=', $deliveringUuid)->count()
+        );
+        self::assertSame(
+            1,
+            $this->connection->table('commerce_seller_webhook_events')->where('uuid', '=', $eventDelivering)->count()
+        );
+
+        // Fresh dead_letter (kept) -- well within retention.
+        self::assertSame(
+            1,
+            $this->connection->table('commerce_seller_webhook_deliveries')
+                ->where('uuid', '=', $freshDeadLetterUuid)->count()
+        );
+
+        // Cross-tenant stale delivered row -- also purged.
+        self::assertSame(
+            0,
+            $this->connection->table('commerce_seller_webhook_deliveries')
+                ->where('uuid', '=', $otherDeliveredUuid)->count()
+        );
+        self::assertSame(
+            0,
+            $this->connection->table('commerce_seller_webhook_events')->where('uuid', '=', $otherEvent)->count()
+        );
+
+        // The tombstoned endpoint row + its audit trail are NEVER touched.
+        $endpointRow = $this->connection->table('commerce_seller_webhook_endpoints')
+            ->withTrashed()
+            ->where('uuid', '=', $endpointUuid)
+            ->first();
+        self::assertNotNull($endpointRow);
+        self::assertSame('deleted', $endpointRow['status']);
+        self::assertSame(
+            1,
+            $this->connection->table('commerce_seller_webhook_endpoint_events')
+                ->where('uuid', '=', 'mv5c2rtae01')->count()
+        );
+    }
+
     // -----------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------
@@ -2344,7 +2839,16 @@ final class MarketplaceRegressionTest extends CommerceTestCase
         );
     }
 
-    private function checkoutService(): CheckoutService
+    /**
+     * MV5c-2 Task 8: the optional trailing `$webhooks` param (mirrors
+     * `SellerWebhookOutboxTest::checkout()`'s identical convention) lets a
+     * gate test wire a REAL `SellerWebhookOutboxPublisher` in without
+     * disturbing any of this method's many existing null-webhooks callers --
+     * `CheckoutService`'s own `captureOrderPlaced()` no-ops entirely
+     * (`$this->webhooks === null` guard) when omitted, so every pre-existing
+     * assertion in this file is byte-for-byte unaffected.
+     */
+    private function checkoutService(?SellerWebhookOutboxPublisher $webhooks = null): CheckoutService
     {
         return new CheckoutService(
             $this->cartService(),
@@ -2358,7 +2862,13 @@ final class MarketplaceRegressionTest extends CommerceTestCase
             new OrderRepository(),
             new DownloadRepository(),
             new ManualPaymentCollector(),
-            $this->fixedTenant()
+            $this->fixedTenant(),
+            null,
+            null,
+            null,
+            null,
+            null,
+            $webhooks
         );
     }
 
@@ -2366,9 +2876,11 @@ final class MarketplaceRegressionTest extends CommerceTestCase
      * MV2 Task 10: wired WITH the marketplace collaborators (unlike
      * `checkoutService()` above, which is byte-identical to the pre-MV2
      * constructor arity) -- used only by the partition-invariance test that
-     * needs a genuinely partitioned checkout.
+     * needs a genuinely partitioned checkout. MV5c-2 Task 8: the optional
+     * trailing `$webhooks` param mirrors `checkoutService()`'s identical
+     * convention immediately above.
      */
-    private function marketplaceCheckoutService(): CheckoutService
+    private function marketplaceCheckoutService(?SellerWebhookOutboxPublisher $webhooks = null): CheckoutService
     {
         return new CheckoutService(
             $this->cartService(),
@@ -2386,7 +2898,9 @@ final class MarketplaceRegressionTest extends CommerceTestCase
             new MarketplaceMode(),
             new SellerRepository(),
             new ProductRepository(),
-            new SellerOrderRepository()
+            new SellerOrderRepository(),
+            null,
+            $webhooks
         );
     }
 
@@ -2718,5 +3232,192 @@ final class MarketplaceRegressionTest extends CommerceTestCase
             'generation' => 1,
             'relationship' => 'current',
         ]);
+    }
+
+    // -----------------------------------------------------------------
+    // MV5c-2 Task 8 helpers.
+    // -----------------------------------------------------------------
+
+    private function sellerWebhookOutboxPublisher(): SellerWebhookOutboxPublisher
+    {
+        return new SellerWebhookOutboxPublisher(
+            new MarketplaceMode(),
+            new SellerRepository(),
+            new SellerWebhookEndpointRepository(),
+            new SellerWebhookEventRepository(),
+            new SellerWebhookDeliveryRepository(),
+            new SellerWebhookPayloadProjector()
+        );
+    }
+
+    /** @return string the seeded endpoint uuid */
+    private function seedWebhookEndpoint(string $sellerUuid, array $events, string $status = 'active'): string
+    {
+        $uuid = 'whep' . str_pad((string) (++$this->webhookEndpointSeq), 8, '0', STR_PAD_LEFT);
+        $this->connection->table('commerce_seller_webhook_endpoints')->insert([
+            'uuid' => $uuid,
+            'tenant_uuid' => self::TENANT,
+            'seller_uuid' => $sellerUuid,
+            'url' => 'https://example.test/hook',
+            'subscribed_events' => json_encode($events, JSON_THROW_ON_ERROR),
+            'status' => $status,
+            'revision' => 0,
+            'consecutive_failures' => 0,
+            'created_by' => 'creatorWH0001',
+        ]);
+
+        return $uuid;
+    }
+
+    /**
+     * Seeds one event snapshot + one delivery row directly (deterministic
+     * SQLite fixture -- mirrors {@see PurgeApiKeyDenialsCommand}'s own
+     * regression test's direct-insert convention).
+     *
+     * @param array<string,mixed> $deliveryOverrides
+     * @return array{0: string, 1: string} [event uuid, delivery uuid]
+     */
+    private function seedRetentionDelivery(
+        string $endpointUuid,
+        string $sellerUuid,
+        string $status,
+        string $occurredAt,
+        string $updatedAt,
+        array $deliveryOverrides = [],
+        string $tenant = self::TENANT
+    ): array {
+        $seq = ++$this->webhookEndpointSeq;
+        $eventUuid = 'whev' . str_pad((string) $seq, 8, '0', STR_PAD_LEFT);
+        $deliveryUuid = 'whdl' . str_pad((string) $seq, 8, '0', STR_PAD_LEFT);
+
+        $this->connection->table('commerce_seller_webhook_events')->insert([
+            'uuid' => $eventUuid,
+            'tenant_uuid' => $tenant,
+            'seller_uuid' => $sellerUuid,
+            'event_type' => 'order.placed',
+            'payload' => json_encode(['order_uuid' => 'ord' . $seq], JSON_THROW_ON_ERROR),
+            'occurred_at' => $occurredAt,
+        ]);
+        $this->connection->table('commerce_seller_webhook_deliveries')->insert(array_merge([
+            'uuid' => $deliveryUuid,
+            'tenant_uuid' => $tenant,
+            'endpoint_uuid' => $endpointUuid,
+            'webhook_event_uuid' => $eventUuid,
+            'seller_uuid' => $sellerUuid,
+            'status' => $status,
+            'attempts' => 1,
+            'updated_at' => $updatedAt,
+        ], $deliveryOverrides));
+
+        return [$eventUuid, $deliveryUuid];
+    }
+
+    /**
+     * A minimal, LOCAL real-router harness for the seller-webhook management
+     * surface -- mirrors {@see self::freshSellerKeyRouter()}'s identical
+     * "deliberately NOT a full `CommerceRouterTestCase`" shape immediately
+     * above, extended with `interactive_session` (the JWT-interactive-only
+     * gate {@see \Glueful\Extensions\Commerce\Http\Seller\SellerWebhookController}
+     * runs behind) and a fully-wired REAL {@see SellerWebhookController},
+     * mirroring {@see \Glueful\Extensions\Commerce\Tests\Support\CommerceRouterTestCase::buildSellerWebhookController()}'s
+     * exact collaborator graph.
+     */
+    private function freshSellerWebhookRouter(): Router
+    {
+        $this->bind(ApplicationContext::class, $this->context);
+        $this->bind('auth', new class implements RouteMiddleware {
+            public function handle(Request $request, callable $next, mixed ...$params): mixed
+            {
+                return $next($request);
+            }
+        });
+        $this->bind('interactive_session', new InteractiveSessionMiddleware());
+        $this->bind('commerce_seller', new SellerMemberMiddleware(
+            $this->context,
+            new SellerRepository(),
+            new SellerMembershipRepository(),
+            new FixedSellerRoleAuthority(),
+            new MarketplaceMode(),
+            $this->fixedTenant(),
+            new SellerApiKeyAuthorizer(new SellerApiKeyRepository())
+        ));
+        $this->bind(SellerWebhookController::class, $this->buildSellerWebhookControllerForRegression());
+
+        $router = new Router($this->contextContainer());
+        require __DIR__ . '/../../../routes.php';
+
+        return $router;
+    }
+
+    private function buildSellerWebhookControllerForRegression(): SellerWebhookController
+    {
+        $endpoints = new SellerWebhookEndpointRepository();
+        $deliveries = new SellerWebhookDeliveryRepository();
+        $resolver = new SafeOutboundTargetResolver(static fn (string $host): array => ['1.1.1.1']);
+        $secrets = new SellerWebhookSecretService($endpoints, $this->webhookEncryptionService());
+
+        $endpointService = new SellerWebhookEndpointService(
+            new SellerRepository(),
+            new SellerMembershipRepository(),
+            $endpoints,
+            $deliveries,
+            new FixedSellerRoleAuthority(),
+            $secrets,
+            $resolver
+        );
+
+        $httpClient = new Client(
+            new MockHttpClient(static fn (): MockResponse => new MockResponse('', ['http_code' => 500])),
+            new NullLogger(),
+            $this->context,
+            $resolver
+        );
+        $deliveryService = new SellerWebhookDeliveryService(
+            new SellerRepository(),
+            $endpoints,
+            $deliveries,
+            new SellerWebhookEventRepository(),
+            $secrets,
+            $httpClient
+        );
+
+        return new SellerWebhookController(
+            $this->context,
+            $endpointService,
+            $endpoints,
+            $deliveries,
+            $deliveryService,
+            $this->fixedTenant()
+        );
+    }
+
+    /**
+     * Mirrors {@see \Glueful\Extensions\Commerce\Tests\Support\CommerceRouterTestCase::webhookEncryptionService()}'s
+     * identical process-lifetime-cached fixed-key convention.
+     */
+    private function webhookEncryptionService(): EncryptionService
+    {
+        static $encryption = null;
+        if ($encryption === null) {
+            $this->context->overrideConfig('encryption.key', 'base64:' . base64_encode(str_repeat('k', 32)));
+            $encryption = new EncryptionService($this->context);
+        }
+
+        return $encryption;
+    }
+
+    /** @param array<string,mixed> $body */
+    private function jwtWebhookRequestFor(string $userUuid, string $method, string $uri, array $body = []): Request
+    {
+        $content = $body === [] ? null : json_encode($body, JSON_THROW_ON_ERROR);
+        $request = Request::create($uri, $method, [], [], [], [], $content);
+        if ($content !== null) {
+            $request->headers->set('Content-Type', 'application/json');
+        }
+        $request->attributes->set('auth_provider', 'jwt');
+        $request->attributes->set('user_id', $userUuid);
+        $request->attributes->set('user', ['uuid' => $userUuid]);
+
+        return $request;
     }
 }

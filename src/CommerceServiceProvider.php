@@ -73,6 +73,7 @@ use Glueful\Extensions\Commerce\Http\Seller\SellerFinancialController;
 use Glueful\Extensions\Commerce\Http\Seller\SellerInventoryController;
 use Glueful\Extensions\Commerce\Http\Seller\SellerMembershipController;
 use Glueful\Extensions\Commerce\Http\Seller\SellerOrderController;
+use Glueful\Extensions\Commerce\Http\Seller\SellerWebhookController;
 use Glueful\Extensions\Commerce\Http\Storefront\AccountAddressController;
 use Glueful\Extensions\Commerce\Http\Storefront\CartController;
 use Glueful\Extensions\Commerce\Http\Storefront\CategoryController;
@@ -607,6 +608,10 @@ final class CommerceServiceProvider extends ServiceProvider
             ],
             SellerApiKeyController::class => [
                 'factory' => [self::class, 'makeSellerApiKeyController'],
+                'shared' => true,
+            ],
+            SellerWebhookController::class => [
+                'factory' => [self::class, 'makeSellerWebhookController'],
                 'shared' => true,
             ],
             SellerCatalogController::class => [
@@ -1680,6 +1685,26 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(ApplicationContext::class),
             $container->get(SellerApiKeyService::class),
             $container->get(SellerApiKeyRepository::class),
+            self::tenantResolver($container)
+        );
+    }
+
+    /**
+     * MV5c-2 Task 7 (design spec §2.10/§5): a REAL {@see SellerWebhookController}
+     * wired against the REAL {@see SellerWebhookEndpointService}/
+     * {@see SellerWebhookEndpointRepository}/{@see SellerWebhookDeliveryRepository}/
+     * {@see SellerWebhookDeliveryService} stack -- every collaborator is already
+     * shared elsewhere in this container -- mirroring
+     * {@see self::makeSellerApiKeyController()}'s identical shape.
+     */
+    public static function makeSellerWebhookController(ContainerInterface $container): SellerWebhookController
+    {
+        return new SellerWebhookController(
+            $container->get(ApplicationContext::class),
+            $container->get(SellerWebhookEndpointService::class),
+            $container->get(SellerWebhookEndpointRepository::class),
+            $container->get(SellerWebhookDeliveryRepository::class),
+            $container->get(SellerWebhookDeliveryService::class),
             self::tenantResolver($container)
         );
     }

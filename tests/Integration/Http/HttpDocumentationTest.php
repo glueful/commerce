@@ -168,6 +168,27 @@ final class HttpDocumentationTest extends CommerceTestCase
         self::assertContains('/commerce/seller/{sellerUuid}/api-keys/{lineageUuid}/rotate', $paths);
         self::assertContains('/commerce/seller/{sellerUuid}/api-keys/{lineageUuid}/revoke', $paths);
 
+        // MV5c-2 Task 7/8 (GATES): the seller self-service outbound-webhook
+        // management surface -- register/list/update/rotate-secret/disable/
+        // enable/delete + delivery history + dead-letter replay. Already
+        // flows through the fully generic walk below with zero changes
+        // (every action already carries `#[ApiOperation]`/`#[ApiResponse]`,
+        // see `SellerWebhookController`) -- these `assertContains` calls only
+        // pin that the nine NEW routes are genuinely present in this pass,
+        // so a future regression that accidentally drops one of them from
+        // `routes.php` fails loudly here rather than silently shrinking the
+        // walked set.
+        self::assertContains('/commerce/seller/{sellerUuid}/webhooks', $paths);
+        self::assertContains('/commerce/seller/{sellerUuid}/webhooks/{uuid}', $paths);
+        self::assertContains('/commerce/seller/{sellerUuid}/webhooks/{uuid}/rotate-secret', $paths);
+        self::assertContains('/commerce/seller/{sellerUuid}/webhooks/{uuid}/disable', $paths);
+        self::assertContains('/commerce/seller/{sellerUuid}/webhooks/{uuid}/enable', $paths);
+        self::assertContains('/commerce/seller/{sellerUuid}/webhooks/{uuid}/deliveries', $paths);
+        self::assertContains(
+            '/commerce/seller/{sellerUuid}/webhooks/{uuid}/deliveries/{deliveryUuid}/replay',
+            $paths
+        );
+
         $this->assertEveryCommerceRouteActionIsDocumented($router, $actions);
     }
 

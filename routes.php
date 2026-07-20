@@ -38,6 +38,7 @@ use Glueful\Extensions\Commerce\Http\Seller\SellerFinancialController;
 use Glueful\Extensions\Commerce\Http\Seller\SellerInventoryController;
 use Glueful\Extensions\Commerce\Http\Seller\SellerMembershipController;
 use Glueful\Extensions\Commerce\Http\Seller\SellerOrderController;
+use Glueful\Extensions\Commerce\Http\Seller\SellerWebhookController;
 use Glueful\Routing\Router;
 
 /** @var Router $router */
@@ -565,5 +566,44 @@ if ($marketplaceEnabled) {
             ->middleware($payoutsRead);
         $router->get('/{sellerUuid}/commission-policy', [SellerFinancialController::class, 'commissionPolicy'])
             ->middleware($reportsRead);
+
+        // Seller self-service outbound-webhook management (design spec
+        // §2.2/§2.6/§2.9/§2.10/§5, MV5c-2 Task 7): JWT-INTERACTIVE-ONLY --
+        // `interactive_session` runs BEFORE `commerce_seller:...webhooks.manage`
+        // on EVERY route below, the SAME composition the seller API-key
+        // management block above uses -- so an API-key request (or any
+        // non-JWT-interactive provider) is refused 403 before seller
+        // lifecycle/membership/capability handling ever runs: a machine
+        // credential can NEVER register/read/rotate/replay a webhook, even
+        // one whose scope somehow includes `webhooks.manage` (the MV5c-1
+        // `SellerApiKeyCapabilityCatalog` never grants it, but this gate
+        // refuses regardless of scope). Management + replay are refused
+        // while the seller is `suspended` -- {@see \Glueful\Extensions\Commerce\Http\Middleware\SellerMemberMiddleware}
+        // itself already fails closed 409 for a suspended seller on every
+        // route here (none opts into `allow_suspended`), and
+        // {@see \Glueful\Extensions\Commerce\Marketplace\SellerWebhookEndpointService}/
+        // {@see \Glueful\Extensions\Commerce\Marketplace\SellerWebhookDeliveryService::replay()}
+        // ALSO re-check live seller status inside their own transactions.
+        $webhooksManage = 'commerce_seller:commerce.seller.webhooks.manage';
+        $router->post('/{sellerUuid}/webhooks', [SellerWebhookController::class, 'store'])
+            ->middleware(['interactive_session', $webhooksManage]);
+        $router->get('/{sellerUuid}/webhooks', [SellerWebhookController::class, 'index'])
+            ->middleware(['interactive_session', $webhooksManage]);
+        $router->patch('/{sellerUuid}/webhooks/{uuid}', [SellerWebhookController::class, 'update'])
+            ->middleware(['interactive_session', $webhooksManage]);
+        $router->post('/{sellerUuid}/webhooks/{uuid}/rotate-secret', [SellerWebhookController::class, 'rotateSecret'])
+            ->middleware(['interactive_session', $webhooksManage]);
+        $router->post('/{sellerUuid}/webhooks/{uuid}/disable', [SellerWebhookController::class, 'disable'])
+            ->middleware(['interactive_session', $webhooksManage]);
+        $router->post('/{sellerUuid}/webhooks/{uuid}/enable', [SellerWebhookController::class, 'enable'])
+            ->middleware(['interactive_session', $webhooksManage]);
+        $router->delete('/{sellerUuid}/webhooks/{uuid}', [SellerWebhookController::class, 'destroy'])
+            ->middleware(['interactive_session', $webhooksManage]);
+        $router->get('/{sellerUuid}/webhooks/{uuid}/deliveries', [SellerWebhookController::class, 'deliveries'])
+            ->middleware(['interactive_session', $webhooksManage]);
+        $router->post(
+            '/{sellerUuid}/webhooks/{uuid}/deliveries/{deliveryUuid}/replay',
+            [SellerWebhookController::class, 'replay']
+        )->middleware(['interactive_session', $webhooksManage]);
     });
 }

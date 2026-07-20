@@ -512,6 +512,62 @@ SQL,
         return $affected === 1;
     }
 
+    // -----------------------------------------------------------------
+    // Seller self-service SANITIZED read (MV5c-2 Task 7, design spec §2.10):
+    // the ONE read this table exposes to the JWT-interactive seller
+    // management surface -- deliberately a hand-picked column allowlist at
+    // the SQL level (never `SELECT *`), so a future column added to this
+    // table is excluded by default rather than leaked by default.
+    // -----------------------------------------------------------------
+
+    /**
+     * The seller-facing delivery-history read
+     * ({@see \Glueful\Extensions\Commerce\Http\Seller\SellerWebhookController::deliveries()}):
+     * every column here is deliberately safe to hand back verbatim --
+     * status/attempts/timestamps/last response code/replay lineage. Excludes
+     * `id`/`tenant_uuid`/`endpoint_uuid`/`webhook_event_uuid`/`seller_uuid`
+     * (internal identifiers the caller -- already scoped to ONE endpoint by
+     * the controller's own ownership check -- has no use for) and, above
+     * all, `claim_token`/`claim_expires_at` (the internal crash-safe-lease
+     * bookkeeping {@see self::claimForDelivery()}/{@see self::finalize()}
+     * drive -- never meaningful to a seller). `last_error` is always ALREADY
+     * a generic, pre-sanitized string by the time it lands in this column
+     * (design spec §2.6: an SSRF-safety failure's message is the fixed
+     * literal "Webhook delivery blocked by safety validation.", never a
+     * resolved internal address) -- nothing further needs to be stripped
+     * from it here. Newest-first (design spec §2.10: "read retained delivery
+     * history").
+     *
+     * @return list<array<string,mixed>>
+     */
+    public function deliveriesForEndpoint(
+        ApplicationContext $context,
+        string $tenant,
+        string $endpointUuid
+    ): array {
+        return db($context)->table(self::TABLE)
+            ->select([
+                'uuid',
+                'status',
+                'attempts',
+                'next_attempt_at',
+                'paused_at',
+                'paused_remaining_seconds',
+                'pause_reason',
+                'last_attempt_at',
+                'last_status_code',
+                'last_error',
+                'replay_of_uuid',
+                'created_at',
+                'updated_at',
+            ])
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('endpoint_uuid', '=', $endpointUuid)
+            ->orderBy('created_at', 'DESC')
+            ->orderBy('uuid', 'DESC')
+            ->get();
+    }
+
     /**
      * The sweep's reclaim CAS (design spec §2.7): `WHERE status =
      * 'delivering' AND claim_token = ? AND claim_expires_at <= {utcNow}` --
