@@ -1527,7 +1527,9 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(SellerMembershipRepository::class),
             $container->get(SellerLifecycleEventRepository::class),
             null,
-            $container->get(CommissionPolicyService::class)
+            $container->get(CommissionPolicyService::class),
+            $container->get(SellerWebhookEndpointRepository::class),
+            $container->get(SellerWebhookDeliveryRepository::class)
         );
     }
 

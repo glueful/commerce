@@ -83,4 +83,30 @@ final class SellerWebhookException extends \DomainException
             'secret_unavailable'
         );
     }
+
+    /**
+     * MV5c-2 Task 6 (design spec §2.8): a replay's endpoint-eligibility
+     * refusal -- the endpoint exists (a tombstoned one is refused earlier,
+     * as a plain {@see \Glueful\Http\Exceptions\Client\NotFoundException},
+     * mirroring every other mutation's "deleted looks like never existed"
+     * convention) but is currently `disabled`.
+     */
+    public static function endpointNotActive(string $status): self
+    {
+        return new self("Webhook endpoint is '{$status}'; replay is unavailable.", 'endpoint_inactive');
+    }
+
+    /**
+     * MV5c-2 Task 6 (design spec §2.8): only a `dead_letter` delivery may be
+     * replayed -- a `canceled` (closed-seller) delivery is NEVER replayable,
+     * and every other status (`pending|paused|delivering|delivered`) is
+     * refused identically.
+     */
+    public static function deliveryNotReplayable(string $status): self
+    {
+        return new self(
+            "Delivery is '{$status}'; only a 'dead_letter' delivery can be replayed.",
+            'delivery_not_replayable'
+        );
+    }
 }

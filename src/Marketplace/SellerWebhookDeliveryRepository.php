@@ -155,6 +155,97 @@ final class SellerWebhookDeliveryRepository
     }
 
     // -----------------------------------------------------------------
+    // Seller-scoped lifecycle primitives (MV5c-2 Task 6, design spec §2.9):
+    // the SAME shape as the endpoint-scoped primitives above, scoped by
+    // `seller_uuid` instead of `endpoint_uuid` -- {@see SellerService}'s
+    // suspend()/reactivate()/close() wiring uses these to act across EVERY
+    // one of a seller's endpoints in a single sweep, while the
+    // `pause_reason` filter on {@see self::findBySellerStatusAndPauseReason()}
+    // keeps an `endpoint_disabled` pause completely invisible to a seller
+    // reinstatement -- the exact same non-interference guarantee
+    // {@see self::findByEndpointStatusAndPauseReason()} gives the endpoint
+    // side against a `seller_suspended` pause.
+    // -----------------------------------------------------------------
+
+    /** @return list<array<string,mixed>> */
+    public function findBySellerAndStatus(
+        ApplicationContext $context,
+        string $tenant,
+        string $sellerUuid,
+        string $status
+    ): array {
+        return db($context)->table(self::TABLE)
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('seller_uuid', '=', $sellerUuid)
+            ->where('status', '=', $status)
+            ->get();
+    }
+
+    /**
+     * Scoped by BOTH status AND the exact `pause_reason` -- the guard that
+     * keeps a seller reinstatement from ever resuming an
+     * `endpoint_disabled`-paused delivery (see this class's own docblock).
+     *
+     * @return list<array<string,mixed>>
+     */
+    public function findBySellerStatusAndPauseReason(
+        ApplicationContext $context,
+        string $tenant,
+        string $sellerUuid,
+        string $status,
+        string $pauseReason
+    ): array {
+        return db($context)->table(self::TABLE)
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('seller_uuid', '=', $sellerUuid)
+            ->where('status', '=', $status)
+            ->where('pause_reason', '=', $pauseReason)
+            ->get();
+    }
+
+    /**
+     * Terminal cancellation (design spec §2.9): every `pending`/`paused`
+     * row for the SELLER -- across every one of its endpoints, REGARDLESS
+     * of pause reason -- moves to `canceled`, retained for audit, never
+     * replayable. Used by {@see SellerService::close()}'s wiring.
+     */
+    public function cancelPendingAndPausedForSeller(
+        ApplicationContext $context,
+        string $tenant,
+        string $sellerUuid,
+        string $updatedAt
+    ): int {
+        return db($context)->table(self::TABLE)
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('seller_uuid', '=', $sellerUuid)
+            ->whereIn('status', ['pending', 'paused'])
+            ->update(['status' => 'canceled', 'updated_at' => $updatedAt]);
+    }
+
+    /**
+     * Best-effort single-row terminal cancellation (design spec §2.9, MV5c-2
+     * Task 6 / T5-review M1 fix): the SAME `WHERE status = 'pending'`
+     * affected-row safety net {@see self::pauseOne()} uses, except the
+     * landing state is `canceled` instead of `paused` -- used by
+     * {@see SellerWebhookDeliveryService}'s claim-time refusal when the
+     * owning seller is freshly re-read as `closed` (never `paused`, never
+     * resumable, never replayable -- unlike the `suspended` case, which
+     * pauses).
+     */
+    public function cancelOne(
+        ApplicationContext $context,
+        string $tenant,
+        string $uuid,
+        string $updatedAt
+    ): void {
+        db($context)->table(self::TABLE)
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('uuid', '=', $uuid)
+            ->where('status', '=', 'pending')
+            ->update(['status' => 'canceled', 'updated_at' => $updatedAt]);
+    }
+
+    // -----------------------------------------------------------------
     // Outbox writes (MV5c-2 Task 4, design spec §2.4/§2.9): the durable
     // per-endpoint delivery rows {@see SellerWebhookOutboxPublisher::capture()}
     // inserts INSIDE the authoritative business transaction, one per matched
@@ -221,6 +312,40 @@ final class SellerWebhookDeliveryRepository
             'pause_reason' => 'seller_suspended',
             'paused_at' => $pausedAt,
             'paused_remaining_seconds' => 0,
+        ]);
+    }
+
+    /**
+     * A brand-new delivery ATTEMPT LINEAGE created by a replay (design spec
+     * §2.8, MV5c-2 Task 6): `status = 'pending'`, zero attempts (a replay is
+     * a fresh attempt budget, never a continuation of the original's), due
+     * immediately, referencing the EXACT SAME `webhook_event_uuid` snapshot
+     * the original delivery signed -- never a re-projected payload -- and
+     * `replay_of_uuid` pointing back at the original. The original row
+     * itself is NEVER touched by this insert (append-only history, design
+     * spec: "WITHOUT mutating historical attempts").
+     *
+     * @param array{
+     *     uuid: string,
+     *     endpoint_uuid: string,
+     *     webhook_event_uuid: string,
+     *     seller_uuid: string,
+     *     replay_of_uuid: string,
+     *     next_attempt_at: string
+     * } $row
+     */
+    public function insertReplay(ApplicationContext $context, string $tenant, array $row): void
+    {
+        db($context)->table(self::TABLE)->insert([
+            'uuid' => $row['uuid'],
+            'tenant_uuid' => $tenant,
+            'endpoint_uuid' => $row['endpoint_uuid'],
+            'webhook_event_uuid' => $row['webhook_event_uuid'],
+            'seller_uuid' => $row['seller_uuid'],
+            'status' => 'pending',
+            'attempts' => 0,
+            'next_attempt_at' => $row['next_attempt_at'],
+            'replay_of_uuid' => $row['replay_of_uuid'],
         ]);
     }
 

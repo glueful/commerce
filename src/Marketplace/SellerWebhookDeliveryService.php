@@ -9,6 +9,7 @@ use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Support\UtcNowSql;
 use Glueful\Helpers\Utils;
 use Glueful\Http\Client;
+use Glueful\Http\Exceptions\Client\NotFoundException;
 use Glueful\Http\Exceptions\HttpClientException;
 use Glueful\Queue\QueueManager;
 use Symfony\Contracts\HttpClient\Exception\TransportExceptionInterface;
@@ -119,10 +120,16 @@ final class SellerWebhookDeliveryService
     /** @var callable(): string */
     private $claimTokenGenerator;
 
+    /** @var callable(): string */
+    private $uuidGenerator;
+
     /**
      * @param (callable(): string)|null $claimTokenGenerator Injectable seam for tests;
      *     defaults to a cryptographically random 32-hex-char token (fits the
      *     `claim_token varchar(32)` column exactly).
+     * @param (callable(): string)|null $uuidGenerator Injectable seam for tests (MV5c-2
+     *     Task 6, {@see self::replay()}'s new delivery-row uuid) -- the SAME convention
+     *     every other MV5c-2 service uses; defaults to {@see Utils::generateNanoID()}.
      */
     public function __construct(
         private SellerRepository $sellers,
@@ -132,8 +139,10 @@ final class SellerWebhookDeliveryService
         private SellerWebhookSecretService $secrets,
         private Client $httpClient,
         ?callable $claimTokenGenerator = null,
+        ?callable $uuidGenerator = null,
     ) {
         $this->claimTokenGenerator = $claimTokenGenerator ?? static fn (): string => bin2hex(random_bytes(16));
+        $this->uuidGenerator = $uuidGenerator ?? static fn (): string => Utils::generateNanoID();
     }
 
     /**
@@ -194,7 +203,7 @@ final class SellerWebhookDeliveryService
         ): string {
             $this->sellers->claimRevision($c, $tenant, $sellerUuid);
             $seller = $this->sellers->findByUuid($c, $tenant, $sellerUuid);
-            $sellerActive = $seller === null || (string) $seller['status'] === 'active';
+            $sellerStatus = $seller !== null ? (string) $seller['status'] : 'active';
 
             $this->endpoints->claimRevision($c, $tenant, $endpointUuid);
             $endpoint = $this->endpoints->findByUuidIncludingDeleted($c, $tenant, $endpointUuid);
@@ -203,7 +212,17 @@ final class SellerWebhookDeliveryService
             $now = $this->readDbNow($c);
             $nowStr = $now->format('Y-m-d H:i:s');
 
-            if (!$sellerActive) {
+            // T5-review M1 fix (design spec §2.9): the SAME suspended-vs-closed
+            // distinction {@see self::claim()} now makes -- an expired lease
+            // whose seller is CLOSED terminally cancels, never pauses.
+            if ($sellerStatus === 'closed') {
+                $accepted = $this->deliveries->reclaimExpired($c, $tenant, $deliveryUuid, $oldToken, [
+                    'status' => 'canceled',
+                ], $nowStr);
+
+                return $accepted ? 'canceled' : 'stale';
+            }
+            if ($sellerStatus !== 'active') {
                 $accepted = $this->deliveries->reclaimExpired($c, $tenant, $deliveryUuid, $oldToken, [
                     'status' => 'paused',
                     'pause_reason' => 'seller_suspended',
@@ -254,6 +273,119 @@ final class SellerWebhookDeliveryService
 
             return $accepted ? 'reclaimed' : 'stale';
         });
+    }
+
+    /**
+     * Replay a `dead_letter` delivery (design spec §2.8, MV5c-2 Task 6): a
+     * NEW `pending` delivery ATTEMPT LINEAGE referencing the SAME event
+     * snapshot (`webhook_event_uuid` unchanged -- never a re-projected
+     * payload), `replay_of_uuid` pointing back at `$deliveryUuid`, zero
+     * attempts. The original row's own history is NEVER mutated -- this
+     * method only ever INSERTs.
+     *
+     * Eligibility (claim-then-fresh-re-read, the SAME "seller revision ->
+     * endpoint revision -> ..." lock order every other mutation in this
+     * subsystem claims): the owning seller must be freshly `active`
+     * ({@see SellerWebhookException::sellerNotActive()} otherwise -- a
+     * `closed` seller's deliveries are `canceled`, never replayable, and a
+     * merely `suspended` one is refused too, matching design spec §2.9's
+     * "Management is unavailable while suspended"), the endpoint must claim
+     * ({@see SellerWebhookEndpointRepository::claimActiveRevision()} --
+     * refuses a TOMBSTONED endpoint identically to every other mutation,
+     * surfacing a non-revealing {@see NotFoundException}) and be freshly
+     * `active` ({@see SellerWebhookException::endpointNotActive()}
+     * otherwise -- a `disabled` endpoint refuses too), and the delivery
+     * itself must be freshly `dead_letter`
+     * ({@see SellerWebhookException::deliveryNotReplayable()} for anything
+     * else, INCLUDING `canceled` -- design spec §2.8: "a canceled ...
+     * delivery is NOT replayable").
+     *
+     * The JWT-interactive-only actor/`webhooks.manage`-capability HTTP gate
+     * is a later task's concern (this method's own docblock, and the design
+     * spec §2.8 CARRY-FORWARD note); this is the mechanical service-layer
+     * primitive that gate will call once claimed.
+     *
+     * @return array<string,mixed> the newly-inserted replay delivery row
+     */
+    public function replay(ApplicationContext $c, string $tenant, string $deliveryUuid): array
+    {
+        $original = $this->deliveries->findByUuid($c, $tenant, $deliveryUuid);
+        if ($original === null) {
+            throw new NotFoundException('Resource not found.');
+        }
+
+        $sellerUuid = (string) $original['seller_uuid'];
+        $endpointUuid = (string) $original['endpoint_uuid'];
+        $eventUuid = (string) $original['webhook_event_uuid'];
+
+        $replay = db($c)->transaction(function () use (
+            $c,
+            $tenant,
+            $sellerUuid,
+            $endpointUuid,
+            $eventUuid,
+            $deliveryUuid
+        ): array {
+            $this->sellers->claimRevision($c, $tenant, $sellerUuid);
+            $seller = $this->sellers->findByUuid($c, $tenant, $sellerUuid);
+            $sellerStatus = $seller !== null ? (string) $seller['status'] : 'active';
+            if ($sellerStatus !== 'active') {
+                throw SellerWebhookException::sellerNotActive($sellerStatus);
+            }
+
+            if (!$this->endpoints->claimActiveRevision($c, $tenant, $endpointUuid)) {
+                throw new NotFoundException('Resource not found.');
+            }
+            $endpoint = $this->endpoints->findByUuid($c, $tenant, $endpointUuid);
+            if ($endpoint === null) {
+                throw new NotFoundException('Resource not found.');
+            }
+            if ((string) $endpoint['status'] !== 'active') {
+                throw SellerWebhookException::endpointNotActive((string) $endpoint['status']);
+            }
+
+            // Re-read the delivery FRESH under claim -- its status may have
+            // moved since the unlocked read above (e.g. a concurrent close()
+            // canceling it, or a second replay racing this one).
+            $fresh = $this->deliveries->findByUuid($c, $tenant, $deliveryUuid);
+            if ($fresh === null) {
+                throw new NotFoundException('Resource not found.');
+            }
+            $status = (string) $fresh['status'];
+            if ($status !== 'dead_letter') {
+                throw SellerWebhookException::deliveryNotReplayable($status);
+            }
+
+            $nowStr = $this->readDbNow($c)->format('Y-m-d H:i:s');
+            $replayUuid = ($this->uuidGenerator)();
+
+            $this->deliveries->insertReplay($c, $tenant, [
+                'uuid' => $replayUuid,
+                'endpoint_uuid' => $endpointUuid,
+                'webhook_event_uuid' => $eventUuid,
+                'seller_uuid' => $sellerUuid,
+                'replay_of_uuid' => $deliveryUuid,
+                'next_attempt_at' => $nowStr,
+            ]);
+
+            $inserted = $this->deliveries->findByUuid($c, $tenant, $replayUuid);
+            if ($inserted === null) {
+                throw new \RuntimeException('Replayed seller webhook delivery could not be reloaded.');
+            }
+
+            return $inserted;
+        });
+
+        // Wake-up hint only, AFTER commit (design spec §2.4's own convention
+        // for every `pending` row this class or the outbox ever creates) --
+        // the durable `pending` row committed above is the authority
+        // regardless of whether this hint is ever delivered.
+        $replayUuid = (string) $replay['uuid'];
+        db($c)->afterCommit(function () use ($c, $replayUuid): void {
+            $this->enqueueHint($c, $replayUuid);
+        });
+
+        return $replay;
     }
 
     /**
@@ -321,12 +453,22 @@ final class SellerWebhookDeliveryService
         ): ?array {
             $this->sellers->claimRevision($c, $tenant, $sellerUuid);
             $seller = $this->sellers->findByUuid($c, $tenant, $sellerUuid);
-            $sellerActive = $seller === null || (string) $seller['status'] === 'active';
+            $sellerStatus = $seller !== null ? (string) $seller['status'] : 'active';
 
             $now = $this->readDbNow($c);
             $nowStr = $now->format('Y-m-d H:i:s');
 
-            if (!$sellerActive) {
+            // T5-review M1 fix (design spec §2.9): a CLOSED seller's refused
+            // claim terminally cancels -- never pauses -- so it can neither
+            // be resumed nor escape the retention purge as a stale `paused`
+            // row. A `suspended` (or any other non-active, non-closed) seller
+            // keeps the original pause-with-remaining-delay behavior.
+            if ($sellerStatus === 'closed') {
+                $this->deliveries->cancelOne($c, $tenant, $deliveryUuid, $nowStr);
+
+                return null;
+            }
+            if ($sellerStatus !== 'active') {
                 $this->refuseAndPause($c, $tenant, $deliveryUuid, 'seller_suspended', $nowStr);
 
                 return null;
