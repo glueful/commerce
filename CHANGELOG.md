@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-07-20 — Multi-Vendor Marketplace
+
+The optional multi-vendor marketplace, built as vertical slices MV1–MV5c-2 on top of the single-vendor
+core: an opt-in two-level switch, shared partitioned checkout, a commission & settlement ledger,
+provider payouts with reserves and chargebacks, seller suspension enforcement, seller API keys, and
+isolated per-seller outbound webhooks. Every slice is inert (zero marketplace-table queries,
+byte-identical behavior) while the master switch is off. Requires framework 1.71.0 and
+extension-contracts 1.5.0; provider payouts and dispute ingestion are fulfilled by payvia 2.1.0
+through the neutral contracts ports. Migrations `010`–`019` first-publish together in this release.
+
 **Theme: optional marketplace foundation (MV1)** — a two-level opt-in multi-seller
 layer (install master switch + per-workspace activation) with zero behavior change
 while off: two new migrations, no changes to any existing table or route.
