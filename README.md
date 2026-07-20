@@ -3,7 +3,11 @@
 Commerce for Glueful apps: catalog (products, variants, categories, tags,
 attributes, media, add-ons, reviews), inventory, carts, discounts, pricing,
 checkout, orders, refunds, digital delivery, shipping zones and tax tables,
-customer aggregates, reports, and payment integration seams.
+customer aggregates, reports, and payment integration seams — plus an
+optional multi-vendor marketplace (sellers, partitioned checkout, a
+commission & settlement ledger, payouts, reserves and chargebacks, seller
+API keys, and seller outbound webhooks) that is entirely inert until
+switched on.
 
 All money is integer minor units. Variant currency must match the store
 currency. Every mutable row is guarded by affected-row-checked revision claims;
@@ -26,6 +30,7 @@ only the contracts and keeps zero hard class references to those extensions.
 | Capability | Without extension | With extension |
 | --- | --- | --- |
 | Payments | `ManualPaymentCollector` returns retryable manual payment instructions. | A provider such as Payvia binds `PaymentCollector`; Commerce stores orders and starts payment through the contract. |
+| Provider payouts & disputes | Marketplace payouts are recorded manually by an operator; no chargeback ingestion. | A provider such as Payvia (≥ 2.1.0) binds `PayoutCollector` and emits `ProviderChargebackEvent`; the payout saga executes provider transfers, reconciles their status, and posts provider-reported chargebacks/reversals to the ledger. |
 | Tenancy | Every row uses the `''` sentinel tenant key. | Tenancy binds `CurrentTenantResolver` and `TenantTableRegistry`; Commerce fail-closes when no tenant is resolved. |
 | Users | Guest checkout works through hashed bearer order tokens. | Authenticated order listing and customer detail enrichment use `UserProviderInterface`; guest lookups remain token-protected. |
 | Media | Product media stores blob links; thumbnails absent. | `glueful/media` provides image processing for uploaded blobs. |
@@ -97,6 +102,64 @@ literal (escaped) substring filters.
 Every route action carries OpenAPI annotations; a CI test walks the full route
 manifest and fails on any unannotated action.
 
+## Marketplace (optional, off by default)
+
+A two-level switch gates everything: the install master switch
+(`COMMERCE_MARKETPLACE_ENABLED`, default `false`) and a per-workspace
+activation guarded by a catalog adoption gate (no product may lack a seller).
+While the master switch is off, the marketplace/seller route groups are never
+registered and ordinary request paths execute **zero marketplace-table
+queries** — behavior is byte-identical to a non-marketplace install.
+
+- **Sellers & memberships** — seller lifecycle
+  (`onboarding|active|suspended|closed`) with an audited, reasoned
+  suspend/reactivate/close; memberships with a fixed role vocabulary
+  (`seller_owner|seller_admin|seller_staff|seller_analyst`) and a last-owner
+  anti-lockout guard; guarded catalog adoption/transfer (never a raw patch).
+- **Partitioned checkout & seller orders** — one customer order fans out into
+  immutable per-seller partitions with exactly reconciled money attribution
+  (largest-remainder allocation; `Σ` per-seller = order total, hard-asserted
+  in the checkout transaction), independent parent-derived fulfillment, and a
+  payment-confirmation PII gate.
+- **Commission & settlement ledger** — append-only per-account ledger with
+  deterministic idempotency and per-account locks; immutable per-line
+  commission snapshots (policy resolved product → seller → workspace →
+  config); balances always derived by `SUM`, never stored.
+- **Payouts, reserves, chargebacks, debt** — manual payouts with derived-
+  balance overdraw refusal, or provider transfers through the contracts
+  `PayoutCollector` port (reserve/execute/finalize saga, retry/reconcile
+  sweeps, reversal handling); rolling reserves consumed reserve-first;
+  provider-reported chargebacks (full auto-expand or operator line
+  attribution) and their reversals; negative balances tracked as debt that
+  freezes payouts.
+- **Seller API keys** — seller-scoped machine credentials whose effective
+  access is declared key scopes ∩ the subject's live role capabilities ∩ a
+  dedicated grantable catalog, revalidated per request; grace-window
+  rotation and whole-lineage revocation; key management is JWT-interactive
+  only (a key can never mint or manage keys).
+- **Seller outbound webhooks** — a transactional per-seller outbox written
+  inside the same transaction as the business change (no
+  committed-state-without-event window), payloads allow-list projected per
+  seller; encrypted-at-rest AAD-bound signing secrets returned exactly once;
+  strict SSRF-safe delivery (framework `SafeOutboundTargetResolver`, one
+  resolve + IP pin, HTTPS only); crash-safe claim leases with token-checked
+  finalization; retries with backoff, dead-letter, seller replay, and
+  per-endpoint auto-disable; suspend pauses delivery with the remaining
+  delay frozen, close cancels.
+
+Surfaces: sellers operate under `/commerce/seller/{sellerUuid}/...` (catalog,
+inventory, orders + fulfillment, financial reports, balance, reserves, payout
+readiness, API keys, webhooks — capability-gated per role; a suspended
+seller's members keep a minimum read/fulfill surface); platform operators
+under `/commerce/admin/marketplace/...` (sellers, memberships, adoption and
+transfer, commission and reserve policy, chargebacks, manual holds, payouts,
+debt forgiveness). Marketplace tables are tenancy-adopted and
+`commerce:diagnose`-covered exactly like the core tables.
+
+Requires `glueful/framework` ≥ 1.71.0. Provider payouts and dispute ingestion
+additionally need a `PayoutCollector` implementation (e.g. `glueful/payvia`
+≥ 2.1.0); without one, payouts stay manual.
+
 ## Configuration
 
 ```php
@@ -159,6 +222,17 @@ return [
 ];
 ```
 
+Marketplace tuning lives under `marketplace.*` (see `config/commerce.php` for
+the full annotated set): the master switch (`COMMERCE_MARKETPLACE_ENABLED`),
+workspace-default commission (`COMMERCE_COMMISSION_KIND|BPS|FIXED`), reserve
+release sweep batching, API-key denial-audit retention
+(`COMMERCE_API_KEYS_AUTH_DENIED_RETENTION_DAYS`, default 90), and the webhook
+delivery envelope (`COMMERCE_WEBHOOKS_*`: retry budget and backoff, per-attempt
+timeout, claim lease — validated strictly greater than the timeout — response
+cap, consecutive-failure disable threshold, secret rotation overlap, retention,
+sweep batching). All defaults are operational tuning only; no marketplace
+behavior turns on without the master switch.
+
 ## Digital Delivery
 
 Variants carry downloadable files (private blobs). Grants are issued
@@ -191,6 +265,17 @@ contract bindings and sentinel row counts so orphaned rows are visible.
 - `commerce:customers:link-guests`
 - `commerce:tenancy:adopt`
 - `commerce:diagnose`
+
+Marketplace (host-cron; all no-ops while the master switch is off):
+
+- `commerce:marketplace:reconcile` — read-only ledger coherence scan (missing/duplicate/mismatched postings)
+- `commerce:marketplace:payouts:retry-sweep` / `commerce:marketplace:payouts:reconcile-sweep`
+- `commerce:marketplace:payouts:run-batch`
+- `commerce:marketplace:payout-accounts:sync` — provider destination readiness
+- `commerce:marketplace:reserves:release-sweep` — release matured rolling reserves
+- `commerce:marketplace:webhooks:sweep` — reclaim expired delivery leases, re-enqueue due rows
+- `commerce:marketplace:webhooks:purge` — retention purge of terminal delivery history
+- `commerce:marketplace:api-keys:purge-denials` — denial-audit retention
 
 ## Migrating from WooCommerce
 
