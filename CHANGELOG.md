@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-07-20 — Marketplace Integrity Fixes
+
+Three marketplace hardening fixes on top of 1.2.0: a ledger-conservation guard on operator
+chargeback attribution, tenant-paired webhook job resolution, and bounded seller-facing delivery
+error messages. No new env vars, no migrations, no API shape changes; behavior tightens only
+(422 where a malformed attribution previously posted, generic error text where raw exception
+messages previously surfaced).
+
 ### Fixed
 - **Chargeback attribution lines must now be strictly positive** — both the operator endpoint
   (`POST /commerce/admin/marketplace/chargebacks/{uuid}/attribution`) and
