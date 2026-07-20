@@ -329,8 +329,12 @@ final class SellerWebhookDeliveryTest extends CommerceTestCase
         $seeded = $this->registerActiveEndpoint('sellerDEL00011', 'ownerDEL0011');
         $delivery = $this->seedPendingDelivery($seeded['endpoint']['uuid'], 'sellerDEL00011', ['x' => 1]);
 
+        // The raw transport message can embed resolved addresses (curl-style
+        // "Failed to connect to <ip> port 443") -- and `last_error` is
+        // seller-visible through the deliveries read. Poison the message and
+        // assert the persisted error is the bounded generic string.
         $service = $this->deliveryService(function () {
-            throw new TransportException('simulated connection timeout');
+            throw new TransportException('Failed to connect to 10.66.77.88 port 443: internal-gw.corp timeout');
         });
 
         $outcome = $service->deliver($this->context, self::TENANT, $delivery['delivery_uuid']);
@@ -339,6 +343,39 @@ final class SellerWebhookDeliveryTest extends CommerceTestCase
         $row = $this->deliveryRow($delivery['delivery_uuid']);
         self::assertSame('pending', $row['status']);
         self::assertNotNull($row['next_attempt_at']);
+        self::assertSame(
+            'Network error contacting the endpoint (connection failed or timed out).',
+            (string) $row['last_error'],
+            'transport detail must never reach the seller-visible last_error'
+        );
+        self::assertStringNotContainsString('10.66.77.88', (string) $row['last_error']);
+        self::assertStringNotContainsString('internal-gw.corp', (string) $row['last_error']);
+    }
+
+    public function testUnexpectedInternalFailureStoresAGenericLastError(): void
+    {
+        $seeded = $this->registerActiveEndpoint('sellerDEL00026', 'ownerDEL0026');
+        $delivery = $this->seedPendingDelivery($seeded['endpoint']['uuid'], 'sellerDEL00026', ['x' => 1]);
+
+        // The \Throwable fail-safe branch: an unexpected internal exception's
+        // message (paths, class names, hosts) must never reach the
+        // seller-visible last_error either.
+        $service = $this->deliveryService(function () {
+            throw new \RuntimeException('PDO connection lost at db-internal-9.corp:5432 /var/app/secrets');
+        });
+
+        $outcome = $service->deliver($this->context, self::TENANT, $delivery['delivery_uuid']);
+
+        self::assertSame('retry_scheduled', $outcome);
+        $row = $this->deliveryRow($delivery['delivery_uuid']);
+        self::assertSame('pending', $row['status']);
+        self::assertSame(
+            'Unexpected delivery error.',
+            (string) $row['last_error'],
+            'internal exception detail must never reach the seller-visible last_error'
+        );
+        self::assertStringNotContainsString('db-internal-9.corp', (string) $row['last_error']);
+        self::assertStringNotContainsString('/var/app/secrets', (string) $row['last_error']);
     }
 
     // -----------------------------------------------------------------
@@ -644,11 +681,13 @@ final class SellerWebhookDeliveryTest extends CommerceTestCase
         });
 
         $service = $this->deliveryService(fn () => new MockResponse('unused'));
-        $service->enqueueHint($this->context, 'someDeliveryId');
+        $service->enqueueHint($this->context, self::TENANT, 'someDeliveryId');
 
         self::assertCount(1, $pushed);
         self::assertSame(DeliverSellerWebhookJob::class, $pushed[0][0]);
         self::assertSame('someDeliveryId', $pushed[0][1]['delivery_uuid']);
+        self::assertArrayHasKey('tenant_uuid', $pushed[0][1], 'hint must carry the tenant for pair resolution');
+        self::assertSame(self::TENANT, $pushed[0][1]['tenant_uuid']);
     }
 
     public function testEnqueueHintSwallowsAThrowingQueueManager(): void
@@ -670,16 +709,20 @@ final class SellerWebhookDeliveryTest extends CommerceTestCase
 
         $service = $this->deliveryService(fn () => new MockResponse('unused'));
         // Must not throw -- a lost hint never threatens correctness.
-        $service->enqueueHint($this->context, 'someDeliveryId');
+        $service->enqueueHint($this->context, self::TENANT, 'someDeliveryId');
         self::assertTrue(true);
     }
 
     // -----------------------------------------------------------------
-    // Job glue: tenant resolution from a tenant-less queue hint.
+    // Job glue: (tenant, uuid) pair resolution, with the legacy
+    // tenant-less-payload fallback for in-flight pre-fix hints.
     // -----------------------------------------------------------------
 
     public function testJobResolvesTenantFromTheDeliveryRowAndDelegatesToTheService(): void
     {
+        // LEGACY payload shape (no tenant_uuid): a hint enqueued by a
+        // pre-fix install with jobs still in flight at upgrade time must
+        // still resolve via the unscoped fallback and deliver.
         $seeded = $this->registerActiveEndpoint('sellerDEL00023', 'ownerDEL0023');
         $delivery = $this->seedPendingDelivery($seeded['endpoint']['uuid'], 'sellerDEL00023', ['x' => 1]);
 
@@ -692,6 +735,58 @@ final class SellerWebhookDeliveryTest extends CommerceTestCase
 
         $row = $this->deliveryRow($delivery['delivery_uuid']);
         self::assertSame('delivered', $row['status']);
+    }
+
+    public function testJobResolvesByTenantPairAndNeverPicksACrossTenantUuidCollision(): void
+    {
+        // Regression (delivery uuids carry no cross-tenant uniqueness,
+        // migration 019): seed a DECOY row under another tenant with the
+        // SAME uuid, inserted FIRST so an unscoped `->first()` would find
+        // it. The tenant-carrying payload must resolve OUR tenant's row --
+        // deliver it -- and leave the decoy untouched.
+        $seeded = $this->registerActiveEndpoint('sellerDEL00025', 'ownerDEL0025');
+        $delivery = $this->seedPendingDelivery($seeded['endpoint']['uuid'], 'sellerDEL00025', ['x' => 1]);
+        $collidingUuid = (string) $delivery['delivery_uuid'];
+
+        // Move the real row's id ABOVE the decoy's by re-inserting the decoy
+        // with a lower ordering guarantee: delete + reinsert our row after
+        // the decoy so the decoy holds the lower autoincrement id.
+        $ourRow = $this->deliveryRow($collidingUuid);
+        $this->connection->table('commerce_seller_webhook_deliveries')
+            ->where('tenant_uuid', '=', self::TENANT)
+            ->where('uuid', '=', $collidingUuid)
+            ->delete();
+        $decoy = $ourRow;
+        unset($decoy['id']);
+        $decoy['tenant_uuid'] = 'tenantDECOY1';
+        $this->connection->table('commerce_seller_webhook_deliveries')->insert($decoy);
+        $ours = $ourRow;
+        unset($ours['id']);
+        $this->connection->table('commerce_seller_webhook_deliveries')->insert($ours);
+
+        $service = $this->deliveryService(fn () => new MockResponse('ok', ['http_code' => 200]));
+        $this->bind(SellerWebhookDeliveryRepository::class, new SellerWebhookDeliveryRepository());
+        $this->bind(SellerWebhookDeliveryService::class, $service);
+
+        $job = new DeliverSellerWebhookJob([
+            'delivery_uuid' => $collidingUuid,
+            'tenant_uuid' => self::TENANT,
+        ], $this->context);
+        $job->handle();
+
+        $ourAfter = $this->connection->table('commerce_seller_webhook_deliveries')
+            ->where('tenant_uuid', '=', self::TENANT)
+            ->where('uuid', '=', $collidingUuid)
+            ->first();
+        self::assertNotNull($ourAfter);
+        self::assertSame('delivered', $ourAfter['status'], 'our tenant\'s row must be the one delivered');
+
+        $decoyAfter = $this->connection->table('commerce_seller_webhook_deliveries')
+            ->where('tenant_uuid', '=', 'tenantDECOY1')
+            ->where('uuid', '=', $collidingUuid)
+            ->first();
+        self::assertNotNull($decoyAfter);
+        self::assertSame('pending', $decoyAfter['status'], 'the cross-tenant decoy must be untouched');
     }
 
     public function testJobIsANoOpForAnAlreadyGoneDeliveryUuid(): void

@@ -254,9 +254,10 @@ final class AdminReserveController
                 || !isset($line['order_line_uuid'], $line['amount'])
                 || !is_string($line['order_line_uuid'])
                 || !is_int($line['amount'])
+                || $line['amount'] < 1
             ) {
                 throw new ChargebackAttributionException(
-                    "lines.{$index}: must include order_line_uuid (string) and amount (int)."
+                    "lines.{$index}: must include order_line_uuid (string) and amount (positive int)."
                 );
             }
 

@@ -2,6 +2,36 @@
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-07-20 — Marketplace Integrity Fixes
+
+Three marketplace hardening fixes on top of 1.2.0: a ledger-conservation guard on operator
+chargeback attribution, tenant-paired webhook job resolution, and bounded seller-facing delivery
+error messages. No new env vars, no migrations, no API shape changes; behavior tightens only
+(422 where a malformed attribution previously posted, generic error text where raw exception
+messages previously surfaced).
+
+### Fixed
+- **Chargeback attribution lines must now be strictly positive** — both the operator endpoint
+  (`POST /commerce/admin/marketplace/chargebacks/{uuid}/attribution`) and
+  `ChargebackService::attributeAndPost()` reject any line whose `amount` is zero or negative with a
+  `422`. Previously a signed mix (e.g. `-50` and `+150` for a `100` chargeback) satisfied the
+  sum-equals-amount check while the posting gate silently skipped the negative per-seller net and
+  posted the inflated positive one — 150 of ledger movement for 100 of chargeback cash, breaking
+  ledger conservation. A conservation regression test now pins that posted chargeback debits sum to
+  exactly the chargeback amount.
+- **Webhook delivery queue hints now carry the tenant** — `DeliverSellerWebhookJob` payloads include
+  `tenant_uuid` and the job resolves the delivery row by the `(tenant, uuid)` pair instead of a
+  uuid-only lookup (delivery uuids carry no cross-tenant uniqueness constraint, so a hypothetical
+  collision could previously route the job to another tenant's row and leave the intended delivery
+  waiting for the recovery sweep). Hints enqueued by a pre-fix install with jobs still in flight at
+  upgrade time fall back to the legacy uuid-only resolution and continue to deliver.
+- **Webhook delivery errors shown to sellers are now bounded generic messages** — a transport
+  failure or unexpected internal exception during delivery previously persisted the raw exception
+  message into the seller-visible `last_error` field (which can embed resolved network addresses or
+  implementation details). The detail is now logged internally only; `last_error` carries a fixed
+  generic message. HTTP-status failures (`HTTP 500`) and the already-generic SSRF safety message are
+  unchanged.
+
 ## [1.2.0] - 2026-07-20 — Multi-Vendor Marketplace
 
 The optional multi-vendor marketplace, built as vertical slices MV1–MV5c-2 on top of the single-vendor

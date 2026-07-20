@@ -89,7 +89,7 @@ final class SweepSellerWebhooksCommand extends BaseCommand
                 $uuid = (string) $candidate['uuid'];
 
                 try {
-                    $service->enqueueHint($context, $uuid);
+                    $service->enqueueHint($context, $tenant, $uuid);
                     $enqueued++;
                 } catch (\Throwable $e) {
                     $failures++;

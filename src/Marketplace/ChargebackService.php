@@ -224,6 +224,20 @@ final class ChargebackService
             foreach ($lines as $line) {
                 $lineUuid = (string) $line['order_line_uuid'];
                 $lineAmount = (int) $line['amount'];
+
+                // Conservation guard: every attribution line must be strictly
+                // positive. A signed mix (e.g. -50 + 150 for a 100 chargeback)
+                // passes the sum check below yet skews the per-seller debits --
+                // postAttributedLines() skips a non-positive per-seller net
+                // (`$debit > 0`) while posting the inflated positive one, so
+                // ledger movement would exceed the chargeback's actual cash.
+                if ($lineAmount <= 0) {
+                    throw new ChargebackAttributionException(
+                        "Chargeback attribution failure ({$chargebackUuid}): line '{$lineUuid}' "
+                            . "amount {$lineAmount} must be a positive integer."
+                    );
+                }
+
                 $lineAmounts[$lineUuid] = ($lineAmounts[$lineUuid] ?? 0) + $lineAmount;
                 $sum += $lineAmount;
             }
