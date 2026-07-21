@@ -63,17 +63,23 @@ final class StockRepository
             throw new \InvalidArgumentException('Quantity must be greater than zero.');
         }
 
+        // Portability: `tracked` is a genuine boolean column (migrations/002) — bind it as a
+        // parameter rather than a literal `1` (see StockReportRepository's docblock for why a
+        // literal integer comparison against a boolean column fails on PostgreSQL with
+        // "operator does not exist: boolean = integer", even though it compiles fine on
+        // SQLite/MySQL's integer-affinity booleans).
         $affected = db($context)->table('commerce_stock')->executeModification(
             <<<'SQL'
 UPDATE commerce_stock
 SET quantity = quantity - ?, updated_at = ?
-WHERE tenant_uuid = ? AND variant_uuid = ? AND tracked = 1 AND quantity >= ?
+WHERE tenant_uuid = ? AND variant_uuid = ? AND tracked = ? AND quantity >= ?
 SQL,
             [
                 $quantity,
                 $this->now($context),
                 $tenant,
                 $variantUuid,
+                true,
                 $quantity,
             ]
         );
@@ -129,17 +135,19 @@ SQL,
             throw new \InvalidArgumentException('Quantity must be greater than zero.');
         }
 
+        // Portability: same boolean-column-vs-literal-integer fix as decrement() above.
         $affected = db($context)->table('commerce_stock')->executeModification(
             <<<'SQL'
 UPDATE commerce_stock
 SET quantity = quantity + ?, updated_at = ?
-WHERE tenant_uuid = ? AND variant_uuid = ? AND tracked = 1
+WHERE tenant_uuid = ? AND variant_uuid = ? AND tracked = ?
 SQL,
             [
                 $quantity,
                 $this->now($context),
                 $tenant,
                 $variantUuid,
+                true,
             ]
         );
 
