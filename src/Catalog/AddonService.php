@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Commerce\Catalog;
 
 use Glueful\Bootstrap\ApplicationContext;
+use Glueful\Extensions\Commerce\Events\StorefrontCatalogChanged;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Glueful\Helpers\Utils;
 use Glueful\Http\Exceptions\Client\NotFoundException;
@@ -40,6 +41,7 @@ final class AddonService
         private AddonRepository $addons,
         private ProductRepository $products,
         private CurrentTenantResolver $tenants,
+        private ?StorefrontCatalogChangeDispatcher $catalogEvents = null,
     ) {
     }
 
@@ -94,6 +96,8 @@ final class AddonService
                 throw new \RuntimeException('Created add-on could not be reloaded.');
             }
 
+            $this->catalogEvents?->dispatch($c, $tenant, $productUuid, StorefrontCatalogChanged::REASON_ADDON_CHANGED);
+
             return $row;
         });
     }
@@ -128,6 +132,12 @@ final class AddonService
             $set = $this->planUpdate($changes, $current);
             if ($set !== []) {
                 $this->addons->update($c, $tenant, $uuid, $set);
+                $this->catalogEvents?->dispatch(
+                    $c,
+                    $tenant,
+                    $productUuid,
+                    StorefrontCatalogChanged::REASON_ADDON_CHANGED
+                );
             }
 
             $row = $this->addons->findByUuid($c, $tenant, $uuid);
@@ -160,6 +170,8 @@ final class AddonService
             }
 
             $this->addons->delete($c, $tenant, $uuid);
+
+            $this->catalogEvents?->dispatch($c, $tenant, $productUuid, StorefrontCatalogChanged::REASON_ADDON_CHANGED);
         });
     }
 

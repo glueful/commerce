@@ -51,6 +51,17 @@ use Glueful\Validation\ValidationException;
  * {@see \Glueful\Extensions\Commerce\Marketplace\SellerAttributionService}'s
  * `$afterSnapshotHook`) invoked immediately after the pre-claim ownership
  * snapshot, before the seller/product claim set is locked.
+ *
+ * **Durable checkout idempotency (design spec §7, Slice-2 Task 3).**
+ * `$attemptAuthority` is another APPENDED OPTIONAL collaborator -- Commerce
+ * never binds one itself, mirroring `SlugLifecycleAuthority`'s soft-
+ * consumption convention. `placeOrder()`'s `$attempt` parameter is likewise
+ * optional; whenever EITHER is null, `placeOrder()` runs zero attempt-table
+ * queries and behaves byte-identically to pre-Task-3. When both are present,
+ * `claimOrReplay()` runs first inside the placement transaction, before cart
+ * validation, and either short-circuits to a replay of an already-completed
+ * attempt or lets a brand-new attempt proceed to `complete()` inside that
+ * same transaction right after the order it placed exists.
  */
 final class CheckoutService
 {
@@ -79,6 +90,7 @@ final class CheckoutService
         private ?SellerOrderRepository $sellerOrders = null,
         ?callable $afterOwnershipSnapshotHook = null,
         private ?SellerWebhookOutboxPublisher $webhooks = null,
+        private ?CheckoutAttemptAuthority $attemptAuthority = null,
     ) {
         $this->afterOwnershipSnapshotHook = $afterOwnershipSnapshotHook ?? static function (
             ApplicationContext $context,
@@ -140,12 +152,8 @@ final class CheckoutService
         array $buyer,
         array $addresses,
         ?string $shippingMethodId,
+        ?CheckoutAttemptContext $attempt = null,
     ): array {
-        $cart = $this->carts->byToken($context, $rawCartToken);
-        if ($cart === null) {
-            throw ValidationException::forField('cart', 'Cart not found or no longer active.');
-        }
-
         $tenant = $this->tenants->tenantUuid($context);
         $storeCurrency = (string) config($context, 'commerce.currency', 'USD');
         $guestToken = TokenHasher::generate();
@@ -161,50 +169,61 @@ final class CheckoutService
             && $this->marketplaceMode->installEnabled($context);
         $maxAttempts = $marketplaceInstalled ? 2 : 1;
 
-        $order = null;
-        for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
+        $result = null;
+        for ($attemptNo = 1; $attemptNo <= $maxAttempts; $attemptNo++) {
             try {
-                $order = db($context)->transaction(function () use (
+                $result = db($context)->transaction(function () use (
                     $context,
                     $tenant,
-                    $cart,
+                    $rawCartToken,
                     $buyer,
                     $guestToken,
                     $addresses,
                     $storeCurrency,
                     $shippingMethodId,
-                    $marketplaceInstalled
+                    $marketplaceInstalled,
+                    $attempt
                 ): array {
                     return $this->placeOrderAttempt(
                         $context,
                         $tenant,
-                        $cart,
+                        $rawCartToken,
                         $buyer,
                         $guestToken,
                         $addresses,
                         $storeCurrency,
                         $shippingMethodId,
-                        $marketplaceInstalled
+                        $marketplaceInstalled,
+                        $attempt
                     );
                 });
                 break;
             } catch (OwnershipDriftException) {
-                if ($attempt >= $maxAttempts) {
+                if ($attemptNo >= $maxAttempts) {
                     throw new CheckoutConflictException(
                         'Checkout conflict: seller ownership changed while placing this order. Please retry.'
                     );
                 }
                 // Fall through and retry the ENTIRE placement flow once more,
                 // from a fresh snapshot -- the failed attempt's transaction
-                // (cart claim included) has already been rolled back.
+                // (cart claim + attempt claim included) has already been
+                // rolled back.
             }
         }
 
-        /** @var array<string,mixed> $order */
-        $this->dispatch($context, new OrderPlaced($order));
-        $payment = $this->initiatePayment($context, $order);
+        /** @var array{order: array<string,mixed>, guest_token: string, replay: bool} $result */
+        // Durable checkout idempotency (design spec §7): a replay resolves to
+        // an order that was placed (and dispatched) by a PRIOR call -- this
+        // call must not dispatch OrderPlaced a second time, but the payment
+        // collector is contractually idempotent by payable, so re-running
+        // initiation for it is always safe and, on a crash-after-commit
+        // retry, is exactly what repairs the missed provider call.
+        if (!$result['replay']) {
+            $this->dispatch($context, new OrderPlaced($result['order']));
+        }
+        $payment = $this->initiatePayment($context, $result['order']);
 
-        return ['order' => $order, 'guest_token' => $guestToken['raw'], 'payment' => $payment];
+        return ['order' => $result['order'], 'guest_token' => $result['guest_token'], 'payment' => $payment];
     }
 
     /**
@@ -215,23 +234,50 @@ final class CheckoutService
      * from inside the transaction on a claim-protocol failure, which rolls
      * back every write this attempt made.
      *
+     * Durable checkout idempotency (design spec §7, Slice-2 Task 3): when
+     * `$attempt` is bound AND an authority is injected, `claimOrReplay()`
+     * runs FIRST, before the active-cart lookup below -- a typed replay
+     * short-circuits straight to the stored order/credential, skipping cart
+     * validation entirely, and `complete()` runs once the new order exists,
+     * binding the attempt to it in the SAME transaction. Either collaborator
+     * missing makes both calls a no-op and this method behaves exactly as
+     * pre-Task-3 -- including the active-cart lookup, which moved here (was
+     * pre-transaction in `placeOrder()`) so a bound authority can gate it.
+     *
      * @param array{email: string, user_uuid?: string|null} $buyer
      * @param array{hash: string, raw: string} $guestToken
-     * @param array<string,mixed> $cart
      * @param array<string,mixed> $addresses
-     * @return array<string,mixed>
+     * @return array{order: array<string,mixed>, guest_token: string, replay: bool}
      */
     private function placeOrderAttempt(
         ApplicationContext $context,
         string $tenant,
-        array $cart,
+        string $rawCartToken,
         array $buyer,
         array $guestToken,
         array $addresses,
         string $storeCurrency,
         ?string $shippingMethodId,
-        bool $marketplaceInstalled
+        bool $marketplaceInstalled,
+        ?CheckoutAttemptContext $attempt
     ): array {
+        if ($this->attemptAuthority !== null && $attempt !== null) {
+            $replay = $this->attemptAuthority->claimOrReplay($context, $tenant, $attempt);
+            if ($replay !== null) {
+                $order = $this->orders->findByUuid($context, $tenant, $replay->orderUuid);
+                if ($order === null) {
+                    throw new \RuntimeException('Replayed checkout attempt order could not be reloaded.');
+                }
+
+                return ['order' => $order, 'guest_token' => $replay->guestCredential, 'replay' => true];
+            }
+        }
+
+        $cart = $this->carts->byToken($context, $rawCartToken);
+        if ($cart === null) {
+            throw ValidationException::forField('cart', 'Cart not found or no longer active.');
+        }
+
         // The lifecycle claim is the checkout idempotency point. Every cart mutation
         // claims the same row before writing, so the lines below are a stable snapshot.
         $cart = $this->carts->claimForCheckout($context, $cart);
@@ -340,6 +386,15 @@ final class CheckoutService
         ], $lines);
         $this->orders->recordEvent($context, $orderUuid, 'placed', ['number' => $number]);
 
+        // Durable checkout idempotency (design spec §7): binds the attempt to
+        // the order that JUST NOW came to exist, inside this same
+        // transaction -- the pending claim `claimOrReplay()` made above can
+        // never commit separately from this order, one shared commit, no
+        // crash window between them.
+        if ($this->attemptAuthority !== null && $attempt !== null) {
+            $this->attemptAuthority->complete($context, $tenant, $attempt, $orderUuid, $number, $guestToken['raw']);
+        }
+
         if ($partitioned) {
             $this->writeSellerOrders(
                 $context,
@@ -358,7 +413,7 @@ final class CheckoutService
             throw new \RuntimeException('Created order could not be reloaded.');
         }
 
-        return $order;
+        return ['order' => $order, 'guest_token' => $guestToken['raw'], 'replay' => false];
     }
 
     /**

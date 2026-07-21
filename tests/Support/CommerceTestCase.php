@@ -46,7 +46,7 @@ abstract class CommerceTestCase extends TestCase
 
         $this->connection = new Connection([
             'engine' => 'sqlite',
-            'sqlite' => ['primary' => ':memory:'],
+            'sqlite' => ['primary' => $this->sqlitePath()],
             'pooling' => ['enabled' => false],
         ]);
 
@@ -90,6 +90,18 @@ abstract class CommerceTestCase extends TestCase
         $this->context = new ApplicationContext(basePath: sys_get_temp_dir(), environment: 'testing');
         $this->context->setContainer($container);
         $this->context->mergeConfigDefaults('commerce', require __DIR__ . '/../../config/commerce.php');
+    }
+
+    /**
+     * SQLite target for the per-test connection. `:memory:` (the default) is
+     * private per-connection -- fine for every ordinary test, useless for a
+     * test that needs a SECOND, independent {@see Connection} to observe the
+     * SAME data (e.g. a transaction-visibility proof). Override to return a
+     * real file path in that case.
+     */
+    protected function sqlitePath(): string
+    {
+        return ':memory:';
     }
 
     protected function appContext(): ApplicationContext

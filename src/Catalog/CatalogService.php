@@ -7,6 +7,8 @@ namespace Glueful\Extensions\Commerce\Catalog;
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Events\EventService;
 use Glueful\Extensions\Commerce\Events\ProductDeleted;
+use Glueful\Extensions\Commerce\Events\ProductSlugChanged;
+use Glueful\Extensions\Commerce\Events\StorefrontCatalogChanged;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
 use Glueful\Extensions\Commerce\Marketplace\CommissionPolicyService;
 use Glueful\Extensions\Commerce\Marketplace\CommissionPolicyResolver;
@@ -80,6 +82,7 @@ final class CatalogService
         private ?MarketplaceWorkspaceLock $workspaceLock = null,
         private ?SellerRepository $sellers = null,
         private ?CommissionPolicyService $commissionPolicy = null,
+        private ?StorefrontCatalogChangeDispatcher $catalogEvents = null,
     ) {
         $this->stock ??= new StockRepository();
         $this->children ??= new ProductChildrenRepository();
@@ -171,6 +174,17 @@ final class CatalogService
                     ? $this->resolveCreateAttribution($context, $tenant, $sellerUuid)
                     : null;
 
+                // Slice-2 Task 1 (design spec §4): the pack-owned slug
+                // reservation authority is soft-consumed -- Commerce never
+                // binds an implementation -- and, when bound, MUST run
+                // inside THIS SAME transaction, before the product row
+                // itself is inserted below, so an authority throw rolls
+                // back the whole create (variants/stock included).
+                $authority = $this->slugAuthority($context);
+                if ($authority !== null) {
+                    $authority->prepareCreate($context, $tenant, $productUuid, $slug);
+                }
+
                 $this->products->insert($context, [
                     'uuid' => $productUuid,
                     'tenant_uuid' => $tenant,
@@ -193,6 +207,13 @@ final class CatalogService
                     $storeCurrency,
                     $type,
                     $created
+                );
+
+                $this->catalogEvents?->dispatch(
+                    $context,
+                    $tenant,
+                    $productUuid,
+                    StorefrontCatalogChanged::REASON_PRODUCT_CREATED
                 );
             }
         );
@@ -393,6 +414,13 @@ final class CatalogService
                 ]);
 
                 $this->stock->ensureRow($context, $tenant, $variantUuid, $type === 'physical');
+
+                $this->catalogEvents?->dispatch(
+                    $context,
+                    $tenant,
+                    $productUuid,
+                    StorefrontCatalogChanged::REASON_VARIANT_CHANGED
+                );
             }
         );
 
@@ -669,13 +697,34 @@ final class CatalogService
         array $changes,
         array $current
     ): void {
+        /** @var array{0:string,1:string}|null $slugRename [oldSlug, newSlug] -- only set on an actual rename */
+        $slugRename = null;
+
         if (isset($changes['slug'])) {
             // Including-deleted (design spec Layer 6 §2): a tombstone keeps
             // reserving its slug, so a rename colliding with one is the same
             // slug-in-use 422 as colliding with a live product.
-            $existing = $this->products->findIncludingDeletedBySlug($context, $tenant, (string) $changes['slug']);
+            $newSlug = (string) $changes['slug'];
+            $existing = $this->products->findIncludingDeletedBySlug($context, $tenant, $newSlug);
             if ($existing !== null && ($existing['uuid'] ?? null) !== $productUuid) {
                 throw ValidationException::forField('slug', 'Slug already in use.');
+            }
+
+            $oldSlug = (string) ($current['slug'] ?? '');
+            if ($newSlug !== $oldSlug) {
+                // Slice-2 Task 1 (design spec §4): the pack-owned slug
+                // reservation authority is soft-consumed -- Commerce never
+                // binds an implementation -- and, when bound, MUST run
+                // inside THIS SAME transaction, before the product row
+                // itself is updated below, so an authority throw rolls back
+                // the whole rename together with everything else this
+                // patch touches.
+                $authority = $this->slugAuthority($context);
+                if ($authority !== null) {
+                    $authority->prepareRename($context, $tenant, $productUuid, $oldSlug, $newSlug);
+                }
+
+                $slugRename = [$oldSlug, $newSlug];
             }
         }
 
@@ -723,6 +772,18 @@ final class CatalogService
         }
 
         $this->products->update($context, $tenant, $productUuid, $changes);
+
+        if ($slugRename !== null) {
+            [$oldSlug, $newSlug] = $slugRename;
+            db($context)->afterCommit(function () use ($context, $tenant, $productUuid, $oldSlug, $newSlug): void {
+                $this->dispatch($context, new ProductSlugChanged($tenant, $productUuid, $oldSlug, $newSlug));
+            });
+        }
+
+        $reason = array_key_exists('status', $changes)
+            ? StorefrontCatalogChanged::REASON_PRODUCT_STATUS_CHANGED
+            : StorefrontCatalogChanged::REASON_PRODUCT_UPDATED;
+        $this->catalogEvents?->dispatch($context, $tenant, $productUuid, $reason);
     }
 
     /**
@@ -767,6 +828,8 @@ final class CatalogService
             db($context)->afterCommit(function () use ($context, $tenant, $uuid): void {
                 $this->dispatch($context, new ProductDeleted($tenant, $uuid));
             });
+
+            $this->catalogEvents?->dispatch($context, $tenant, $uuid, StorefrontCatalogChanged::REASON_PRODUCT_DELETED);
         });
     }
 
@@ -784,6 +847,27 @@ final class CatalogService
         if ($container->has(EventService::class)) {
             $container->get(EventService::class)->dispatch($event);
         }
+    }
+
+    /**
+     * Soft consumption (design spec §4, Slice-2 Task 1): Commerce never
+     * binds an implementation of {@see SlugLifecycleAuthority} -- a
+     * container-has check, mirroring {@see self::dispatch()}'s
+     * {@see EventService} resolution, checked fresh on every call rather
+     * than cached at construction -- so an unbound install never even
+     * attempts to resolve it and create()/rename() stay byte-identical to
+     * pre-Task-1 behavior.
+     */
+    private function slugAuthority(ApplicationContext $context): ?SlugLifecycleAuthority
+    {
+        $container = container($context);
+        if (!$container->has(SlugLifecycleAuthority::class)) {
+            return null;
+        }
+
+        $authority = $container->get(SlugLifecycleAuthority::class);
+
+        return $authority instanceof SlugLifecycleAuthority ? $authority : null;
     }
 
     /**
@@ -863,6 +947,18 @@ final class CatalogService
             }
 
             $this->children->replaceChildren($context, $productUuid, $proposed);
+
+            // No dedicated reason exists for a children-set-list change in the
+            // closed vocabulary (design spec §9) -- it changes the PARENT
+            // product's own storefront representation, so it rides
+            // `product.updated` scoped to the parent, the same reason a
+            // plain field patch uses.
+            $this->catalogEvents?->dispatch(
+                $context,
+                $tenant,
+                $productUuid,
+                StorefrontCatalogChanged::REASON_PRODUCT_UPDATED
+            );
 
             return $this->children->childProductsForProduct($context, $tenant, $productUuid);
         });
@@ -1008,6 +1104,13 @@ final class CatalogService
                 }
 
                 $this->variants->update($context, $tenant, $variantUuid, $changes);
+
+                $this->catalogEvents?->dispatch(
+                    $context,
+                    $tenant,
+                    $productUuid,
+                    StorefrontCatalogChanged::REASON_VARIANT_CHANGED
+                );
             }
         );
     }

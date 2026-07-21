@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Commerce\Catalog;
 
 use Glueful\Bootstrap\ApplicationContext;
+use Glueful\Extensions\Commerce\Events\StorefrontCatalogChanged;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Glueful\Helpers\Utils;
 use Glueful\Http\Exceptions\Client\NotFoundException;
@@ -36,6 +37,7 @@ final class ProductMediaService
         private ProductMediaRepository $media,
         private CurrentTenantResolver $tenants,
         private ?BlobRepository $blobs = null,
+        private ?StorefrontCatalogChangeDispatcher $catalogEvents = null,
     ) {
     }
 
@@ -96,6 +98,8 @@ final class ProductMediaService
                 throw new \RuntimeException('Created media row could not be reloaded.');
             }
 
+            $this->catalogEvents?->dispatch($c, $tenant, $productUuid, StorefrontCatalogChanged::REASON_MEDIA_CHANGED);
+
             return $row;
         });
     }
@@ -147,6 +151,12 @@ final class ProductMediaService
 
             if ($set !== []) {
                 $this->media->update($c, $tenant, $mediaUuid, $set);
+                $this->catalogEvents?->dispatch(
+                    $c,
+                    $tenant,
+                    $productUuid,
+                    StorefrontCatalogChanged::REASON_MEDIA_CHANGED
+                );
             }
 
             $row = $this->media->findByUuid($c, $tenant, $mediaUuid);
@@ -178,6 +188,8 @@ final class ProductMediaService
             }
 
             $this->media->delete($c, $tenant, $mediaUuid);
+
+            $this->catalogEvents?->dispatch($c, $tenant, $productUuid, StorefrontCatalogChanged::REASON_MEDIA_CHANGED);
         });
     }
 
@@ -223,6 +235,15 @@ final class ProductMediaService
 
             foreach ($positions as $entry) {
                 $this->media->update($c, $tenant, $entry['uuid'], ['position' => $entry['position']]);
+            }
+
+            if ($positions !== []) {
+                $this->catalogEvents?->dispatch(
+                    $c,
+                    $tenant,
+                    $productUuid,
+                    StorefrontCatalogChanged::REASON_MEDIA_CHANGED
+                );
             }
 
             return $this->media->forProduct($c, $tenant, $productUuid);

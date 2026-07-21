@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Commerce\Catalog;
 
 use Glueful\Bootstrap\ApplicationContext;
+use Glueful\Extensions\Commerce\Events\StorefrontCatalogChanged;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Glueful\Helpers\Utils;
 use Glueful\Http\Exceptions\Client\NotFoundException;
@@ -27,6 +28,7 @@ final class TagService
         private TagRepository $tags,
         private ProductRepository $products,
         private CurrentTenantResolver $tenants,
+        private ?StorefrontCatalogChangeDispatcher $catalogEvents = null,
     ) {
     }
 
@@ -90,6 +92,7 @@ final class TagService
 
             if ($set !== []) {
                 $this->tags->update($c, $tenant, $uuid, $set);
+                $this->catalogEvents?->dispatch($c, $tenant, null, StorefrontCatalogChanged::REASON_TAG_CHANGED);
             }
 
             $tag = $this->tags->findByUuid($c, $tenant, $uuid);
@@ -128,6 +131,8 @@ final class TagService
             throw new \RuntimeException('Created tag could not be reloaded.');
         }
 
+        $this->catalogEvents?->dispatch($c, $tenant, null, StorefrontCatalogChanged::REASON_TAG_CHANGED);
+
         return $tag;
     }
 
@@ -145,6 +150,8 @@ final class TagService
 
             $this->tags->detachProducts($c, $uuid);
             $this->tags->delete($c, $tenant, $uuid);
+
+            $this->catalogEvents?->dispatch($c, $tenant, null, StorefrontCatalogChanged::REASON_TAG_CHANGED);
         });
     }
 
@@ -187,6 +194,8 @@ final class TagService
             foreach (array_diff($current, $proposed) as $tagUuid) {
                 $this->tags->detachProduct($c, $productUuid, $tagUuid);
             }
+
+            $this->catalogEvents?->dispatch($c, $tenant, $productUuid, StorefrontCatalogChanged::REASON_TAG_CHANGED);
 
             return $this->tags->tagsForProduct($c, $tenant, $productUuid);
         });

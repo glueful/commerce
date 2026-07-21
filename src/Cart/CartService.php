@@ -157,6 +157,88 @@ final class CartService
         });
     }
 
+    /**
+     * Convergent counterpart to {@see self::addLine()}: sets the matching line
+     * (same variant+addons identity addLine uses) to the DESIRED `$quantity`
+     * rather than adding a delta to whatever is already there. Two sequential
+     * `putLine($v, 2)` calls leave ONE line at quantity 2 -- the equivalent
+     * `addLine($v, 2)` pair would leave it at 4. `$quantity <= 0` removes the
+     * matching line if one exists; an absent line + `$quantity <= 0` is a clean
+     * no-op. Same claim protocol (`claimActiveCart()` serializes this against
+     * every other cart mutation, so a sequence of puts against the same
+     * identity deterministically converges to the LAST desired value) and the
+     * same stock/availability validation as addLine -- except the stock check
+     * validates the DESIRED total quantity for the variant (aggregated across
+     * every add-on hash, mirroring addLine's own cross-hash aggregation), not
+     * a delta from whatever the matching line already holds.
+     *
+     * @param array<string,mixed> $cart
+     * @param list<array{addon_uuid:string,choice_key?:string,value?:mixed}> $addons
+     * @return array<string,mixed>
+     */
+    public function putLine(
+        ApplicationContext $context,
+        array $cart,
+        string $variantUuid,
+        int $quantity,
+        array $addons = []
+    ): array {
+        $tenant = $this->tenants->tenantUuid($context);
+
+        return db($context)->transaction(function () use (
+            $context,
+            $tenant,
+            $cart,
+            $variantUuid,
+            $quantity,
+            $addons
+        ): array {
+            $this->claimActiveCart($context, $tenant, (string) $cart['uuid']);
+
+            $variant = $this->variants->findByUuid($context, $tenant, $variantUuid);
+            if ($variant === null) {
+                throw ValidationException::forField('variant_uuid', 'Variant not found.');
+            }
+
+            ['hash' => $hash, 'snapshot' => $snapshot] = $this->buildAddonSnapshot(
+                $context,
+                $tenant,
+                (string) $variant['product_uuid'],
+                (int) $variant['price'],
+                $addons
+            );
+
+            $line = $this->carts->findLineByVariantAndHash(
+                $context,
+                (string) $cart['uuid'],
+                $variantUuid,
+                $hash
+            );
+
+            if ($quantity <= 0) {
+                if ($line !== null) {
+                    $this->carts->deleteLine($context, (string) $line['uuid']);
+                }
+
+                return $this->reloadCart($context, $tenant, (string) $cart['uuid']);
+            }
+
+            $existingForHash = $line === null ? 0 : (int) $line['quantity'];
+            $desiredVariantTotal = $this->carts->totalQuantityForVariant($context, (string) $cart['uuid'], $variantUuid)
+                - $existingForHash
+                + $quantity;
+            $this->assertVariantCanSupply($context, $tenant, $variantUuid, $desiredVariantTotal);
+
+            if ($line === null) {
+                $this->carts->insertLine($context, (string) $cart['uuid'], $variantUuid, $quantity, $snapshot, $hash);
+            } else {
+                $this->carts->setLineQuantity($context, (string) $line['uuid'], $quantity);
+            }
+
+            return $this->reloadCart($context, $tenant, (string) $cart['uuid']);
+        });
+    }
+
     /** @param array<string,mixed> $cart @return array<string,mixed> */
     public function setLineQuantity(ApplicationContext $context, array $cart, string $lineUuid, int $quantity): array
     {
