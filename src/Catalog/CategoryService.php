@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Commerce\Catalog;
 
 use Glueful\Bootstrap\ApplicationContext;
+use Glueful\Extensions\Commerce\Events\StorefrontCatalogChanged;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Glueful\Helpers\Utils;
 use Glueful\Http\Exceptions\Client\NotFoundException;
@@ -55,6 +56,7 @@ final class CategoryService
         private ProductRepository $products,
         private CurrentTenantResolver $tenants,
         private ?BlobRepository $blobs = null,
+        private ?StorefrontCatalogChangeDispatcher $catalogEvents = null,
     ) {
     }
 
@@ -165,6 +167,8 @@ final class CategoryService
                     throw new \RuntimeException('Created category could not be reloaded.');
                 }
 
+                $this->catalogEvents?->dispatch($c, $tenant, null, StorefrontCatalogChanged::REASON_CATEGORY_CHANGED);
+
                 return $category;
             }
         );
@@ -258,6 +262,12 @@ final class CategoryService
 
                 if ($set !== []) {
                     $this->categories->update($c, $tenant, $uuid, $set);
+                    $this->catalogEvents?->dispatch(
+                        $c,
+                        $tenant,
+                        null,
+                        StorefrontCatalogChanged::REASON_CATEGORY_CHANGED
+                    );
                 }
 
                 $category = $this->categories->findByUuid($c, $tenant, $uuid);
@@ -317,6 +327,8 @@ final class CategoryService
             $this->categories->reparentChildren($c, $tenant, $uuid, $parentUuid);
             $this->categories->detachProducts($c, $uuid);
             $this->categories->delete($c, $tenant, $uuid);
+
+            $this->catalogEvents?->dispatch($c, $tenant, null, StorefrontCatalogChanged::REASON_CATEGORY_CHANGED);
         });
     }
 
@@ -369,6 +381,13 @@ final class CategoryService
             foreach (array_diff($current, $proposed) as $categoryUuid) {
                 $this->categories->detachProduct($c, $productUuid, $categoryUuid);
             }
+
+            $this->catalogEvents?->dispatch(
+                $c,
+                $tenant,
+                $productUuid,
+                StorefrontCatalogChanged::REASON_CATEGORY_CHANGED
+            );
 
             return $this->categories->categoriesForProduct($c, $tenant, $productUuid);
         });

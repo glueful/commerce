@@ -13,6 +13,7 @@ use Glueful\Extensions\Commerce\Catalog\AddonRepository;
 use Glueful\Extensions\Commerce\Catalog\AddonService;
 use Glueful\Extensions\Commerce\Catalog\AttributeRepository;
 use Glueful\Extensions\Commerce\Catalog\AttributeService;
+use Glueful\Extensions\Commerce\Catalog\CatalogReader;
 use Glueful\Extensions\Commerce\Catalog\CatalogService;
 use Glueful\Extensions\Commerce\Catalog\CategoryRepository;
 use Glueful\Extensions\Commerce\Catalog\CategoryService;
@@ -22,8 +23,10 @@ use Glueful\Extensions\Commerce\Catalog\ProductChildrenRepository;
 use Glueful\Extensions\Commerce\Catalog\ProductMediaRepository;
 use Glueful\Extensions\Commerce\Catalog\ProductMediaService;
 use Glueful\Extensions\Commerce\Catalog\ProductRepository;
+use Glueful\Extensions\Commerce\Catalog\ProductRepositoryCatalogReader;
 use Glueful\Extensions\Commerce\Catalog\ReviewRepository;
 use Glueful\Extensions\Commerce\Catalog\ReviewService;
+use Glueful\Extensions\Commerce\Catalog\StorefrontCatalogChangeDispatcher;
 use Glueful\Extensions\Commerce\Catalog\TagRepository;
 use Glueful\Extensions\Commerce\Catalog\TagService;
 use Glueful\Extensions\Commerce\Catalog\VariantRepository;
@@ -137,6 +140,8 @@ use Glueful\Extensions\Commerce\Marketplace\SellerWebhookOutboxPublisher;
 use Glueful\Extensions\Commerce\Marketplace\SellerWebhookPayloadProjector;
 use Glueful\Extensions\Commerce\Marketplace\SellerWebhookSecretService;
 use Glueful\Extensions\Commerce\Orders\OrderNumberGenerator;
+use Glueful\Extensions\Commerce\Orders\CheckoutAttemptAuthority;
+use Glueful\Extensions\Commerce\Orders\CheckoutPresentation;
 use Glueful\Extensions\Commerce\Orders\CheckoutService;
 use Glueful\Extensions\Commerce\Orders\Downloads\CommerceDownloadBlobPolicy;
 use Glueful\Extensions\Commerce\Orders\Downloads\DownloadAccessService;
@@ -163,6 +168,8 @@ use Glueful\Extensions\Commerce\Shipping\ShippingClassRepository;
 use Glueful\Extensions\Commerce\Shipping\ShippingClassService;
 use Glueful\Extensions\Commerce\Shipping\ShippingZoneRepository;
 use Glueful\Extensions\Commerce\Shipping\ShippingZoneService;
+use Glueful\Extensions\Commerce\Tenancy\CommerceTenantPurge;
+use Glueful\Extensions\Commerce\Tenancy\CommerceTenantResolution;
 use Glueful\Extensions\Commerce\Tenancy\FailClosedTenantResolver;
 use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
 use Glueful\Extensions\Commerce\Tenancy\TenantAdopter;
@@ -185,6 +192,7 @@ use Glueful\Repository\BlobRepository;
 use Glueful\Uploader\Contracts\BlobAccessPolicyRegistry;
 use Glueful\Uploader\Contracts\BlobPublicUrlProvider;
 use Psr\Container\ContainerInterface;
+use Psr\Log\LoggerInterface;
 
 final class CommerceServiceProvider extends ServiceProvider
 {
@@ -213,6 +221,11 @@ final class CommerceServiceProvider extends ServiceProvider
             ProductRepository::class => [
                 'class' => ProductRepository::class,
                 'shared' => true,
+            ],
+            CatalogReader::class => [
+                'class' => ProductRepositoryCatalogReader::class,
+                'shared' => true,
+                'autowire' => true,
             ],
             VariantRepository::class => [
                 'class' => VariantRepository::class,
@@ -282,8 +295,12 @@ final class CommerceServiceProvider extends ServiceProvider
                 'factory' => [self::class, 'makeReviewService'],
                 'shared' => true,
             ],
+            StorefrontCatalogChangeDispatcher::class => [
+                'class' => StorefrontCatalogChangeDispatcher::class,
+                'shared' => true,
+            ],
             StockRepository::class => [
-                'class' => StockRepository::class,
+                'factory' => [self::class, 'makeStockRepository'],
                 'shared' => true,
             ],
             InventoryService::class => [
@@ -359,6 +376,10 @@ final class CommerceServiceProvider extends ServiceProvider
                 'factory' => [self::class, 'makeDownloadUrlSigner'],
                 'shared' => true,
             ],
+            CheckoutPresentation::class => [
+                'factory' => [self::class, 'makeCheckoutPresentation'],
+                'shared' => true,
+            ],
             DownloadAccessService::class => [
                 'factory' => [self::class, 'makeDownloadAccessService'],
                 'shared' => true,
@@ -381,6 +402,10 @@ final class CommerceServiceProvider extends ServiceProvider
             ],
             TenantAdopter::class => [
                 'class' => TenantAdopter::class,
+                'shared' => true,
+            ],
+            CommerceTenantPurge::class => [
+                'class' => CommerceTenantPurge::class,
                 'shared' => true,
             ],
             MarketplaceMode::class => [
@@ -822,7 +847,8 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(MarketplaceMode::class),
             $container->get(MarketplaceWorkspaceLock::class),
             $container->get(SellerRepository::class),
-            $container->get(CommissionPolicyService::class)
+            $container->get(CommissionPolicyService::class),
+            $container->get(StorefrontCatalogChangeDispatcher::class)
         );
     }
 
@@ -895,7 +921,8 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(VariantRepository::class),
             $container->get(ProductMediaRepository::class),
             self::tenantResolver($container),
-            self::makeBlobRepository($container)
+            self::makeBlobRepository($container),
+            $container->get(StorefrontCatalogChangeDispatcher::class)
         );
     }
 
@@ -932,7 +959,8 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(CategoryRepository::class),
             $container->get(ProductRepository::class),
             self::tenantResolver($container),
-            self::makeBlobRepository($container)
+            self::makeBlobRepository($container),
+            $container->get(StorefrontCatalogChangeDispatcher::class)
         );
     }
 
@@ -941,7 +969,8 @@ final class CommerceServiceProvider extends ServiceProvider
         return new TagService(
             $container->get(TagRepository::class),
             $container->get(ProductRepository::class),
-            self::tenantResolver($container)
+            self::tenantResolver($container),
+            $container->get(StorefrontCatalogChangeDispatcher::class)
         );
     }
 
@@ -950,7 +979,8 @@ final class CommerceServiceProvider extends ServiceProvider
         return new AttributeService(
             $container->get(AttributeRepository::class),
             $container->get(ProductRepository::class),
-            self::tenantResolver($container)
+            self::tenantResolver($container),
+            $container->get(StorefrontCatalogChangeDispatcher::class)
         );
     }
 
@@ -960,6 +990,21 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(ReviewRepository::class),
             $container->get(ProductRepository::class),
             self::tenantResolver($container)
+        );
+    }
+
+    /**
+     * Slice-2 Task 1 (design spec §9): the sole `StorefrontCatalogChanged(reason:
+     * stock.changed)` insertion point (see {@see StockRepository}'s own
+     * class docblock) -- wiring the dispatcher here means every caller of
+     * `decrement()`/`increment()`/`incrementChecked()` (checkout, refund/
+     * cancel/expiry restock, and {@see InventoryService::adjust()} alike)
+     * gets storefront invalidation for free, with no per-caller change.
+     */
+    public static function makeStockRepository(ContainerInterface $container): StockRepository
+    {
+        return new StockRepository(
+            $container->get(StorefrontCatalogChangeDispatcher::class)
         );
     }
 
@@ -1004,7 +1049,8 @@ final class CommerceServiceProvider extends ServiceProvider
         return new AddonService(
             $container->get(AddonRepository::class),
             $container->get(ProductRepository::class),
-            self::tenantResolver($container)
+            self::tenantResolver($container),
+            $container->get(StorefrontCatalogChangeDispatcher::class)
         );
     }
 
@@ -1064,8 +1110,27 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(SellerRepository::class),
             $container->get(ProductRepository::class),
             $container->get(SellerOrderRepository::class),
-            webhooks: $container->get(SellerWebhookOutboxPublisher::class)
+            webhooks: $container->get(SellerWebhookOutboxPublisher::class),
+            attemptAuthority: self::makeCheckoutAttemptAuthority($container)
         );
+    }
+
+    /**
+     * Soft-resolved, same pattern as {@see self::makeDownloadUrlSigner()}
+     * (design spec §7, Slice-2 Task 3): Commerce never binds an
+     * implementation of {@see CheckoutAttemptAuthority} itself -- a bound
+     * pack collaborator is used when present, otherwise `CheckoutService`
+     * gets null and `placeOrder()` stays byte-identical to pre-Task-3.
+     */
+    public static function makeCheckoutAttemptAuthority(ContainerInterface $container): ?CheckoutAttemptAuthority
+    {
+        if (!$container->has(CheckoutAttemptAuthority::class)) {
+            return null;
+        }
+
+        $authority = $container->get(CheckoutAttemptAuthority::class);
+
+        return $authority instanceof CheckoutAttemptAuthority ? $authority : null;
     }
 
     public static function makePaymentCollector(ContainerInterface $container): PaymentCollector
@@ -1081,10 +1146,39 @@ final class CommerceServiceProvider extends ServiceProvider
         return $collector;
     }
 
+    /**
+     * A bound {@see CommerceTenantResolution} host seam always wins, regardless
+     * of `commerce.tenancy.enabled` -- checked first, before the sentinel/shared
+     * selection below. The adapter re-reads the seam on every `tenantUuid()`
+     * call (never captures/latches a value), so a host that mutates its
+     * resolution logic at runtime is reflected immediately. When the seam is
+     * NOT bound, the branches below are the original 1.2.x selection,
+     * unchanged, for byte-for-byte compatibility with existing installs.
+     */
     public static function makeTenantResolver(
         ContainerInterface $container,
         ApplicationContext $context
     ): CurrentTenantResolver {
+        if ($container->has(CommerceTenantResolution::class)) {
+            $seam = $container->get(CommerceTenantResolution::class);
+            if (!$seam instanceof CommerceTenantResolution) {
+                throw new \RuntimeException(
+                    'Configured CommerceTenantResolution seam does not implement CommerceTenantResolution.'
+                );
+            }
+
+            return new class ($seam) implements CurrentTenantResolver {
+                public function __construct(private readonly CommerceTenantResolution $seam)
+                {
+                }
+
+                public function tenantUuid(ApplicationContext $context): string
+                {
+                    return $this->seam->tenantUuid($context);
+                }
+            };
+        }
+
         if (!(bool) config($context, 'commerce.tenancy.enabled', false)) {
             return new SentinelTenantResolver();
         }
@@ -1140,6 +1234,25 @@ final class CommerceServiceProvider extends ServiceProvider
         }
 
         return new DownloadUrlSigner(self::makeBlobRepository($container), $publicUrlProvider);
+    }
+
+    /**
+     * Soft-resolved, same pattern as {@see self::makeDownloadUrlSigner()}: an
+     * optional bound {@see LoggerInterface} is used when present so an
+     * unrecognized/malformed payment shape gets logged; otherwise
+     * {@see CheckoutPresentation} falls back to its own `NullLogger` default
+     * and stays silently no-op, exactly like an unbound install today.
+     */
+    public static function makeCheckoutPresentation(ContainerInterface $container): CheckoutPresentation
+    {
+        if ($container->has(LoggerInterface::class)) {
+            $logger = $container->get(LoggerInterface::class);
+            if ($logger instanceof LoggerInterface) {
+                return new CheckoutPresentation($logger);
+            }
+        }
+
+        return new CheckoutPresentation();
     }
 
     public static function makeDownloadAccessService(ContainerInterface $container): DownloadAccessService

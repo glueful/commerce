@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Commerce\Catalog;
 
 use Glueful\Bootstrap\ApplicationContext;
+use Glueful\Extensions\Commerce\Events\StorefrontCatalogChanged;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Glueful\Helpers\Utils;
 use Glueful\Http\Exceptions\Client\NotFoundException;
@@ -60,6 +61,7 @@ final class AttributeService
         private AttributeRepository $attributes,
         private ProductRepository $products,
         private CurrentTenantResolver $tenants,
+        private ?StorefrontCatalogChangeDispatcher $catalogEvents = null,
     ) {
     }
 
@@ -135,6 +137,8 @@ final class AttributeService
             throw new \RuntimeException('Created attribute could not be reloaded.');
         }
 
+        $this->catalogEvents?->dispatch($c, $tenant, null, StorefrontCatalogChanged::REASON_ATTRIBUTE_CHANGED);
+
         return $this->withValues($c, $attribute);
     }
 
@@ -174,6 +178,12 @@ final class AttributeService
 
             if ($set !== []) {
                 $this->attributes->update($c, $tenant, $uuid, $set);
+                $this->catalogEvents?->dispatch(
+                    $c,
+                    $tenant,
+                    null,
+                    StorefrontCatalogChanged::REASON_ATTRIBUTE_CHANGED
+                );
             }
 
             $attribute = $this->attributes->findByUuid($c, $tenant, $uuid);
@@ -208,6 +218,8 @@ final class AttributeService
             $this->attributes->deleteValuesForAttribute($c, $uuid);
             $this->attributes->detachProducts($c, $uuid);
             $this->attributes->delete($c, $tenant, $uuid);
+
+            $this->catalogEvents?->dispatch($c, $tenant, null, StorefrontCatalogChanged::REASON_ATTRIBUTE_CHANGED);
         });
     }
 
@@ -250,6 +262,8 @@ final class AttributeService
             if ($row === null) {
                 throw new \RuntimeException('Created attribute value could not be reloaded.');
             }
+
+            $this->catalogEvents?->dispatch($c, $tenant, null, StorefrontCatalogChanged::REASON_ATTRIBUTE_CHANGED);
 
             return $row;
         });
@@ -299,6 +313,12 @@ final class AttributeService
                 } catch (\Throwable $e) {
                     throw ValidationException::forField('slug', 'Slug already in use for this attribute.');
                 }
+                $this->catalogEvents?->dispatch(
+                    $c,
+                    $tenant,
+                    null,
+                    StorefrontCatalogChanged::REASON_ATTRIBUTE_CHANGED
+                );
             }
 
             $row = $this->attributes->findValueByUuid($c, $valueUuid);
@@ -331,6 +351,8 @@ final class AttributeService
             }
 
             $this->attributes->deleteValue($c, $valueUuid);
+
+            $this->catalogEvents?->dispatch($c, $tenant, null, StorefrontCatalogChanged::REASON_ATTRIBUTE_CHANGED);
         });
     }
 
@@ -391,6 +413,13 @@ final class AttributeService
                     'attributes must not reference the same attribute more than once.'
                 );
             }
+
+            $this->catalogEvents?->dispatch(
+                $c,
+                $tenant,
+                $productUuid,
+                StorefrontCatalogChanged::REASON_ATTRIBUTE_CHANGED
+            );
 
             return $this->productAttributesPayload($c, $tenant, $productUuid);
         });

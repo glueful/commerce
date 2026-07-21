@@ -2,6 +2,46 @@
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-07-21 — Embeddable Host Seams
+
+Nine additive host-integration seams that let a hosting application (e.g. Thallo) run Commerce as
+an embedded slice — per-workspace tenant resolution, catalog/slug lifecycle events, a convergent
+cart-line upsert, durable checkout idempotency, and a closed payment-presentation view model —
+plus a PostgreSQL tracked-stock fix. No schema changes, no new env vars, no dependency-floor
+changes; every seam is inert (byte-identical 1.2.x behavior) unless a host explicitly binds or
+calls into it.
+
+**Theme: host-integration seams for Thallo's commerce adoption** — four additive
+seams a hosting app can plug into to run Commerce as an embedded slice: an
+optional tenant-resolution override, an after-commit product-lifecycle event,
+a read-only cross-domain catalog contract, and a tenant-purge service. No
+schema changes, no new env vars; every seam is inert (byte-identical 1.2.x
+behavior) unless a host explicitly binds into it.
+
+- Added `Glueful\Extensions\Commerce\Tenancy\CommerceTenantResolution`, an optional host-bound seam that `CommerceServiceProvider::makeTenantResolver()` checks first, ahead of the existing sentinel/shared-resolver selection. When bound it wins unconditionally (even over `commerce.tenancy.enabled=false`) and is re-read on every call rather than latched, so a host that changes its resolution logic at runtime is reflected immediately. When nothing is bound, resolution is byte-for-byte the existing 1.2.x behavior.
+- Added `Glueful\Extensions\Commerce\Events\ProductDeleted`, dispatched by `CatalogService::deleteProduct()` via `db($context)->afterCommit(...)` from inside the same transaction that performs the tombstone — exactly once per successful delete, never on an unknown/cross-tenant uuid, a repeat delete, a losing concurrent claim racer, or a rolled-back transaction. Dispatch is fault-isolated (ordinary `dispatch()`, not `dispatchOrFail()`) so a listener failure can never threaten an already-committed tombstone.
+- Added `Glueful\Extensions\Commerce\Catalog\CatalogReader`, a read-only, tenant-scoped, total (never-throws) contract for other domains to check a product's existence/tombstone state without depending on `ProductRepository`/`CatalogService` directly. Registered as a shared service backed by the new `ProductRepositoryCatalogReader` adapter.
+- Added `Glueful\Extensions\Commerce\Tenancy\CommerceTenantPurge`, a shared service that hard-deletes every commerce row for a tenant (`purgeTenant()`) and reports remaining rows per table as a verify step (`countTenantRows()`), inside a single transaction. Purging the sentinel tenant (`''`) is refused with an `\InvalidArgumentException`. Coverage is complete: every tenant-scoped table in `DiagnosticsReport::tenantTables()` (mirroring `TenantAdopter`'s own list, exactly like adoption) PLUS the 11 child tables that carry no `tenant_uuid` column of their own and are reachable only through a parent's uuid — `commerce_order_lines`/`commerce_order_events` (via orders), `commerce_refund_lines` (via refunds), `commerce_cart_lines` (via carts), the product↔category/tag/attribute join tables and `commerce_product_children` (via products), `commerce_attribute_values` (via attributes), and `commerce_shipping_zone_locations`/`commerce_shipping_methods` (via shipping zones). Every child table is deleted first, via a parent-join subquery, in the same transaction, before its parent. `countTenantRows()` counts the same complete set the same way, so a `verify()` built on it is a genuine zero-tenant-reachable-rows assurance rather than a partial one that ignores line-item and audit-trail data.
+
+**Theme: catalog lifecycle, cart-line, checkout-attempt, and payment-presentation
+seams for Thallo's commerce adoption (Slice 2)** — four further additive host
+seams on top of Slice 1's host-integration block: closed-vocabulary storefront
+catalog-change/slug-change events with a single unbypassable stock chokepoint,
+a convergent cart-line upsert alongside the existing accumulating one, a
+typed checkout-attempt idempotency authority with in-transaction coordination,
+and a closed payment-presentation view model. No schema changes, no new env
+vars; every seam is inert (byte-identical 1.2.x behavior) unless a host
+explicitly binds/calls into it.
+
+- Added `Glueful\Extensions\Commerce\Events\StorefrontCatalogChanged`, a broad after-commit storefront cache-invalidation signal with a CLOSED `reason` vocabulary (`product.created`/`product.updated`/`product.status_changed`/`product.deleted`/`variant.changed`/`stock.changed`/`media.changed`/`category.changed`/`tag.changed`/`attribute.changed`/`addon.changed` — the constructor throws on anything else) and a nullable `productUuid` for taxonomy-definition-level changes with no single owning product. Dispatched via the new `Glueful\Extensions\Commerce\Catalog\StorefrontCatalogChangeDispatcher` shared collaborator from every storefront-visible catalog/inventory write path, including a single unbypassable chokepoint at `StockRepository::decrement()/increment()/incrementChecked()` that covers checkout decrement, refund/cancel/expiry restock, and manual inventory adjustment with zero code changes in any of those callers.
+- Added `Glueful\Extensions\Commerce\Events\ProductSlugChanged`, dispatched after commit exactly once per successful product rename (never on create, never on a slug-less or unchanged-value patch, never on rollback), plus `Glueful\Extensions\Commerce\Catalog\SlugLifecycleAuthority`, a Commerce-local seam Commerce never binds an implementation of itself: a bound pack-owned slug ledger is claimed synchronously inside the SAME transaction as the create/rename it guards, before the write, so a rejected slug rolls back the whole attempt.
+- Added `CartService::putLine()` beside the existing `addLine()`: an idempotent "set this variant+add-ons to exactly this quantity" upsert (inserts, updates, or removes a line to converge on the desired total) versus `addLine()`'s accumulating add-to-quantity behavior. Reuses the identical checkout-claim protocol, line-identity (variant + add-on-selection hash), and stock-availability validation as `addLine()`/`setLineQuantity()`, validating the desired FINAL quantity rather than a delta.
+- Added `Glueful\Extensions\Commerce\Orders\CheckoutAttemptAuthority` (with `CheckoutAttemptContext`/`CheckoutAttemptReplay`), a durable checkout-idempotency seam Commerce never binds an implementation of itself: `claimOrReplay()` runs inside `placeOrder()`'s placement transaction before cart validation, and `complete()` runs in the same transaction immediately after the order is inserted, so a bound implementation's claim can never commit separately from the order it completes. `CheckoutService` gained an appended-optional `attemptAuthority` collaborator and `placeOrder()` an appended-optional `CheckoutAttemptContext` parameter; whenever either is absent, checkout runs zero attempt-table queries and stays byte-identical to pre-Task-3 behavior. A same-key/same-fingerprint replay reloads and returns the original order and guest credential without dispatching a second `OrderPlaced` or creating a second order; a same-key/different-fingerprint reuse throws and rolls back the whole placement.
+- Added `Glueful\Extensions\Commerce\Orders\CheckoutPresentation`, a closed payment-presentation view model that classifies `placeOrder()`'s `payment` array into `['action' => 'manual'|'redirect'|'reference'|'unavailable', ...allowlisted fields]` and never passes a collector's raw payload through. `manual` allowlists exactly `ManualPaymentCollector`'s real display field (`instructions`); `redirect` requires an absolute `https` URL (parsed and validated; a relative, `http://`, or `javascript:` URL is `unavailable`, never a downgraded `reference`); `reference` carries an opaque `reference` plus an optional `gateway` display hint. Any unrecognized or malformed shape — including `initiatePayment()`'s own `init_failed` failure shape — resolves to `unavailable` and is logged (status/provider only, never the raw payload). Registered as a shared service on `CommerceServiceProvider`, softly resolving a bound PSR-3 logger when present.
+
+### Fixed
+- **Tracked-stock checkout/restock now works on PostgreSQL.** `StockRepository::decrement()` and `incrementChecked()` compared the boolean `tracked` column against a literal `1` (`... AND tracked = 1`), which PostgreSQL rejects with `operator does not exist: boolean = integer` — so a checkout that decrements a **tracked** (physical) product, and refund/cancel restock of one, failed on Postgres. It went unnoticed because the SQLite test lane treats `1` as a boolean and the existing checkout fixtures use untracked (digital) products. Both statements now bind `true` as a parameter (matching `StockReportRepository`'s existing pattern). Present since 1.2.x; SQLite/MySQL were unaffected.
+
 ## [1.2.1] - 2026-07-20 — Marketplace Integrity Fixes
 
 Three marketplace hardening fixes on top of 1.2.0: a ledger-conservation guard on operator
