@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-07-21 — Embeddable Host Seams
+
+Nine additive host-integration seams that let a hosting application (e.g. Thallo) run Commerce as
+an embedded slice — per-workspace tenant resolution, catalog/slug lifecycle events, a convergent
+cart-line upsert, durable checkout idempotency, and a closed payment-presentation view model —
+plus a PostgreSQL tracked-stock fix. No schema changes, no new env vars, no dependency-floor
+changes; every seam is inert (byte-identical 1.2.x behavior) unless a host explicitly binds or
+calls into it.
+
 **Theme: host-integration seams for Thallo's commerce adoption** — four additive
 seams a hosting app can plug into to run Commerce as an embedded slice: an
 optional tenant-resolution override, an after-commit product-lifecycle event,
