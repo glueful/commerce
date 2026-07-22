@@ -39,6 +39,8 @@ use Glueful\Extensions\Commerce\Http\Seller\SellerInventoryController;
 use Glueful\Extensions\Commerce\Http\Seller\SellerMembershipController;
 use Glueful\Extensions\Commerce\Http\Seller\SellerOrderController;
 use Glueful\Extensions\Commerce\Http\Seller\SellerWebhookController;
+use Glueful\Extensions\Commerce\Http\Routing\AdminMountProfile;
+use Glueful\Extensions\Commerce\Http\Routing\AdminRouteCatalog;
 use Glueful\Routing\Router;
 
 /** @var Router $router */
@@ -126,141 +128,17 @@ $router->group([
     $router->delete('/addresses/{uuid}', [AccountAddressController::class, 'destroy']);
 });
 
-$router->group([
-    'prefix' => '/commerce/admin',
-    'middleware' => array_merge(['auth'], $tenantMiddleware),
-], function (Router $router): void {
-    $read = 'require_scope:commerce:read';
-    $write = 'require_scope:commerce:write';
-
-    $router->get('/products', [AdminProductController::class, 'index'])->middleware($read);
-    $router->post('/products', [AdminProductController::class, 'store'])->middleware($write);
-    $router->get('/products/{uuid}', [AdminProductController::class, 'show'])->middleware($read);
-    $router->patch('/products/{uuid}', [AdminProductController::class, 'update'])->middleware($write);
-    $router->post('/products/{uuid}/variants', [AdminProductController::class, 'storeVariant'])->middleware($write);
-    $router->patch('/variants/{uuid}', [AdminProductController::class, 'updateVariant'])->middleware($write);
-    $router->put('/products/{uuid}/children', [AdminProductController::class, 'setChildren'])->middleware($write);
-    $router->delete('/products/{uuid}', [AdminProductController::class, 'destroy'])->middleware($write);
-    $router->post('/products/bulk-status', [AdminProductController::class, 'bulkStatus'])->middleware($write);
-    $router->post('/variants/bulk-price', [AdminProductController::class, 'bulkPrice'])->middleware($write);
-
-    $router->get('/variants/{uuid}/downloads', [AdminDownloadController::class, 'index'])->middleware($read);
-    $router->post('/variants/{uuid}/downloads', [AdminDownloadController::class, 'attach'])->middleware($write);
-    $router->patch('/downloads/{uuid}', [AdminDownloadController::class, 'update'])->middleware($write);
-    $router->delete('/downloads/{uuid}', [AdminDownloadController::class, 'detach'])->middleware($write);
-
-    $router->post('/grants/{uuid}/revoke', [AdminGrantController::class, 'revoke'])->middleware($write);
-    $router->put('/grants/{uuid}/refund-access-override', [AdminGrantController::class, 'setOverride'])
-        ->middleware($write);
-    $router->delete('/grants/{uuid}/refund-access-override', [AdminGrantController::class, 'clearOverride'])
-        ->middleware($write);
-
-    $router->get('/customers', [AdminCustomerController::class, 'index'])->middleware($read);
-    $router->get('/customers/{key}', [AdminCustomerController::class, 'show'])->middleware($read);
-
-    $router->post('/products/{uuid}/media', [AdminMediaController::class, 'attach'])->middleware($write);
-    $router->put('/products/{uuid}/media/order', [AdminMediaController::class, 'reorder'])->middleware($write);
-    $router->patch('/media/{uuid}', [AdminMediaController::class, 'update'])->middleware($write);
-    $router->delete('/media/{uuid}', [AdminMediaController::class, 'detach'])->middleware($write);
-
-    $router->get('/categories', [AdminCategoryController::class, 'index'])->middleware($read);
-    $router->get('/categories/{uuid}', [AdminCategoryController::class, 'show'])->middleware($read);
-    $router->post('/categories', [AdminCategoryController::class, 'store'])->middleware($write);
-    $router->patch('/categories/{uuid}', [AdminCategoryController::class, 'update'])->middleware($write);
-    $router->delete('/categories/{uuid}', [AdminCategoryController::class, 'destroy'])->middleware($write);
-    $router->put('/products/{uuid}/categories', [AdminCategoryController::class, 'setForProduct'])->middleware($write);
-
-    $router->get('/tags', [AdminTagController::class, 'index'])->middleware($read);
-    $router->get('/tags/{uuid}', [AdminTagController::class, 'show'])->middleware($read);
-    $router->post('/tags', [AdminTagController::class, 'store'])->middleware($write);
-    $router->patch('/tags/{uuid}', [AdminTagController::class, 'update'])->middleware($write);
-    $router->delete('/tags/{uuid}', [AdminTagController::class, 'destroy'])->middleware($write);
-    $router->put('/products/{uuid}/tags', [AdminTagController::class, 'setForProduct'])->middleware($write);
-
-    $router->get('/attributes', [AdminAttributeController::class, 'index'])->middleware($read);
-    $router->get('/attributes/{uuid}', [AdminAttributeController::class, 'show'])->middleware($read);
-    $router->post('/attributes', [AdminAttributeController::class, 'store'])->middleware($write);
-    $router->patch('/attributes/{uuid}', [AdminAttributeController::class, 'update'])->middleware($write);
-    $router->delete('/attributes/{uuid}', [AdminAttributeController::class, 'destroy'])->middleware($write);
-    $router->post('/attributes/{uuid}/values', [AdminAttributeController::class, 'storeValue'])->middleware($write);
-    $router->patch('/attribute-values/{uuid}', [AdminAttributeController::class, 'updateValue'])
-        ->middleware($write);
-    $router->delete('/attribute-values/{uuid}', [AdminAttributeController::class, 'destroyValue'])
-        ->middleware($write);
-    $router->put('/products/{uuid}/attributes', [AdminAttributeController::class, 'setForProduct'])
-        ->middleware($write);
-
-    $router->get('/products/{uuid}/addons', [AdminAddonController::class, 'index'])->middleware($read);
-    $router->post('/products/{uuid}/addons', [AdminAddonController::class, 'store'])->middleware($write);
-    $router->patch('/addons/{uuid}', [AdminAddonController::class, 'update'])->middleware($write);
-    $router->delete('/addons/{uuid}', [AdminAddonController::class, 'destroy'])->middleware($write);
-
-    $router->post('/stock/{variantUuid}/adjust', [AdminStockController::class, 'adjust'])->middleware($write);
-
-    $router->get('/discounts', [AdminDiscountController::class, 'index'])->middleware($read);
-    $router->post('/discounts', [AdminDiscountController::class, 'store'])->middleware($write);
-    $router->get('/discounts/{uuid}', [AdminDiscountController::class, 'show'])->middleware($read);
-    $router->patch('/discounts/{uuid}', [AdminDiscountController::class, 'update'])->middleware($write);
-    $router->delete('/discounts/{uuid}', [AdminDiscountController::class, 'destroy'])->middleware($write);
-
-    $router->get('/orders', [AdminOrderController::class, 'index'])->middleware($read);
-    $router->get('/orders/{uuid}', [AdminOrderController::class, 'show'])->middleware($read);
-    $router->post('/orders/{uuid}/cancel', [AdminOrderController::class, 'cancel'])->middleware($write);
-    $router->post('/orders/{uuid}/mark-paid', [AdminOrderController::class, 'markPaid'])->middleware($write);
-    $router->post('/orders/{uuid}/fulfill', [AdminOrderController::class, 'fulfill'])->middleware($write);
-    $router->post('/orders/{uuid}/refunds', [AdminRefundController::class, 'store'])->middleware($write);
-    $router->get('/orders/{uuid}/refunds', [AdminRefundController::class, 'index'])->middleware($read);
-    $router->post('/orders/{uuid}/notes', [AdminOrderController::class, 'addNote'])->middleware($write);
-    $router->get('/orders/{uuid}/notes', [AdminOrderController::class, 'notes'])->middleware($read);
-    $router->get('/orders/{uuid}/invoice-data', [AdminOrderController::class, 'invoiceData'])->middleware($read);
-
-    $router->get('/refunds', [AdminRefundController::class, 'list'])->middleware($read);
-    $router->get('/refunds/{uuid}', [AdminRefundController::class, 'show'])->middleware($read);
-
-    $router->get('/reviews', [AdminReviewController::class, 'index'])->middleware($read);
-    $router->get('/reviews/{uuid}', [AdminReviewController::class, 'show'])->middleware($read);
-    $router->post('/reviews', [AdminReviewController::class, 'store'])->middleware($write);
-    $router->post('/reviews/{uuid}/approve', [AdminReviewController::class, 'approve'])->middleware($write);
-    $router->post('/reviews/{uuid}/spam', [AdminReviewController::class, 'spam'])->middleware($write);
-    $router->delete('/reviews/{uuid}', [AdminReviewController::class, 'destroy'])->middleware($write);
-    $router->post('/reviews/bulk', [AdminReviewController::class, 'bulk'])->middleware($write);
-
-    $router->get('/shipping/zones', [AdminShippingZoneController::class, 'index'])->middleware($read);
-    $router->get('/shipping/zones/{uuid}', [AdminShippingZoneController::class, 'show'])->middleware($read);
-    $router->post('/shipping/zones', [AdminShippingZoneController::class, 'store'])->middleware($write);
-    $router->patch('/shipping/zones/{uuid}', [AdminShippingZoneController::class, 'update'])->middleware($write);
-    $router->delete('/shipping/zones/{uuid}', [AdminShippingZoneController::class, 'destroy'])->middleware($write);
-    $router->put('/shipping/zones/{uuid}/locations', [AdminShippingZoneController::class, 'setLocations'])
-        ->middleware($write);
-    $router->get('/shipping/zones/{uuid}/methods', [AdminShippingZoneController::class, 'indexMethods'])
-        ->middleware($read);
-    $router->post('/shipping/zones/{uuid}/methods', [AdminShippingZoneController::class, 'storeMethod'])
-        ->middleware($write);
-    $router->get('/shipping/methods/{uuid}', [AdminShippingZoneController::class, 'showMethod'])
-        ->middleware($read);
-    $router->patch('/shipping/methods/{uuid}', [AdminShippingZoneController::class, 'updateMethod'])
-        ->middleware($write);
-    $router->delete('/shipping/methods/{uuid}', [AdminShippingZoneController::class, 'destroyMethod'])
-        ->middleware($write);
-
-    $router->get('/shipping/classes', [AdminShippingClassController::class, 'index'])->middleware($read);
-    $router->get('/shipping/classes/{uuid}', [AdminShippingClassController::class, 'show'])->middleware($read);
-    $router->post('/shipping/classes', [AdminShippingClassController::class, 'store'])->middleware($write);
-    $router->patch('/shipping/classes/{uuid}', [AdminShippingClassController::class, 'update'])->middleware($write);
-    $router->delete('/shipping/classes/{uuid}', [AdminShippingClassController::class, 'destroy'])
-        ->middleware($write);
-
-    $router->get('/tax/rates', [AdminTaxRateController::class, 'index'])->middleware($read);
-    $router->get('/tax/rates/{uuid}', [AdminTaxRateController::class, 'show'])->middleware($read);
-    $router->post('/tax/rates', [AdminTaxRateController::class, 'store'])->middleware($write);
-    $router->patch('/tax/rates/{uuid}', [AdminTaxRateController::class, 'update'])->middleware($write);
-    $router->delete('/tax/rates/{uuid}', [AdminTaxRateController::class, 'destroy'])->middleware($write);
-
-    $router->get('/reports/sales', [AdminReportController::class, 'sales'])->middleware($read);
-    $router->get('/reports/products', [AdminReportController::class, 'products'])->middleware($read);
-    $router->get('/reports/customers', [AdminReportController::class, 'customers'])->middleware($read);
-    $router->get('/reports/stock', [AdminReportController::class, 'stock'])->middleware($read);
-});
+// The non-marketplace admin surface is declared once in AdminRouteCatalog and mounted
+// here with the native profile: same prefix, same auth+tenant stack, the legacy
+// require_scope mapping per declared mode, and UNNAMED routes (legacy byte parity --
+// proven against tests/fixtures/admin_route_inventory_1_3.json). Embedding hosts mount
+// the same catalog under their own prefix/middleware/permission model via
+// AdminMountProfile::restricted() with an explicit fail-closed allowlist.
+AdminRouteCatalog::mount($router, AdminMountProfile::native(
+    '/commerce/admin',
+    array_merge(['auth'], $tenantMiddleware),
+    ['view' => 'require_scope:commerce:read', 'manage' => 'require_scope:commerce:write'],
+));
 
 // Marketplace MV1 (design spec §2.1/§2.8): the WHOLE group registers ONLY when
 // the install master switch is on -- mirrors the `$tenantMiddleware` config
