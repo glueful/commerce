@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-07-23 — Mountable Admin Route Catalog
+
+The non-marketplace admin surface (98 endpoints) is now declared once in a mountable catalog, so
+an embedding host can re-mount the same controllers under its own prefix, middleware, and
+permission model without hand-copying route declarations. Purely additive: Commerce's own admin
+mount is byte-identical to 1.3.x (parity proven route-by-route against a checked-in fixture). No
+schema changes, no new env vars, no dependency-floor changes.
+
+### Added
+- **`AdminRouteCatalog` + `AdminMountProfile` (`src/Http/Routing/`) — the declarative, mountable
+  inventory of the non-marketplace admin surface.** Each of the 98 entries carries a stable `key`,
+  method/path, controller/action, an explicit authorization `mode` (`view` | `manage` — never
+  inferred from the HTTP method), an explicit `kind` classification (`json`/`bulk`/`unusual`),
+  and a `domain`. `AdminMountProfile::native()` is the only way to mount the complete catalog;
+  an embedding host uses `AdminMountProfile::restricted()`, which REQUIRES a non-empty explicit
+  key allowlist (fail-closed — a newly added Commerce endpoint stays unmounted in a host until
+  consciously approved) and a route-name prefix guaranteeing name uniqueness across mounts. The
+  profile's mode→middleware map lets each mount bind its own permission model (Commerce's native
+  mount keeps `require_scope:commerce:read|write`; a host can map modes to its own gates).
+  Marketplace routes never enter the catalog — they remain in `routes.php` behind
+  `commerce.marketplace.enabled`.
+
+### Changed
+- **`routes.php` mounts the admin group from the catalog** with the native profile. Byte parity
+  with the 1.3.x hand-written routes is proven by `tests/Integration/Http/AdminRouteMountParityTest`
+  against the checked-in `tests/fixtures/admin_route_inventory_1_3.json` (method, path,
+  controller/action, flattened middleware, and route name — legacy routes carried no names and the
+  native mount registers none). Marketplace and storefront/account groups are untouched.
+
 ## [1.3.0] - 2026-07-21 — Embeddable Host Seams
 
 Nine additive host-integration seams that let a hosting application (e.g. Thallo) run Commerce as
