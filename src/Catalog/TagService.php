@@ -156,6 +156,38 @@ final class TagService
     }
 
     /**
+     * Product->tag read (single-page product editor plan, Task A2):
+     * `{revision, items}` envelope (Global Constraints) -- `items` is the
+     * whitelisted `{uuid, name, slug}` projection of every tag attached to
+     * the product.
+     *
+     * `catalogRevision()` reads `revision` FIRST, before `items` is queried
+     * (Global Constraints) -- see {@see CategoryService::forProduct()}'s
+     * docblock for the full rationale, identical here: a stale `revision`
+     * from a concurrent write only ever costs a later CAS save (Task A5) a
+     * harmless 409, never a false pass. `catalogRevision()` is also the 404
+     * guard -- null (unknown uuid, cross-tenant uuid, or a tombstoned
+     * product) is the same non-revealing 404 every write endpoint on this
+     * product uses, via the same tenant-scoped `findLiveByUuid()` predicate.
+     *
+     * @return array{revision: int, items: list<array{uuid: string, name: string, slug: string}>}
+     */
+    public function forProduct(ApplicationContext $c, string $productUuid): array
+    {
+        $tenant = $this->tenants->tenantUuid($c);
+
+        $revision = $this->products->catalogRevision($c, $tenant, $productUuid);
+        if ($revision === null) {
+            throw new NotFoundException('Resource not found.');
+        }
+
+        return [
+            'revision' => $revision,
+            'items' => $this->tags->tagProjectionsForProduct($c, $tenant, $productUuid),
+        ];
+    }
+
+    /**
      * Idempotent set-list replace: claims the PRODUCT only. A failed claim is a
      * non-revealing 404 (URL's primary resource); a proposed tag that doesn't
      * resolve in-tenant is a 422 on tag_uuids. Issuing the same list twice is a

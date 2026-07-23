@@ -159,6 +159,28 @@ SQL,
             ->get();
     }
 
+    /**
+     * Whitelisted product->tag read projection (single-page product editor
+     * plan, Task A2): ONE join, selecting ONLY `uuid`/`name`/`slug` -- never
+     * raw `commerce_tags.*` rows (Global Constraints: whitelisted
+     * projections only, no raw rows). Ordered `name ASC, uuid ASC` -- a
+     * deterministic tie-break so item order is stable and testable
+     * regardless of attachment order.
+     *
+     * @return list<array{uuid: string, name: string, slug: string}>
+     */
+    public function tagProjectionsForProduct(ApplicationContext $context, string $tenant, string $productUuid): array
+    {
+        return db($context)->table('commerce_product_tags')
+            ->join('commerce_tags', 'commerce_product_tags.tag_uuid', '=', 'commerce_tags.uuid')
+            ->select(['commerce_tags.uuid', 'commerce_tags.name', 'commerce_tags.slug'])
+            ->where('commerce_tags.tenant_uuid', '=', $tenant)
+            ->where('commerce_product_tags.product_uuid', '=', $productUuid)
+            ->orderBy('commerce_tags.name', 'ASC')
+            ->orderBy('commerce_tags.uuid', 'ASC')
+            ->get();
+    }
+
     public function attachProduct(ApplicationContext $context, string $productUuid, string $tagUuid): void
     {
         db($context)->table('commerce_product_tags')->insert([

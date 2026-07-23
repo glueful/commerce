@@ -96,6 +96,17 @@ final class AdminCategoryController
         return Response::noContent();
     }
 
+    #[ApiOperation(summary: 'List the categories attached to a product', tags: ['Commerce Admin'])]
+    #[ApiResponse(200, description: 'Product categories retrieved')]
+    #[ApiResponse(404, description: 'Product not found')]
+    public function forProductIndex(Request $request, string $uuid): Response
+    {
+        return Response::success(
+            $this->categories->forProduct($this->context, $uuid),
+            'Product categories retrieved'
+        );
+    }
+
     #[ApiOperation(summary: 'Set the categories attached to a product', tags: ['Commerce Admin'])]
     #[ApiResponse(200, description: 'Product categories updated')]
     #[ApiResponse(404, description: 'Product not found')]

@@ -333,6 +333,43 @@ final class CategoryService
     }
 
     /**
+     * Product->category read (single-page product editor plan, Task A2):
+     * `{revision, items}` envelope (Global Constraints) -- `items` is the
+     * whitelisted `{uuid, name, slug}` projection of every directly-assigned
+     * category (no ancestor expansion; categories may be hierarchical but
+     * this reflects only `commerce_product_categories` rows as-is).
+     *
+     * `catalogRevision()` reads `revision` FIRST, before `items` is queried
+     * (Global Constraints): a concurrent write that lands between the two
+     * reads yields a `revision` that is strictly OLDER than the `items` it
+     * then queries. That is harmless here -- a later CAS save (Task A5)
+     * built on this stale `revision` value only ever loses the race and gets
+     * a 409, never silently overwrites a newer state. Reading `items` first
+     * and `revision` second would risk the opposite: a save built on a
+     * `revision` read AFTER a newer `items` snapshot could pass a CAS check
+     * it should have failed. `catalogRevision()` is also the 404 guard --
+     * null (unknown uuid, cross-tenant uuid, or a tombstoned product) is the
+     * same non-revealing 404 every write endpoint on this product uses, via
+     * the same tenant-scoped `findLiveByUuid()` predicate.
+     *
+     * @return array{revision: int, items: list<array{uuid: string, name: string, slug: string}>}
+     */
+    public function forProduct(ApplicationContext $c, string $productUuid): array
+    {
+        $tenant = $this->tenants->tenantUuid($c);
+
+        $revision = $this->products->catalogRevision($c, $tenant, $productUuid);
+        if ($revision === null) {
+            throw new NotFoundException('Resource not found.');
+        }
+
+        return [
+            'revision' => $revision,
+            'items' => $this->categories->categoryProjectionsForProduct($c, $tenant, $productUuid),
+        ];
+    }
+
+    /**
      * Idempotent set-list replace: claims the PRODUCT first (the URL's primary
      * resource — a failed claim is a non-revealing 404), then resolves every
      * proposed category in-tenant (a failed resolution is a 422 on

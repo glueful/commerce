@@ -92,6 +92,14 @@ final class AdminTagController
         return Response::noContent();
     }
 
+    #[ApiOperation(summary: 'List the tags attached to a product', tags: ['Commerce Admin'])]
+    #[ApiResponse(200, description: 'Product tags retrieved')]
+    #[ApiResponse(404, description: 'Product not found')]
+    public function forProductIndex(Request $request, string $uuid): Response
+    {
+        return Response::success($this->tags->forProduct($this->context, $uuid), 'Product tags retrieved');
+    }
+
     #[ApiOperation(summary: 'Set the tags attached to a product', tags: ['Commerce Admin'])]
     #[ApiResponse(200, description: 'Product tags updated')]
     #[ApiResponse(404, description: 'Product not found')]
