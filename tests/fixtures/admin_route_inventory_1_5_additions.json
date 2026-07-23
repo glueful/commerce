@@ -1,0 +1,68 @@
+[
+    {
+        "method": "GET",
+        "path": "/commerce/admin/products/{uuid}/categories",
+        "controller": "Glueful\\Extensions\\Commerce\\Http\\Admin\\AdminCategoryController",
+        "action": "forProductIndex",
+        "middleware": [
+            "auth",
+            "require_scope:commerce:read"
+        ],
+        "name": null
+    },
+    {
+        "method": "GET",
+        "path": "/commerce/admin/products/{uuid}/tags",
+        "controller": "Glueful\\Extensions\\Commerce\\Http\\Admin\\AdminTagController",
+        "action": "forProductIndex",
+        "middleware": [
+            "auth",
+            "require_scope:commerce:read"
+        ],
+        "name": null
+    },
+    {
+        "method": "GET",
+        "path": "/commerce/admin/products/{uuid}/attributes",
+        "controller": "Glueful\\Extensions\\Commerce\\Http\\Admin\\AdminAttributeController",
+        "action": "forProductIndex",
+        "middleware": [
+            "auth",
+            "require_scope:commerce:read"
+        ],
+        "name": null
+    },
+    {
+        "method": "GET",
+        "path": "/commerce/admin/products/{uuid}/media",
+        "controller": "Glueful\\Extensions\\Commerce\\Http\\Admin\\AdminMediaController",
+        "action": "forProductIndex",
+        "middleware": [
+            "auth",
+            "require_scope:commerce:read"
+        ],
+        "name": null
+    },
+    {
+        "method": "GET",
+        "path": "/commerce/admin/products/{uuid}/children",
+        "controller": "Glueful\\Extensions\\Commerce\\Http\\Admin\\AdminProductController",
+        "action": "childrenForProductIndex",
+        "middleware": [
+            "auth",
+            "require_scope:commerce:read"
+        ],
+        "name": null
+    },
+    {
+        "method": "GET",
+        "path": "/commerce/admin/products/{uuid}/stock",
+        "controller": "Glueful\\Extensions\\Commerce\\Http\\Admin\\AdminProductController",
+        "action": "stockForProductIndex",
+        "middleware": [
+            "auth",
+            "require_scope:commerce:read"
+        ],
+        "name": null
+    }
+]
