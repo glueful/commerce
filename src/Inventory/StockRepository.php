@@ -198,6 +198,98 @@ SQL,
         return $row === null ? 0 : (int) ($row['quantity'] ?? 0);
     }
 
+    /**
+     * Whitelisted product->variant stock read projection (single-page product
+     * editor plan, Task A4): the product's variants are the FROM side,
+     * `commerce_stock` LEFT-joined on `variant_uuid` (never the reverse) so a
+     * variant with NO matching stock row still surfaces as one result row with
+     * `tracked`/`quantity` both `null` -- the only way this query can reveal a
+     * missing stock row in ONE read instead of one existence check per variant
+     * (Global Constraints: "the read fails loudly"). Callers (see
+     * {@see \Glueful\Extensions\Commerce\Catalog\CatalogService::stockForProduct()})
+     * turn any `null` row into a thrown {@see StockIntegrityException} --
+     * this repository method itself never fabricates a default and never
+     * throws.
+     *
+     * The join carries no additional tenant predicate on `commerce_stock`
+     * itself: `variant_uuid` is a globally unique NanoID (the SAME invariant
+     * {@see \Glueful\Extensions\Commerce\Reports\StockReportRepository}'s class
+     * docblock documents for its own three-table join), so scoping
+     * `commerce_variants.tenant_uuid = ?` on the FROM side alone is sufficient.
+     * Filtering `commerce_stock.tenant_uuid` in a WHERE clause instead would
+     * silently turn this LEFT JOIN into an INNER JOIN, hiding exactly the
+     * missing-row rows this read exists to surface.
+     *
+     * Selects ONLY `commerce_variants.uuid`/`commerce_stock.tracked`/
+     * `commerce_stock.quantity` -- never a raw row. Ordered
+     * `commerce_variants.position ASC`, then `uuid ASC` as a deterministic
+     * tie-break.
+     *
+     * @return list<array{variant_uuid: string, tracked: ?bool, quantity: ?int}>
+     */
+    public function stockProjectionsForProduct(
+        ApplicationContext $context,
+        string $tenant,
+        string $productUuid
+    ): array {
+        $rows = db($context)->table('commerce_variants')
+            ->leftJoin('commerce_stock', 'commerce_stock.variant_uuid', '=', 'commerce_variants.uuid')
+            ->select([
+                'commerce_variants.uuid AS variant_uuid',
+                'commerce_stock.tracked AS tracked',
+                'commerce_stock.quantity AS quantity',
+            ])
+            ->where('commerce_variants.tenant_uuid', '=', $tenant)
+            ->where('commerce_variants.product_uuid', '=', $productUuid)
+            ->orderBy('commerce_variants.position', 'ASC')
+            ->orderBy('commerce_variants.uuid', 'ASC')
+            ->get();
+
+        return array_map(static function (array $row): array {
+            return [
+                'variant_uuid' => (string) $row['variant_uuid'],
+                'tracked' => $row['tracked'] === null ? null : (bool) $row['tracked'],
+                'quantity' => $row['quantity'] === null ? null : (int) $row['quantity'],
+            ];
+        }, $rows);
+    }
+
+    /**
+     * Diagnostics-only cross-tenant integrity scan (single-page product
+     * editor plan, Task A4; Global Constraints: "diagnostics report the
+     * drift"): ONE LEFT JOIN across every variant in EVERY tenant --
+     * `commerce_variants` LEFT JOIN `commerce_stock` on `variant_uuid` --
+     * returning the exact `{tenant_uuid, product_uuid, variant_uuid}`
+     * identity of every variant with no matching stock row
+     * (`commerce_stock.uuid IS NULL`). Empty when the install is healthy.
+     * Ordered `tenant_uuid, product_uuid, variant_uuid` (all ASC) so the
+     * report is deterministic across runs. {@see \Glueful\Extensions\Commerce\Support\DiagnosticsReport}
+     * is the only caller.
+     *
+     * @return list<array{tenant_uuid: string, product_uuid: string, variant_uuid: string}>
+     */
+    public function variantsMissingStock(ApplicationContext $context): array
+    {
+        $rows = db($context)->table('commerce_variants')
+            ->leftJoin('commerce_stock', 'commerce_stock.variant_uuid', '=', 'commerce_variants.uuid')
+            ->select([
+                'commerce_variants.tenant_uuid AS tenant_uuid',
+                'commerce_variants.product_uuid AS product_uuid',
+                'commerce_variants.uuid AS variant_uuid',
+            ])
+            ->whereRaw('commerce_stock.uuid IS NULL')
+            ->orderBy('commerce_variants.tenant_uuid', 'ASC')
+            ->orderBy('commerce_variants.product_uuid', 'ASC')
+            ->orderBy('commerce_variants.uuid', 'ASC')
+            ->get();
+
+        return array_map(static fn (array $row): array => [
+            'tenant_uuid' => (string) $row['tenant_uuid'],
+            'product_uuid' => (string) $row['product_uuid'],
+            'variant_uuid' => (string) $row['variant_uuid'],
+        ], $rows);
+    }
+
     public function recordMovement(
         ApplicationContext $context,
         string $tenant,

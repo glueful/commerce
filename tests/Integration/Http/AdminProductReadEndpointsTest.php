@@ -9,6 +9,8 @@ use Glueful\Extensions\Commerce\Catalog\AttributeRepository;
 use Glueful\Extensions\Commerce\Catalog\AttributeService;
 use Glueful\Extensions\Commerce\Catalog\CategoryRepository;
 use Glueful\Extensions\Commerce\Catalog\CategoryService;
+use Glueful\Extensions\Commerce\Catalog\CatalogService;
+use Glueful\Extensions\Commerce\Catalog\ProductChildrenRepository;
 use Glueful\Extensions\Commerce\Catalog\ProductMediaRepository;
 use Glueful\Extensions\Commerce\Catalog\ProductMediaService;
 use Glueful\Extensions\Commerce\Catalog\ProductRepository;
@@ -18,8 +20,11 @@ use Glueful\Extensions\Commerce\Catalog\VariantRepository;
 use Glueful\Extensions\Commerce\Http\Admin\AdminAttributeController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminCategoryController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminMediaController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminProductController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminTagController;
 use Glueful\Extensions\Commerce\Http\DTOs\SetProductAttributesData;
+use Glueful\Extensions\Commerce\Inventory\StockIntegrityException;
+use Glueful\Extensions\Commerce\Inventory\StockRepository;
 use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
 use Glueful\Extensions\Commerce\Tests\Support\CommerceTestCase;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
@@ -43,6 +48,17 @@ use Symfony\Component\HttpFoundation\Response as HttpResponse;
  * task's) -- so the plain "unknown vs. tombstoned product" 404 stays visible
  * in this file even though Task A4's children read deliberately returns
  * attached tombstones instead of 404ing on them.
+ *
+ * Task A4 adds `GET .../products/{uuid}/children` and `/stock` below. The
+ * children read is the ONE deliberate exception to A2/A3's tombstone-hiding
+ * convention -- an attached tombstoned CHILD stays visible with
+ * `deleted: true` rather than 404ing or being dropped -- while the PARENT
+ * product itself still 404s when tombstoned, same as every other read in
+ * this file. The stock read never 404s on missing per-variant stock at all;
+ * a variant lacking its `commerce_stock` row throws
+ * {@see StockIntegrityException} instead, deliberately left uncaught so it
+ * propagates out of the controller call in these tests exactly as it would
+ * bubble to the framework's 500-class handler in production.
  */
 final class AdminProductReadEndpointsTest extends CommerceTestCase
 {
@@ -499,6 +515,259 @@ final class AdminProductReadEndpointsTest extends CommerceTestCase
     }
 
     // -----------------------------------------------------------------
+    // GET .../products/{uuid}/children
+    // -----------------------------------------------------------------
+
+    public function testChildrenForProductProjectsExactWhitelistedColumns(): void
+    {
+        $parent = $this->seedProduct('prodreadc001');
+        $child = $this->seedProduct('prodreadc002');
+        $this->assignChild($parent['uuid'], $child['uuid'], 0);
+
+        $response = $this->productController()->childrenForProductIndex(Request::create('/x'), $parent['uuid']);
+        $body = $this->json($response);
+
+        self::assertSame(200, $response->getStatusCode());
+        self::assertCount(1, $body['data']['items']);
+        $item = $body['data']['items'][0];
+        self::assertEqualsCanonicalizing(
+            ['uuid', 'name', 'slug', 'status', 'deleted', 'position'],
+            array_keys($item)
+        );
+        self::assertSame($child['uuid'], $item['uuid']);
+        self::assertSame($child['name'], $item['name']);
+        self::assertSame($child['slug'], $item['slug']);
+        self::assertSame('active', $item['status']);
+        self::assertFalse($item['deleted']);
+        self::assertSame(0, $item['position']);
+    }
+
+    /**
+     * The one read where an attached tombstone stays visible (Global
+     * Constraints): a tombstoned attached child surfaces with
+     * `deleted: true` alongside a live sibling with `deleted: false`, both
+     * still in position order.
+     */
+    public function testChildrenForProductIncludesAttachedTombstonedChildWithDeletedTrue(): void
+    {
+        $parent = $this->seedProduct('prodreadc003');
+        $tombstoned = $this->seedProduct('prodreadc004');
+        $live = $this->seedProduct('prodreadc005');
+        $this->assignChild($parent['uuid'], $tombstoned['uuid'], 0);
+        $this->assignChild($parent['uuid'], $live['uuid'], 1);
+        self::assertTrue((new ProductRepository())->markDeleted($this->context, '', $tombstoned['uuid']));
+
+        $response = $this->productController()->childrenForProductIndex(Request::create('/x'), $parent['uuid']);
+        $items = $this->json($response)['data']['items'];
+
+        self::assertCount(2, $items);
+        self::assertSame($tombstoned['uuid'], $items[0]['uuid']);
+        self::assertTrue($items[0]['deleted']);
+        self::assertSame($live['uuid'], $items[1]['uuid']);
+        self::assertFalse($items[1]['deleted']);
+    }
+
+    /** Seeded deliberately out of insertion order so an accidental uuid/name sort would be caught. */
+    public function testChildrenForProductOrdersItemsByPositionAscending(): void
+    {
+        $parent = $this->seedProduct('prodreadc006');
+        $z = $this->seedProduct('prodreadc007');
+        $a = $this->seedProduct('prodreadc008');
+        $m = $this->seedProduct('prodreadc009');
+        $this->assignChild($parent['uuid'], $z['uuid'], 2);
+        $this->assignChild($parent['uuid'], $a['uuid'], 0);
+        $this->assignChild($parent['uuid'], $m['uuid'], 1);
+
+        $response = $this->productController()->childrenForProductIndex(Request::create('/x'), $parent['uuid']);
+
+        self::assertSame(
+            [$a['uuid'], $m['uuid'], $z['uuid']],
+            array_column($this->json($response)['data']['items'], 'uuid')
+        );
+    }
+
+    public function testChildrenForProductEmptyAssignmentReturnsEmptyItemsWithRevisionPresent(): void
+    {
+        $parent = $this->seedProduct('prodreadc010');
+
+        $response = $this->productController()->childrenForProductIndex(Request::create('/x'), $parent['uuid']);
+        $body = $this->json($response);
+
+        self::assertSame(200, $response->getStatusCode());
+        self::assertSame([], $body['data']['items']);
+        self::assertSame(0, $body['data']['revision']);
+    }
+
+    public function testChildrenForProductEnvelopeHasExactlyRevisionAndItemsKeys(): void
+    {
+        $parent = $this->seedProduct('prodreadc011');
+
+        $response = $this->productController()->childrenForProductIndex(Request::create('/x'), $parent['uuid']);
+
+        self::assertEqualsCanonicalizing(['revision', 'items'], array_keys($this->json($response)['data']));
+    }
+
+    public function testChildrenForProductUnknownProductReturns404(): void
+    {
+        $this->expectException(NotFoundException::class);
+        $this->productController()->childrenForProductIndex(Request::create('/x'), 'no-such-product');
+    }
+
+    public function testChildrenForProductCrossTenantProductReturns404NonRevealing(): void
+    {
+        $parent = $this->seedProduct('prodreadcx01', 'tenantAAAA01');
+
+        $this->expectException(NotFoundException::class);
+        $this->productController('tenantBBBB02')->childrenForProductIndex(Request::create('/x'), $parent['uuid']);
+    }
+
+    /**
+     * Unlike the children THEMSELVES (see the tombstoned-child test above),
+     * the PARENT product still 404s when tombstoned -- the same
+     * `catalogRevision()` guard every other read on this product uses.
+     */
+    public function testChildrenForProductTombstonedParentReturns404(): void
+    {
+        $parent = $this->seedProduct('prodreadctb1');
+        self::assertTrue((new ProductRepository())->markDeleted($this->context, '', $parent['uuid']));
+
+        $this->expectException(NotFoundException::class);
+        $this->productController()->childrenForProductIndex(Request::create('/x'), $parent['uuid']);
+    }
+
+    // -----------------------------------------------------------------
+    // GET .../products/{uuid}/stock
+    // -----------------------------------------------------------------
+
+    public function testStockForProductProjectsExactWhitelistedColumns(): void
+    {
+        $product = $this->seedProduct('prodreads001');
+        $this->seedVariantWithStock($product['uuid'], 'varreads0001', 'stkreads0001', 5, true);
+
+        $response = $this->productController()->stockForProductIndex(Request::create('/x'), $product['uuid']);
+        $body = $this->json($response);
+
+        self::assertSame(200, $response->getStatusCode());
+        self::assertCount(1, $body['data']['items']);
+        $item = $body['data']['items'][0];
+        self::assertEqualsCanonicalizing(['variant_uuid', 'tracked', 'quantity'], array_keys($item));
+        self::assertSame('varreads0001', $item['variant_uuid']);
+        self::assertTrue($item['tracked']);
+        self::assertSame(5, $item['quantity']);
+    }
+
+    /**
+     * Boolean/int columns must come back as real types on the wire, not
+     * SQLite's 0/1 -- `assertTrue`/`assertFalse` are strict (`===`), so an
+     * unconverted int fails this test.
+     */
+    public function testStockForProductBooleansAreRealBooleansNotInts(): void
+    {
+        $product = $this->seedProduct('prodreads002');
+        $this->seedVariantWithStock($product['uuid'], 'varreads0002', 'stkreads0002', 0, false);
+
+        $item = $this->json(
+            $this->productController()->stockForProductIndex(Request::create('/x'), $product['uuid'])
+        )['data']['items'][0];
+
+        self::assertFalse($item['tracked']);
+        self::assertIsInt($item['quantity']);
+    }
+
+    /**
+     * The read fails loudly rather than fabricating `{tracked: false,
+     * quantity: 0}` for a variant with no matching `commerce_stock` row
+     * (Global Constraints). A normal variant creation path always seeds a
+     * stock row via `StockRepository::ensureRow()`; this test seeds the
+     * variant directly, bypassing that path, to simulate the integrity
+     * drift.
+     */
+    public function testStockForProductThrowsStockIntegrityExceptionWhenVariantLacksStockRow(): void
+    {
+        $product = $this->seedProduct('prodreads003');
+        $this->seedVariantWithoutStock($product['uuid'], 'varreads0003');
+
+        $this->expectException(StockIntegrityException::class);
+        $this->expectExceptionMessage('Stock data is incomplete for this product.');
+        $this->productController()->stockForProductIndex(Request::create('/x'), $product['uuid']);
+    }
+
+    /**
+     * A partial-integrity product (one healthy variant, one missing its
+     * stock row) still fails loudly as a whole -- never returns a partial
+     * `items` list silently missing the broken variant.
+     */
+    public function testStockForProductThrowsWhenOnlySomeVariantsLackStock(): void
+    {
+        $product = $this->seedProduct('prodreads004');
+        $this->seedVariantWithStock($product['uuid'], 'varreads0004', 'stkreads0004', 3, true);
+        $this->seedVariantWithoutStock($product['uuid'], 'varreads0005');
+
+        $this->expectException(StockIntegrityException::class);
+        $this->productController()->stockForProductIndex(Request::create('/x'), $product['uuid']);
+    }
+
+    public function testStockForProductOrdersItemsByVariantPositionAscending(): void
+    {
+        $product = $this->seedProduct('prodreads008');
+        $this->seedVariantWithStock($product['uuid'], 'varreads0z08', 'stkreads0z08', 1, true, 2);
+        $this->seedVariantWithStock($product['uuid'], 'varreads0a08', 'stkreads0a08', 2, true, 0);
+        $this->seedVariantWithStock($product['uuid'], 'varreads0m08', 'stkreads0m08', 3, true, 1);
+
+        $response = $this->productController()->stockForProductIndex(Request::create('/x'), $product['uuid']);
+
+        self::assertSame(
+            ['varreads0a08', 'varreads0m08', 'varreads0z08'],
+            array_column($this->json($response)['data']['items'], 'variant_uuid')
+        );
+    }
+
+    public function testStockForProductEmptyVariantSetReturnsEmptyItemsWithRevisionPresent(): void
+    {
+        $product = $this->seedProduct('prodreads006');
+
+        $response = $this->productController()->stockForProductIndex(Request::create('/x'), $product['uuid']);
+        $body = $this->json($response);
+
+        self::assertSame(200, $response->getStatusCode());
+        self::assertSame([], $body['data']['items']);
+        self::assertSame(0, $body['data']['revision']);
+    }
+
+    public function testStockForProductEnvelopeHasExactlyRevisionAndItemsKeys(): void
+    {
+        $product = $this->seedProduct('prodreads007');
+        $this->seedVariantWithStock($product['uuid'], 'varreads0007', 'stkreads0007', 1, true);
+
+        $response = $this->productController()->stockForProductIndex(Request::create('/x'), $product['uuid']);
+
+        self::assertEqualsCanonicalizing(['revision', 'items'], array_keys($this->json($response)['data']));
+    }
+
+    public function testStockForProductUnknownProductReturns404(): void
+    {
+        $this->expectException(NotFoundException::class);
+        $this->productController()->stockForProductIndex(Request::create('/x'), 'no-such-product');
+    }
+
+    public function testStockForProductCrossTenantProductReturns404NonRevealing(): void
+    {
+        $product = $this->seedProduct('prodreadsx01', 'tenantAAAA01');
+
+        $this->expectException(NotFoundException::class);
+        $this->productController('tenantBBBB02')->stockForProductIndex(Request::create('/x'), $product['uuid']);
+    }
+
+    public function testStockForProductTombstonedProductReturns404(): void
+    {
+        $product = $this->seedProduct('prodreadstb1');
+        self::assertTrue((new ProductRepository())->markDeleted($this->context, '', $product['uuid']));
+
+        $this->expectException(NotFoundException::class);
+        $this->productController()->stockForProductIndex(Request::create('/x'), $product['uuid']);
+    }
+
+    // -----------------------------------------------------------------
     // Fixtures / controller wiring (reused and extended by Tasks A3/A4)
     // -----------------------------------------------------------------
 
@@ -556,6 +825,28 @@ final class AdminProductReadEndpointsTest extends CommerceTestCase
             new VariantRepository(),
             new ProductMediaRepository(),
             $tenant === '' ? new SentinelTenantResolver() : $this->fixedTenant($tenant)
+        );
+    }
+
+    private function productController(string $tenant = ''): AdminProductController
+    {
+        return new AdminProductController(
+            $this->context,
+            $this->catalogService($tenant),
+            new ProductRepository(),
+            new VariantRepository(),
+            $tenant === '' ? new SentinelTenantResolver() : $this->fixedTenant($tenant)
+        );
+    }
+
+    private function catalogService(string $tenant = ''): CatalogService
+    {
+        return new CatalogService(
+            new ProductRepository(),
+            new VariantRepository(),
+            $tenant === '' ? new SentinelTenantResolver() : $this->fixedTenant($tenant),
+            new StockRepository(),
+            new ProductChildrenRepository()
         );
     }
 
@@ -708,6 +999,60 @@ final class AdminProductReadEndpointsTest extends CommerceTestCase
             'role' => $role,
             'position' => $position,
             'alt' => $alt,
+        ]);
+    }
+
+    private function assignChild(string $productUuid, string $childUuid, int $position): void
+    {
+        $this->connection->table('commerce_product_children')->insert([
+            'product_uuid' => $productUuid,
+            'child_uuid' => $childUuid,
+            'position' => $position,
+        ]);
+    }
+
+    /** Seeds a variant AND its `commerce_stock` row -- the normal, healthy state. */
+    private function seedVariantWithStock(
+        string $productUuid,
+        string $variantUuid,
+        string $stockUuid,
+        int $quantity,
+        bool $tracked,
+        int $position = 0,
+        string $tenant = ''
+    ): void {
+        $this->seedVariantWithoutStock($productUuid, $variantUuid, $position, $tenant);
+        $this->connection->table('commerce_stock')->insert([
+            'uuid' => $stockUuid,
+            'tenant_uuid' => $tenant,
+            'variant_uuid' => $variantUuid,
+            'quantity' => $quantity,
+            'tracked' => $tracked ? 1 : 0,
+        ]);
+    }
+
+    /**
+     * Seeds a variant with deliberately NO matching `commerce_stock` row --
+     * normal variant creation always seeds one via
+     * `StockRepository::ensureRow()`; this bypasses that path to simulate
+     * the integrity drift {@see StockIntegrityException} exists to catch.
+     */
+    private function seedVariantWithoutStock(
+        string $productUuid,
+        string $variantUuid,
+        int $position = 0,
+        string $tenant = ''
+    ): void {
+        $this->connection->table('commerce_variants')->insert([
+            'uuid' => $variantUuid,
+            'tenant_uuid' => $tenant,
+            'product_uuid' => $productUuid,
+            'sku' => $variantUuid,
+            'option_values' => '[]',
+            'price' => 500,
+            'currency' => 'USD',
+            'position' => $position,
+            'status' => 'active',
         ]);
     }
 

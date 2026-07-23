@@ -59,6 +59,51 @@ final class MaintenanceTest extends CommerceTestCase
         self::assertSame('bound', $report['contracts']['payment_collector']['source']);
     }
 
+    public function testDiagnosticsReportVariantsMissingStockEmptyWhenHealthy(): void
+    {
+        $report = DiagnosticsReport::build($this->context);
+
+        self::assertSame([], $report['database']['variants_missing_stock']);
+    }
+
+    /**
+     * Task A4 (single-page product editor plan): a variant seeded directly,
+     * bypassing `StockRepository::ensureRow()`, is missing its
+     * `commerce_stock` row -- the ordered `{tenant_uuid, product_uuid,
+     * variant_uuid}` identity of that drift must appear in the diagnostics
+     * report even though the variant was never touched through the normal
+     * product-creation path.
+     */
+    public function testDiagnosticsReportVariantsMissingStockListsOrphanedVariantIdentity(): void
+    {
+        $this->connection->table('commerce_products')->insert([
+            'uuid' => 'diagprod0001',
+            'tenant_uuid' => 'tenantdiag01',
+            'slug' => 'diagprod0001',
+            'name' => 'Diag Product',
+            'type' => 'physical',
+            'status' => 'active',
+        ]);
+        $this->connection->table('commerce_variants')->insert([
+            'uuid' => 'diagvar00001',
+            'tenant_uuid' => 'tenantdiag01',
+            'product_uuid' => 'diagprod0001',
+            'sku' => 'diagvar00001',
+            'option_values' => '[]',
+            'price' => 500,
+            'currency' => 'USD',
+            'status' => 'active',
+        ]);
+        // Deliberately no matching commerce_stock row.
+
+        $report = DiagnosticsReport::build($this->context);
+
+        self::assertSame(
+            [['tenant_uuid' => 'tenantdiag01', 'product_uuid' => 'diagprod0001', 'variant_uuid' => 'diagvar00001']],
+            $report['database']['variants_missing_stock']
+        );
+    }
+
     private function cartStatus(string $uuid): string
     {
         $row = $this->connection->table('commerce_carts')->where('uuid', '=', $uuid)->first();

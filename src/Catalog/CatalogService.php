@@ -9,6 +9,7 @@ use Glueful\Events\EventService;
 use Glueful\Extensions\Commerce\Events\ProductDeleted;
 use Glueful\Extensions\Commerce\Events\ProductSlugChanged;
 use Glueful\Extensions\Commerce\Events\StorefrontCatalogChanged;
+use Glueful\Extensions\Commerce\Inventory\StockIntegrityException;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
 use Glueful\Extensions\Commerce\Marketplace\CommissionPolicyService;
 use Glueful\Extensions\Commerce\Marketplace\CommissionPolicyResolver;
@@ -962,6 +963,98 @@ final class CatalogService
 
             return $this->children->childProductsForProduct($context, $tenant, $productUuid);
         });
+    }
+
+    /**
+     * Product->children read (single-page product editor plan, Task A4):
+     * `{revision, items}` envelope (Global Constraints) -- `items` is the
+     * whitelisted `{uuid, name, slug, status, deleted, position}` projection
+     * of every `commerce_product_children` row attached to the product,
+     * position-ordered. Unlike every other product-attached read in this
+     * plan (categories/tags/attributes/media), an attached TOMBSTONED child
+     * is DELIBERATELY included rather than hidden (Global Constraints:
+     * "Admin children reads never hide existing attachments") -- `deleted`
+     * surfaces that state as a real boolean instead of silently dropping the
+     * row, so an operator managing the set-list can see and choose to
+     * detach it. The PARENT product itself still 404s when tombstoned --
+     * the SAME `catalogRevision()` guard every read on this product uses;
+     * only the CHILDREN's own tombstone state is treated differently, never
+     * the parent's.
+     *
+     * `catalogRevision()` reads `revision` FIRST, before `items` is queried,
+     * for the same reason documented in full on
+     * {@see CategoryService::forProduct()} (not repeated here to avoid drift
+     * between two copies of the same reasoning): a concurrent write landing
+     * between the two reads only ever costs a later CAS save a harmless
+     * 409, never a false pass.
+     *
+     * @return array{revision: int, items: list<array{
+     *     uuid: string, name: string, slug: string, status: string,
+     *     deleted: bool, position: int
+     * }>}
+     */
+    public function childrenForProduct(ApplicationContext $context, string $productUuid): array
+    {
+        $tenant = $this->tenants->tenantUuid($context);
+
+        $revision = $this->products->catalogRevision($context, $tenant, $productUuid);
+        if ($revision === null) {
+            throw new NotFoundException('Resource not found.');
+        }
+
+        return [
+            'revision' => $revision,
+            'items' => $this->children->childProjectionsForProduct($context, $tenant, $productUuid),
+        ];
+    }
+
+    /**
+     * Product->stock read (single-page product editor plan, Task A4):
+     * `{revision, items}` envelope (Global Constraints) -- `items` is the
+     * whitelisted `{variant_uuid, tracked, quantity}` projection of the
+     * product's variants joined to `commerce_stock`, via
+     * {@see StockRepository::stockProjectionsForProduct()}'s single LEFT
+     * JOIN. A missing stock row surfaces there as `tracked`/`quantity` both
+     * `null` on that variant's row; this method never fabricates a
+     * `{tracked: false, quantity: 0}` default for it (Global Constraints: "A
+     * missing commerce_stock row is an integrity failure ... the read fails
+     * loudly") -- instead it throws {@see StockIntegrityException}, which is
+     * deliberately left UNCAUGHT by every caller (including
+     * `AdminProductController::stockForProductIndex()`) so it bubbles to the
+     * framework's default 500-class handler rather than being mapped to a
+     * 4xx.
+     *
+     * `catalogRevision()` reads `revision` FIRST, before `items` is queried
+     * -- same guard/ordering discipline as {@see self::childrenForProduct()}
+     * and every other product-attached read in this plan.
+     *
+     * @return array{revision: int, items: list<array{variant_uuid: string, tracked: bool, quantity: int}>}
+     */
+    public function stockForProduct(ApplicationContext $context, string $productUuid): array
+    {
+        $tenant = $this->tenants->tenantUuid($context);
+
+        $revision = $this->products->catalogRevision($context, $tenant, $productUuid);
+        if ($revision === null) {
+            throw new NotFoundException('Resource not found.');
+        }
+
+        $items = [];
+        foreach ($this->stock->stockProjectionsForProduct($context, $tenant, $productUuid) as $row) {
+            if ($row['tracked'] === null || $row['quantity'] === null) {
+                throw new StockIntegrityException('Stock data is incomplete for this product.');
+            }
+            $items[] = [
+                'variant_uuid' => $row['variant_uuid'],
+                'tracked' => $row['tracked'],
+                'quantity' => $row['quantity'],
+            ];
+        }
+
+        return [
+            'revision' => $revision,
+            'items' => $items,
+        ];
     }
 
     /**

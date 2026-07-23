@@ -72,6 +72,54 @@ final class ProductChildrenRepository
             ->get();
     }
 
+    /**
+     * Whitelisted product->child read projection (single-page product editor
+     * plan, Task A4): ONE join, but -- unlike {@see self::childProductsForProduct()}
+     * and {@see self::visibleChildProductsForProduct()} -- deliberately carries NO
+     * live/visible filter on the child row at all (Global Constraints: "Admin
+     * children reads never hide existing attachments"). An attached TOMBSTONED
+     * child is included exactly like a live one; its tombstone state surfaces as a
+     * real `deleted` boolean (derived from `deleted_at`, never exposed raw) rather
+     * than being hidden or defaulted. Selects ONLY `uuid`/`name`/`slug`/`status`/
+     * `deleted_at` from `commerce_products` plus `commerce_product_children.position`
+     * -- never a raw row. Ordered `commerce_product_children.position ASC`, then
+     * the child's own `uuid ASC` as a deterministic tie-break.
+     *
+     * @return list<array{uuid: string, name: string, slug: string, status: string, deleted: bool, position: int}>
+     */
+    public function childProjectionsForProduct(
+        ApplicationContext $context,
+        string $tenant,
+        string $productUuid
+    ): array {
+        $rows = db($context)->table('commerce_product_children')
+            ->join('commerce_products', 'commerce_product_children.child_uuid', '=', 'commerce_products.uuid')
+            ->select([
+                'commerce_products.uuid',
+                'commerce_products.name',
+                'commerce_products.slug',
+                'commerce_products.status',
+                'commerce_products.deleted_at',
+                'commerce_product_children.position',
+            ])
+            ->where('commerce_products.tenant_uuid', '=', $tenant)
+            ->where('commerce_product_children.product_uuid', '=', $productUuid)
+            ->orderBy('commerce_product_children.position', 'ASC')
+            ->orderBy('commerce_products.uuid', 'ASC')
+            ->get();
+
+        return array_map(static function (array $row): array {
+            return [
+                'uuid' => (string) $row['uuid'],
+                'name' => (string) $row['name'],
+                'slug' => (string) $row['slug'],
+                'status' => (string) $row['status'],
+                'deleted' => $row['deleted_at'] !== null,
+                'position' => (int) $row['position'],
+            ];
+        }, $rows);
+    }
+
     /** True when $productUuid has any children attached to it (is a parent). */
     public function isParentAnywhere(ApplicationContext $context, string $productUuid): bool
     {

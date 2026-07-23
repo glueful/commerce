@@ -236,6 +236,34 @@ final class AdminProductController
         }
     }
 
+    #[ApiOperation(summary: 'List the children attached to a grouped product', tags: ['Commerce Admin'])]
+    #[ApiResponse(200, description: 'Product children retrieved')]
+    #[ApiResponse(404, description: 'Product not found')]
+    public function childrenForProductIndex(Request $request, string $uuid): Response
+    {
+        return Response::success(
+            $this->catalog->childrenForProduct($this->context, $uuid),
+            'Product children retrieved'
+        );
+    }
+
+    /**
+     * Deliberately uncaught: a {@see \Glueful\Extensions\Commerce\Inventory\StockIntegrityException}
+     * from {@see CatalogService::stockForProduct()} must bubble to the
+     * framework's default 500-class handler, never be mapped to a 4xx (Global
+     * Constraints: "the read fails loudly").
+     */
+    #[ApiOperation(summary: 'List the stock levels for a product\'s variants', tags: ['Commerce Admin'])]
+    #[ApiResponse(200, description: 'Product stock retrieved')]
+    #[ApiResponse(404, description: 'Product not found')]
+    public function stockForProductIndex(Request $request, string $uuid): Response
+    {
+        return Response::success(
+            $this->catalog->stockForProduct($this->context, $uuid),
+            'Product stock retrieved'
+        );
+    }
+
     /** @return array<string,mixed> */
     private function product(string $uuid): array
     {
