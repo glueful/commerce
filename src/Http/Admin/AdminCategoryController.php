@@ -7,6 +7,7 @@ namespace Glueful\Extensions\Commerce\Http\Admin;
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Catalog\CategoryService;
 use Glueful\Extensions\Commerce\Catalog\ConcurrentCatalogMutationException;
+use Glueful\Extensions\Commerce\Catalog\StaleCatalogRevisionException;
 use Glueful\Extensions\Commerce\Http\DTOs\CreateCategoryData;
 use Glueful\Extensions\Commerce\Http\DTOs\SetProductCategoriesData;
 use Glueful\Extensions\Commerce\Http\DTOs\UpdateCategoryData;
@@ -110,13 +111,21 @@ final class AdminCategoryController
     #[ApiOperation(summary: 'Set the categories attached to a product', tags: ['Commerce Admin'])]
     #[ApiResponse(200, description: 'Product categories updated')]
     #[ApiResponse(404, description: 'Product not found')]
+    #[ApiResponse(409, description: 'Product was modified by another request')]
     #[ApiResponse(422, description: 'Validation failed')]
     public function setForProduct(SetProductCategoriesData $input, Request $request, string $uuid): Response
     {
         try {
-            $categories = $this->categories->setProductCategories($this->context, $uuid, $input->category_uuids ?? []);
+            $categories = $this->categories->setProductCategories(
+                $this->context,
+                $uuid,
+                $input->category_uuids ?? [],
+                $input->expected_revision
+            );
 
             return Response::success($categories, 'Product categories updated');
+        } catch (StaleCatalogRevisionException $e) {
+            return Response::error($e->getMessage(), 409);
         } catch (ValidationException $e) {
             return Response::validation($e->firstErrors());
         }

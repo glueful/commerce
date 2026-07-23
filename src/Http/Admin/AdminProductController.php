@@ -7,6 +7,7 @@ namespace Glueful\Extensions\Commerce\Http\Admin;
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Catalog\CatalogService;
 use Glueful\Extensions\Commerce\Catalog\ProductRepository;
+use Glueful\Extensions\Commerce\Catalog\StaleCatalogRevisionException;
 use Glueful\Extensions\Commerce\Catalog\VariantRepository;
 use Glueful\Extensions\Commerce\Http\DTOs\AdminProductListQuery;
 use Glueful\Extensions\Commerce\Http\DTOs\BulkPriceData;
@@ -224,13 +225,21 @@ final class AdminProductController
     #[ApiOperation(summary: 'Set the children attached to a grouped product', tags: ['Commerce Admin'])]
     #[ApiResponse(200, description: 'Product children updated')]
     #[ApiResponse(404, description: 'Product not found')]
+    #[ApiResponse(409, description: 'Product was modified by another request')]
     #[ApiResponse(422, description: 'Validation failed')]
     public function setChildren(SetProductChildrenData $input, Request $request, string $uuid): Response
     {
         try {
-            $children = $this->catalog->setProductChildren($this->context, $uuid, $input->child_uuids ?? []);
+            $children = $this->catalog->setProductChildren(
+                $this->context,
+                $uuid,
+                $input->child_uuids ?? [],
+                $input->expected_revision
+            );
 
             return Response::success($children, 'Product children updated');
+        } catch (StaleCatalogRevisionException $e) {
+            return Response::error($e->getMessage(), 409);
         } catch (ValidationException $e) {
             return Response::validation($e->firstErrors());
         }

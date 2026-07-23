@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Commerce\Http\Admin;
 
 use Glueful\Bootstrap\ApplicationContext;
+use Glueful\Extensions\Commerce\Catalog\StaleCatalogRevisionException;
 use Glueful\Extensions\Commerce\Catalog\TagService;
 use Glueful\Extensions\Commerce\Http\DTOs\CreateTagData;
 use Glueful\Extensions\Commerce\Http\DTOs\SetProductTagsData;
@@ -103,13 +104,21 @@ final class AdminTagController
     #[ApiOperation(summary: 'Set the tags attached to a product', tags: ['Commerce Admin'])]
     #[ApiResponse(200, description: 'Product tags updated')]
     #[ApiResponse(404, description: 'Product not found')]
+    #[ApiResponse(409, description: 'Product was modified by another request')]
     #[ApiResponse(422, description: 'Validation failed')]
     public function setForProduct(SetProductTagsData $input, Request $request, string $uuid): Response
     {
         try {
-            $tags = $this->tags->setProductTags($this->context, $uuid, $input->tag_uuids ?? []);
+            $tags = $this->tags->setProductTags(
+                $this->context,
+                $uuid,
+                $input->tag_uuids ?? [],
+                $input->expected_revision
+            );
 
             return Response::success($tags, 'Product tags updated');
+        } catch (StaleCatalogRevisionException $e) {
+            return Response::error($e->getMessage(), 409);
         } catch (ValidationException $e) {
             return Response::validation($e->firstErrors());
         }

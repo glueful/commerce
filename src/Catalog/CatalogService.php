@@ -878,91 +878,159 @@ final class CatalogService
      * ordered list twice produces the same resulting content (wholesale replace,
      * not a row-by-row diff — mirrors AttributeService::setProductAttributes()).
      *
+     * `$expectedRevision` (single-page product editor plan, Task A5): optional CAS
+     * guard on the PARENT's own claim -- see {@see CategoryService::setProductCategories()}
+     * for the full rationale (not repeated here to avoid drift between two copies
+     * of the same reasoning). `null` preserves the unguarded claim byte-for-byte;
+     * a revision mismatch on a still-live parent throws
+     * {@see StaleCatalogRevisionException} inside this transaction (rolled back
+     * with everything else -- 409, no state change, no revision bump); a
+     * tombstoned/unknown parent still 404s first. This guard is scoped to the
+     * PARENT only -- each child's own `catalog_revision` claim below stays the
+     * unconditional {@see ProductRepository::claimCatalogRevision()} it always
+     * was; only the URL's primary resource carries a CAS snapshot.
+     *
+     * Retention-only tombstone exception (Task A5): a child uuid already present
+     * in the PRE-claim current set (i.e. proposed again, not newly attached) may
+     * resolve through {@see ProductRepository::findIncludingDeletedByUuid()} when
+     * it no longer resolves live -- it may be RETAINED (or, on a later call,
+     * removed) even though it was tombstoned after it was first attached. A child
+     * uuid that is NOT in the pre-claim current set (a genuinely new attachment)
+     * must still resolve through {@see ProductRepository::findLiveByUuid()} and,
+     * when live, satisfy the physical/digital rule exactly as before -- this
+     * exception never creates a NEW tombstoned relationship, it only lets an
+     * already-existing one survive a replacement that doesn't touch it.
+     *
      * @param list<string> $childUuids ordered
      * @return list<array<string,mixed>> ordered child product rows
      */
-    public function setProductChildren(ApplicationContext $context, string $productUuid, array $childUuids): array
-    {
+    public function setProductChildren(
+        ApplicationContext $context,
+        string $productUuid,
+        array $childUuids,
+        ?int $expectedRevision = null
+    ): array {
         $tenant = $this->tenants->tenantUuid($context);
 
-        return db($context)->transaction(function () use ($context, $tenant, $productUuid, $childUuids): array {
-            if (!$this->products->claimCatalogRevision($context, $tenant, $productUuid)) {
-                throw new NotFoundException('Resource not found.');
-            }
-
-            $parent = $this->products->findLiveByUuid($context, $tenant, $productUuid);
-            if ($parent === null) {
-                throw new NotFoundException('Resource not found.');
-            }
-            if (($parent['type'] ?? null) !== 'grouped') {
-                throw ValidationException::forField('type', 'Only grouped products can have children.');
-            }
-
-            $proposed = $this->normalizeUuidList($childUuids, 'child_uuids');
-            foreach ($proposed as $index => $childUuid) {
-                if ($childUuid === $productUuid) {
-                    throw ValidationException::forField(
-                        "child_uuids.{$index}",
-                        'A product cannot be its own child.'
-                    );
-                }
-            }
-
-            // Pre-claim snapshot purely to discover which child rows join the
-            // claim set below -- never trusted for the physical/digital decision,
-            // which only happens after every claim succeeds and each proposed
-            // child is re-read fresh (see class docblock).
-            $current = $this->children->childUuidsForProduct($context, $productUuid);
-
-            $union = array_values(array_unique(array_merge($current, $proposed)));
-            sort($union);
-
-            $claimed = [];
-            foreach ($union as $childUuid) {
-                $claimed[$childUuid] = $this->products->claimCatalogRevision($context, $tenant, $childUuid);
-            }
-
-            foreach ($proposed as $index => $childUuid) {
-                if (!($claimed[$childUuid] ?? false)) {
-                    throw ValidationException::forField(
-                        "child_uuids.{$index}",
-                        'child_uuids must reference existing products in this tenant.'
-                    );
-                }
-
-                $child = $this->products->findLiveByUuid($context, $tenant, $childUuid);
-                if ($child === null) {
-                    throw ValidationException::forField(
-                        "child_uuids.{$index}",
-                        'child_uuids must reference existing products in this tenant.'
-                    );
-                }
-
-                $childType = (string) ($child['type'] ?? 'physical');
-                if (!in_array($childType, self::PURCHASABLE_TYPES, true)) {
-                    throw ValidationException::forField(
-                        "child_uuids.{$index}",
-                        "child_uuids must reference physical or digital products (got '{$childType}')."
-                    );
-                }
-            }
-
-            $this->children->replaceChildren($context, $productUuid, $proposed);
-
-            // No dedicated reason exists for a children-set-list change in the
-            // closed vocabulary (design spec §9) -- it changes the PARENT
-            // product's own storefront representation, so it rides
-            // `product.updated` scoped to the parent, the same reason a
-            // plain field patch uses.
-            $this->catalogEvents?->dispatch(
-                $context,
-                $tenant,
-                $productUuid,
-                StorefrontCatalogChanged::REASON_PRODUCT_UPDATED
+        if ($expectedRevision !== null && $expectedRevision < 0) {
+            throw ValidationException::forField(
+                'expected_revision',
+                'expected_revision must be a non-negative integer.'
             );
+        }
 
-            return $this->children->childProductsForProduct($context, $tenant, $productUuid);
-        });
+        return db($context)->transaction(
+            function () use ($context, $tenant, $productUuid, $childUuids, $expectedRevision): array {
+                if ($expectedRevision === null) {
+                    if (!$this->products->claimCatalogRevision($context, $tenant, $productUuid)) {
+                        throw new NotFoundException('Resource not found.');
+                    }
+                } else {
+                    $claim = $this->products->claimCatalogRevisionExpecting(
+                        $context,
+                        $tenant,
+                        $productUuid,
+                        $expectedRevision
+                    );
+                    if ($claim === 'missing') {
+                        throw new NotFoundException('Resource not found.');
+                    }
+                }
+
+                $parent = $this->products->findLiveByUuid($context, $tenant, $productUuid);
+                if ($parent === null) {
+                    throw new NotFoundException('Resource not found.');
+                }
+                if (($claim ?? 'claimed') === 'stale') {
+                    throw new StaleCatalogRevisionException('Product was modified by another request.');
+                }
+                if (($parent['type'] ?? null) !== 'grouped') {
+                    throw ValidationException::forField('type', 'Only grouped products can have children.');
+                }
+
+                $proposed = $this->normalizeUuidList($childUuids, 'child_uuids');
+                foreach ($proposed as $index => $childUuid) {
+                    if ($childUuid === $productUuid) {
+                        throw ValidationException::forField(
+                            "child_uuids.{$index}",
+                            'A product cannot be its own child.'
+                        );
+                    }
+                }
+
+                // Pre-claim snapshot purely to discover which child rows join the
+                // claim set below -- never trusted for the physical/digital decision,
+                // which only happens after every claim succeeds and each proposed
+                // child is re-read fresh (see class docblock). ALSO the retention
+                // membership test for the tombstone exception above: a proposed uuid
+                // already in THIS snapshot is "already attached", never a new one.
+                $current = $this->children->childUuidsForProduct($context, $productUuid);
+
+                $union = array_values(array_unique(array_merge($current, $proposed)));
+                sort($union);
+
+                $claimed = [];
+                foreach ($union as $childUuid) {
+                    $claimed[$childUuid] = $this->products->claimCatalogRevision($context, $tenant, $childUuid);
+                }
+
+                foreach ($proposed as $index => $childUuid) {
+                    if (!($claimed[$childUuid] ?? false)) {
+                        throw ValidationException::forField(
+                            "child_uuids.{$index}",
+                            'child_uuids must reference existing products in this tenant.'
+                        );
+                    }
+
+                    $retained = in_array($childUuid, $current, true);
+
+                    $child = $this->products->findLiveByUuid($context, $tenant, $childUuid);
+                    if ($child === null && $retained) {
+                        // Retention-only exception (see method docblock): an
+                        // already-attached child may have been tombstoned since it
+                        // was first attached. It must still resolve in-tenant, just
+                        // not necessarily live.
+                        $child = $this->products->findIncludingDeletedByUuid($context, $tenant, $childUuid);
+                    }
+                    if ($child === null) {
+                        throw ValidationException::forField(
+                            "child_uuids.{$index}",
+                            'child_uuids must reference existing products in this tenant.'
+                        );
+                    }
+
+                    if ($child['deleted_at'] === null) {
+                        // A brand-new attachment, or a retained child that is still
+                        // live, must satisfy the physical/digital rule. A retained
+                        // TOMBSTONED child is grandfathered through -- never a NEW
+                        // tombstoned relationship, only an existing one surviving.
+                        $childType = (string) ($child['type'] ?? 'physical');
+                        if (!in_array($childType, self::PURCHASABLE_TYPES, true)) {
+                            throw ValidationException::forField(
+                                "child_uuids.{$index}",
+                                "child_uuids must reference physical or digital products (got '{$childType}')."
+                            );
+                        }
+                    }
+                }
+
+                $this->children->replaceChildren($context, $productUuid, $proposed);
+
+                // No dedicated reason exists for a children-set-list change in the
+                // closed vocabulary (design spec §9) -- it changes the PARENT
+                // product's own storefront representation, so it rides
+                // `product.updated` scoped to the parent, the same reason a
+                // plain field patch uses.
+                $this->catalogEvents?->dispatch(
+                    $context,
+                    $tenant,
+                    $productUuid,
+                    StorefrontCatalogChanged::REASON_PRODUCT_UPDATED
+                );
+
+                return $this->children->childProductsForProduct($context, $tenant, $productUuid);
+            }
+        );
     }
 
     /**

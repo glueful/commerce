@@ -6,6 +6,7 @@ namespace Glueful\Extensions\Commerce\Http\Admin;
 
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Catalog\AttributeService;
+use Glueful\Extensions\Commerce\Catalog\StaleCatalogRevisionException;
 use Glueful\Extensions\Commerce\Http\DTOs\AttributeListQuery;
 use Glueful\Extensions\Commerce\Http\DTOs\CreateAttributeData;
 use Glueful\Extensions\Commerce\Http\DTOs\CreateAttributeValueData;
@@ -164,6 +165,7 @@ final class AdminAttributeController
     #[ApiOperation(summary: 'Set the attributes attached to a product', tags: ['Commerce Admin'])]
     #[ApiResponse(200, description: 'Product attributes updated')]
     #[ApiResponse(404, description: 'Product not found')]
+    #[ApiResponse(409, description: 'Product was modified by another request')]
     #[ApiResponse(422, description: 'Validation failed')]
     public function setForProduct(SetProductAttributesData $input, Request $request, string $uuid): Response
     {
@@ -171,10 +173,13 @@ final class AdminAttributeController
             $attributes = $this->attributes->setProductAttributes(
                 $this->context,
                 $uuid,
-                $input->attributes ?? []
+                $input->attributes ?? [],
+                $input->expected_revision
             );
 
             return Response::success($attributes, 'Product attributes updated');
+        } catch (StaleCatalogRevisionException $e) {
+            return Response::error($e->getMessage(), 409);
         } catch (ValidationException $e) {
             return Response::validation($e->firstErrors());
         }
