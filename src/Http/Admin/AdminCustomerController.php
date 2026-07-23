@@ -114,7 +114,7 @@ final class AdminCustomerController
             : ['email_normalized' => EmailNormalizer::normalize($key)];
 
         $recent = $this->orders->paginatedFor($this->context, $tenant, $filters, 1, self::RECENT_ORDERS_PER_PAGE);
-        $customer['orders'] = $recent['items'];
+        $customer['orders'] = array_map([OrderProjection::class, 'forAdmin'], $recent['items']);
 
         if ($query->by === 'user') {
             $customer['addresses'] = array_map(

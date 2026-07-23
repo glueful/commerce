@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-07-23 — Admin Order Wire Projection
+
+Security-hardening patch: admin order endpoints no longer return raw `commerce_orders` rows on
+the wire. No schema changes, no new env vars, no dependency changes.
+
+### Fixed
+- **Admin order responses are now projected through a whitelist (`OrderProjection::forAdmin`)
+  instead of returning raw database rows.** Affected paths: `GET /admin/orders` (list),
+  `GET /admin/orders/{uuid}` (detail), the `cancel`/`mark-paid`/`fulfill` mutation responses,
+  and the recent orders embedded in `GET /admin/customers/{key}`. The dropped columns are
+  internal-only: `id`, `tenant_uuid`, `guest_token_hash` (secret-derived guest checkout token
+  hash), `marketplace_partitioned`, `fulfillment_revision`, and `refund_revision`. Every
+  business-facing column (identifiers, statuses, totals, currency, buyer/contact fields,
+  `addresses`, `metadata`, timestamps) is unchanged. Pre-existing since 1.0.0; these endpoints
+  are authenticated (`commerce:read`/`commerce:write` scopes), so exposure was limited to
+  credentialed admin clients.
+- **Internal behavior is unaffected:** the order-detail `seller_orders` embed still keys off the
+  order's own `marketplace_partitioned` snapshot (read before projection), and the
+  `OrderFulfilled` event still carries the full raw row for listeners and webhook fan-out. The
+  projection is fail-closed: a future `commerce_orders` column stays off the admin wire until
+  explicitly added to the whitelist.
+
+### Upgrade Notes
+- Admin API clients that read any of the six internal columns listed above must stop — they are
+  no longer present in responses. No documented or SPA-consumed field is removed.
+
 ## [1.4.0] - 2026-07-23 — Mountable Admin Route Catalog
 
 The non-marketplace admin surface (98 endpoints) is now declared once in a mountable catalog, so

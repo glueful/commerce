@@ -85,7 +85,7 @@ final class AdminOrderController
         );
 
         return Response::paginated(
-            $result['items'],
+            array_map([OrderProjection::class, 'forAdmin'], $result['items']),
             $result['total'],
             $page,
             $perPage,
@@ -101,8 +101,13 @@ final class AdminOrderController
     {
         $tenant = $this->tenants->tenantUuid($this->context);
         $order = $this->order($uuid);
-        $order['events'] = $this->orders->eventsForOrder($this->context, $tenant, $uuid);
-        $order['lines'] = $this->linesProjection($tenant, $uuid);
+        // The embed decision below reads the RAW row -- marketplace_partitioned
+        // is dropped from the wire by the projection.
+        $partitioned = (bool) ($order['marketplace_partitioned'] ?? false);
+
+        $projected = OrderProjection::forAdmin($order);
+        $projected['events'] = $this->orders->eventsForOrder($this->context, $tenant, $uuid);
+        $projected['lines'] = $this->linesProjection($tenant, $uuid);
 
         // Marketplace MV2 operator breakdown (design spec §6.2): keyed off the
         // ORDER's OWN marketplace_partitioned snapshot (§2.6), never current
@@ -110,14 +115,14 @@ final class AdminOrderController
         // because the operator surface is full-visibility: an unconfirmed
         // (not-yet-paid) child is included too, unlike the seller/customer
         // surfaces' payment-confirmation gate (§2.12).
-        if ((bool) ($order['marketplace_partitioned'] ?? false)) {
-            $order['seller_orders'] = array_map(
+        if ($partitioned) {
+            $projected['seller_orders'] = array_map(
                 fn (array $row): array => $this->sellerOrderProjection($row),
                 $this->sellerOrders->forOrder($this->context, $tenant, $uuid)
             );
         }
 
-        return Response::success($order, 'Order retrieved');
+        return Response::success($projected, 'Order retrieved');
     }
 
     #[ApiOperation(summary: 'Cancel an order', tags: ['Commerce Admin'])]
@@ -147,7 +152,7 @@ final class AdminOrderController
                 }
             });
 
-            return Response::success($this->order($uuid), 'Order canceled');
+            return Response::success(OrderProjection::forAdmin($this->order($uuid)), 'Order canceled');
         } catch (\DomainException $e) {
             return Response::error($e->getMessage(), 409);
         }
@@ -161,7 +166,7 @@ final class AdminOrderController
         try {
             $this->payments->markPaid($this->context, $this->tenants->tenantUuid($this->context), $uuid);
 
-            return Response::success($this->order($uuid), 'Order marked paid');
+            return Response::success(OrderProjection::forAdmin($this->order($uuid)), 'Order marked paid');
         } catch (\DomainException $e) {
             return Response::error($e->getMessage(), 409);
         }
@@ -196,7 +201,7 @@ final class AdminOrderController
                     'tracking_url' => null,
                 ], null);
 
-                return Response::success($this->order($uuid), 'Order fulfilled');
+                return Response::success(OrderProjection::forAdmin($this->order($uuid)), 'Order fulfilled');
             }
 
             db($this->context)->transaction(function () use ($tenant, $uuid, $input): void {
@@ -209,10 +214,12 @@ final class AdminOrderController
                 ]);
             });
 
+            // The event gets the RAW row (listeners/webhook fan-out read internal
+            // columns); only the HTTP response projects.
             $fulfilled = $this->order($uuid);
             $this->dispatch(new OrderFulfilled($fulfilled));
 
-            return Response::success($fulfilled, 'Order fulfilled');
+            return Response::success(OrderProjection::forAdmin($fulfilled), 'Order fulfilled');
         } catch (\DomainException $e) {
             return Response::error($e->getMessage(), 409);
         }
