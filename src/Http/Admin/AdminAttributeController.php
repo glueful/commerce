@@ -150,6 +150,17 @@ final class AdminAttributeController
         return Response::noContent();
     }
 
+    #[ApiOperation(summary: 'List the attributes attached to a product', tags: ['Commerce Admin'])]
+    #[ApiResponse(200, description: 'Product attributes retrieved')]
+    #[ApiResponse(404, description: 'Product not found')]
+    public function forProductIndex(Request $request, string $uuid): Response
+    {
+        return Response::success(
+            $this->attributes->forProduct($this->context, $uuid),
+            'Product attributes retrieved'
+        );
+    }
+
     #[ApiOperation(summary: 'Set the attributes attached to a product', tags: ['Commerce Admin'])]
     #[ApiResponse(200, description: 'Product attributes updated')]
     #[ApiResponse(404, description: 'Product not found')]

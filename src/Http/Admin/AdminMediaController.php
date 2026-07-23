@@ -27,6 +27,17 @@ final class AdminMediaController
         $this->media ??= app($context, ProductMediaService::class);
     }
 
+    #[ApiOperation(summary: 'List the media attached to a product', tags: ['Commerce Admin'])]
+    #[ApiResponse(200, description: 'Product media retrieved')]
+    #[ApiResponse(404, description: 'Product not found')]
+    public function forProductIndex(Request $request, string $uuid): Response
+    {
+        return Response::success(
+            $this->media->forProduct($this->context, $uuid),
+            'Product media retrieved'
+        );
+    }
+
     #[ApiOperation(summary: 'Attach media to a product', tags: ['Commerce Admin'])]
     #[ApiResponse(201, description: 'Media attached')]
     #[ApiResponse(404, description: 'Product not found')]

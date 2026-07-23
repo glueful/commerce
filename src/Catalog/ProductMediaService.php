@@ -42,6 +42,42 @@ final class ProductMediaService
     }
 
     /**
+     * Product->media read (single-page product editor plan, Task A3):
+     * `{revision, items}` envelope (Global Constraints) -- `items` is the
+     * whitelisted `{uuid, blob_uuid, role, position, alt, variant_uuid}`
+     * projection of every `commerce_product_media` row for the product,
+     * position-ordered.
+     *
+     * `catalogRevision()` reads `revision` FIRST, before `items` is queried, for
+     * the same reason documented in full on {@see CategoryService::forProduct()}
+     * (not repeated here to avoid drift between two copies of the same
+     * reasoning): a concurrent write landing between the two reads only ever
+     * costs a later CAS save (Task A5) a harmless 409, never a false pass. It is
+     * also the 404 guard -- null (unknown uuid, cross-tenant uuid, or a
+     * tombstoned product) is the same non-revealing 404 every write endpoint on
+     * this product uses.
+     *
+     * @return array{revision: int, items: list<array{
+     *     uuid: string, blob_uuid: string, role: string, position: int,
+     *     alt: ?string, variant_uuid: ?string
+     * }>}
+     */
+    public function forProduct(ApplicationContext $c, string $productUuid): array
+    {
+        $tenant = $this->tenants->tenantUuid($c);
+
+        $revision = $this->products->catalogRevision($c, $tenant, $productUuid);
+        if ($revision === null) {
+            throw new NotFoundException('Resource not found.');
+        }
+
+        return [
+            'revision' => $revision,
+            'items' => $this->media->mediaProjectionsForProduct($c, $tenant, $productUuid),
+        ];
+    }
+
+    /**
      * @param array<string,mixed> $input
      * @return array<string,mixed>
      */

@@ -33,6 +33,36 @@ final class ProductMediaRepository
             ->get();
     }
 
+    /**
+     * Product->media read (single-page product editor plan, Task A3): whitelisted
+     * projection of exactly the editable `commerce_product_media` columns --
+     * `{uuid, blob_uuid, role, position, alt, variant_uuid}` -- tenant-scoped
+     * (mirrors {@see self::forProduct()}), ordered by `position` ASC. No join
+     * needed: unlike categories/tags, a media row already carries every
+     * whitelisted field inline, so the whitelist is a plain column `select()`
+     * on this table. `position` is cast to int (SQLite returns it as a string).
+     *
+     * @return list<array{
+     *     uuid: string, blob_uuid: string, role: string, position: int,
+     *     alt: ?string, variant_uuid: ?string
+     * }>
+     */
+    public function mediaProjectionsForProduct(ApplicationContext $context, string $tenant, string $productUuid): array
+    {
+        $rows = db($context)->table('commerce_product_media')
+            ->select(['uuid', 'blob_uuid', 'role', 'position', 'alt', 'variant_uuid'])
+            ->where('tenant_uuid', '=', $tenant)
+            ->where('product_uuid', '=', $productUuid)
+            ->orderBy('position', 'ASC')
+            ->get();
+
+        return array_map(static function (array $row): array {
+            $row['position'] = (int) $row['position'];
+
+            return $row;
+        }, $rows);
+    }
+
     /** @return array<string,mixed>|null the product's current cover row, if any */
     public function coverFor(ApplicationContext $context, string $tenant, string $productUuid): ?array
     {
