@@ -42,6 +42,42 @@ final class ProductMediaService
     }
 
     /**
+     * Product->media read (single-page product editor plan, Task A3):
+     * `{revision, items}` envelope (Global Constraints) -- `items` is the
+     * whitelisted `{uuid, blob_uuid, role, position, alt, variant_uuid}`
+     * projection of every `commerce_product_media` row for the product,
+     * position-ordered.
+     *
+     * `catalogRevision()` reads `revision` FIRST, before `items` is queried, for
+     * the same reason documented in full on {@see CategoryService::forProduct()}
+     * (not repeated here to avoid drift between two copies of the same
+     * reasoning): a concurrent write landing between the two reads only ever
+     * costs a later CAS save (Task A5) a harmless 409, never a false pass. It is
+     * also the 404 guard -- null (unknown uuid, cross-tenant uuid, or a
+     * tombstoned product) is the same non-revealing 404 every write endpoint on
+     * this product uses.
+     *
+     * @return array{revision: int, items: list<array{
+     *     uuid: string, blob_uuid: string, role: string, position: int,
+     *     alt: ?string, variant_uuid: ?string
+     * }>}
+     */
+    public function forProduct(ApplicationContext $c, string $productUuid): array
+    {
+        $tenant = $this->tenants->tenantUuid($c);
+
+        $revision = $this->products->catalogRevision($c, $tenant, $productUuid);
+        if ($revision === null) {
+            throw new NotFoundException('Resource not found.');
+        }
+
+        return [
+            'revision' => $revision,
+            'items' => $this->media->mediaProjectionsForProduct($c, $tenant, $productUuid),
+        ];
+    }
+
+    /**
      * @param array<string,mixed> $input
      * @return array<string,mixed>
      */
@@ -194,20 +230,49 @@ final class ProductMediaService
     }
 
     /**
+     * `$expectedRevision` (single-page product editor plan, Task A5): optional CAS
+     * guard -- see {@see CategoryService::setProductCategories()} for the full
+     * rationale (not repeated here to avoid drift between two copies of the same
+     * reasoning). `null` preserves the unguarded claim byte-for-byte; a revision
+     * mismatch on a still-live product throws {@see StaleCatalogRevisionException}
+     * inside this transaction (rolled back with everything else -- 409, no state
+     * change, no revision bump); a tombstoned/unknown product still 404s first.
+     *
      * @param list<array{uuid:string,position:int}> $positions
      * @return list<array<string,mixed>>
      */
-    public function reorder(ApplicationContext $c, string $productUuid, array $positions): array
-    {
+    public function reorder(
+        ApplicationContext $c,
+        string $productUuid,
+        array $positions,
+        ?int $expectedRevision = null
+    ): array {
         $tenant = $this->tenants->tenantUuid($c);
 
-        return db($c)->transaction(function () use ($c, $tenant, $productUuid, $positions): array {
-            if (!$this->products->claimCatalogRevision($c, $tenant, $productUuid)) {
-                throw new NotFoundException('Resource not found.');
+        if ($expectedRevision !== null && $expectedRevision < 0) {
+            throw ValidationException::forField(
+                'expected_revision',
+                'expected_revision must be a non-negative integer.'
+            );
+        }
+
+        return db($c)->transaction(function () use ($c, $tenant, $productUuid, $positions, $expectedRevision): array {
+            if ($expectedRevision === null) {
+                if (!$this->products->claimCatalogRevision($c, $tenant, $productUuid)) {
+                    throw new NotFoundException('Resource not found.');
+                }
+            } else {
+                $claim = $this->products->claimCatalogRevisionExpecting($c, $tenant, $productUuid, $expectedRevision);
+                if ($claim === 'missing') {
+                    throw new NotFoundException('Resource not found.');
+                }
             }
 
             if ($this->products->findLiveByUuid($c, $tenant, $productUuid) === null) {
                 throw new NotFoundException('Resource not found.');
+            }
+            if (($claim ?? 'claimed') === 'stale') {
+                throw new StaleCatalogRevisionException('Product was modified by another request.');
             }
 
             $existingUuids = array_map(

@@ -147,6 +147,38 @@ SQL,
             ->get();
     }
 
+    /**
+     * Whitelisted product->category read projection (single-page product
+     * editor plan, Task A2): ONE join, selecting ONLY `uuid`/`name`/`slug` --
+     * never raw `commerce_categories.*` rows (Global Constraints: whitelisted
+     * projections only, no raw rows). Ordered `name ASC, uuid ASC` -- a
+     * deterministic tie-break so item order is stable and testable
+     * regardless of attachment order. Categories may be hierarchical, but
+     * this returns ONLY the directly-assigned rows in
+     * `commerce_product_categories` -- no ancestor expansion.
+     *
+     * @return list<array{uuid: string, name: string, slug: string}>
+     */
+    public function categoryProjectionsForProduct(
+        ApplicationContext $context,
+        string $tenant,
+        string $productUuid
+    ): array {
+        return db($context)->table('commerce_product_categories')
+            ->join(
+                'commerce_categories',
+                'commerce_product_categories.category_uuid',
+                '=',
+                'commerce_categories.uuid'
+            )
+            ->select(['commerce_categories.uuid', 'commerce_categories.name', 'commerce_categories.slug'])
+            ->where('commerce_categories.tenant_uuid', '=', $tenant)
+            ->where('commerce_product_categories.product_uuid', '=', $productUuid)
+            ->orderBy('commerce_categories.name', 'ASC')
+            ->orderBy('commerce_categories.uuid', 'ASC')
+            ->get();
+    }
+
     public function attachProduct(ApplicationContext $context, string $productUuid, string $categoryUuid): void
     {
         db($context)->table('commerce_product_categories')->insert([

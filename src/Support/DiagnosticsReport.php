@@ -7,6 +7,7 @@ namespace Glueful\Extensions\Commerce\Support;
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Contracts\ShippingRateProvider;
 use Glueful\Extensions\Commerce\Contracts\TaxCalculator;
+use Glueful\Extensions\Commerce\Inventory\StockRepository;
 use Glueful\Extensions\Commerce\Payments\ManualPaymentCollector;
 use Glueful\Extensions\Commerce\Shipping\DelegatingShippingRateProvider;
 use Glueful\Extensions\Commerce\Tax\FlatRateTaxCalculator;
@@ -50,6 +51,7 @@ final class DiagnosticsReport
             ],
             'database' => [
                 'commerce_tables_present' => self::tablesPresent($context),
+                'variants_missing_stock' => self::variantsMissingStock($context),
             ],
             'container' => [
                 'has_payment_collector' => $container->has(PaymentCollector::class),
@@ -139,6 +141,28 @@ final class DiagnosticsReport
         }
 
         return $rows;
+    }
+
+    /**
+     * Task A4 integrity probe (Global Constraints: "diagnostics report the
+     * drift"): the ordered `{tenant_uuid, product_uuid, variant_uuid}`
+     * identity of every variant with no matching `commerce_stock` row,
+     * computed by {@see StockRepository::variantsMissingStock()}'s single
+     * cross-tenant LEFT JOIN. Empty when the install is healthy. Guarded the
+     * same way {@see self::sentinelRows()} guards its own per-table reads --
+     * a build before either table exists (a fresh/partial migration state)
+     * returns an empty list rather than throwing.
+     *
+     * @return list<array{tenant_uuid: string, product_uuid: string, variant_uuid: string}>
+     */
+    private static function variantsMissingStock(ApplicationContext $context): array
+    {
+        $schema = db($context)->getSchemaBuilder();
+        if (!$schema->hasTable('commerce_variants') || !$schema->hasTable('commerce_stock')) {
+            return [];
+        }
+
+        return (new StockRepository())->variantsMissingStock($context);
     }
 
     /** @return array<string,bool> */

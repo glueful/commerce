@@ -2,6 +2,61 @@
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-07-23 — Per-Product Read Surface & Revision Guard
+
+Six new per-product read endpoints (categories, tags, attributes, media, children, stock) close
+the gap between the existing per-product replacement mutations and their read side, all wrapped
+in a `{revision, items}` envelope that pairs naturally with an optimistic-concurrency
+`expected_revision` guard now supported by all five replacement mutations. Purely additive: the
+non-marketplace admin catalog grows from 98 to 104 entries with zero changes to any existing
+endpoint. No schema changes, no new env vars, no dependency changes.
+
+### Added
+- **Six per-product read endpoints** —
+  `GET /admin/products/{uuid}/categories|tags|attributes|media|children|stock`. Each returns
+  `{revision: int, items: [...]}` (revision is always read before items, so a concurrent write can
+  only ever cost a later CAS save a harmless 409, never a false pass). `items` is a whitelisted
+  projection, never a raw row dump.
+  - categories/tags: `{uuid, name, slug}`, ordered by `name`.
+  - attributes: `{attribute_uuid, name, values, used_for_variants, visible, position}`, ordered by
+    `position`.
+  - media: `{uuid, blob_uuid, role, position, alt, variant_uuid}`, ordered by `position`.
+  - children: `{uuid, name, slug, status, deleted, position}`, ordered by `position`. Attached
+    tombstoned children are NEVER hidden — they surface with `deleted: true` instead of
+    disappearing; a not-yet-attached tombstoned product still can never be newly attached.
+  - stock: `{variant_uuid, tracked, quantity}` per variant. A missing `commerce_stock` row for a
+    tracked variant is an integrity failure, never synthesized as untracked/zero stock — the read
+    throws `StockIntegrityException` rather than returning a silently partial list.
+  - All six 404 on an unknown, cross-tenant, or tombstoned **parent** product (non-revealing — the
+    same signal for "doesn't exist" and "not yours").
+- **`expected_revision` CAS guard** on all five existing replacement mutations (`PUT
+  .../categories`, `.../tags`, `.../attributes`, `.../media/order`, `.../children`) — an optional
+  integer field. Absent: today's serialize-only behavior, byte-for-byte. Present and matching:
+  claims the revision and proceeds exactly as before. Present and stale: **409**, with state left
+  completely unchanged (no partial write). Present against an unknown, cross-tenant, or tombstoned
+  product: **404**, never 409 — a tombstone always wins over a staleness signal.
+- **Children replacement retains already-attached tombstones**: a `PUT .../children` call that
+  leaves a currently-attached tombstoned child in the proposed set is accepted as a no-op for that
+  child; the physical/digital co-attachment rule applies only to brand-new attachments and
+  still-live retained children, never to a retained tombstone.
+- **`StockIntegrityException`** (`src/Inventory/StockIntegrityException.php`) — thrown by the new
+  stock read when any variant's stock row is missing — plus a new `variants_missing_stock` key in
+  `DiagnosticsReport::build()['database']`, surfacing every orphaned variant (`{tenant_uuid,
+  product_uuid, variant_uuid}`) across every tenant for operational triage.
+- **`AdminRouteCatalog` grows from 98 to 104 entries**: `products.categories.index`,
+  `products.tags.index`, `products.attributes.index` (domain `taxonomy`), `products.media.index`,
+  `products.children.index` (domain `products`), `products.stock.index` (domain `inventory`,
+  alongside `stock.adjust`) — all `GET`, mode `view`.
+
+### Upgrade Notes
+- **Restricted-mount hosts must explicitly allowlist the 6 new keys** to adopt them —
+  `AdminMountProfile::restricted()` is fail-closed by construction, so an embedding host's
+  existing allowlist is unaffected and these endpoints stay unmounted there until consciously
+  added.
+- **API clients reading product children should expect a new `deleted` boolean** on each item — an
+  attached tombstoned child is now visible in the read rather than silently absent.
+- No schema changes, no new env vars, no dependency-floor changes.
+
 ## [1.4.1] - 2026-07-23 — Admin Order Wire Projection
 
 Security-hardening patch: admin order endpoints no longer return raw `commerce_orders` rows on

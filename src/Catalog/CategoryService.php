@@ -333,6 +333,43 @@ final class CategoryService
     }
 
     /**
+     * Product->category read (single-page product editor plan, Task A2):
+     * `{revision, items}` envelope (Global Constraints) -- `items` is the
+     * whitelisted `{uuid, name, slug}` projection of every directly-assigned
+     * category (no ancestor expansion; categories may be hierarchical but
+     * this reflects only `commerce_product_categories` rows as-is).
+     *
+     * `catalogRevision()` reads `revision` FIRST, before `items` is queried
+     * (Global Constraints): a concurrent write that lands between the two
+     * reads yields a `revision` that is strictly OLDER than the `items` it
+     * then queries. That is harmless here -- a later CAS save (Task A5)
+     * built on this stale `revision` value only ever loses the race and gets
+     * a 409, never silently overwrites a newer state. Reading `items` first
+     * and `revision` second would risk the opposite: a save built on a
+     * `revision` read AFTER a newer `items` snapshot could pass a CAS check
+     * it should have failed. `catalogRevision()` is also the 404 guard --
+     * null (unknown uuid, cross-tenant uuid, or a tombstoned product) is the
+     * same non-revealing 404 every write endpoint on this product uses, via
+     * the same tenant-scoped `findLiveByUuid()` predicate.
+     *
+     * @return array{revision: int, items: list<array{uuid: string, name: string, slug: string}>}
+     */
+    public function forProduct(ApplicationContext $c, string $productUuid): array
+    {
+        $tenant = $this->tenants->tenantUuid($c);
+
+        $revision = $this->products->catalogRevision($c, $tenant, $productUuid);
+        if ($revision === null) {
+            throw new NotFoundException('Resource not found.');
+        }
+
+        return [
+            'revision' => $revision,
+            'items' => $this->categories->categoryProjectionsForProduct($c, $tenant, $productUuid),
+        ];
+    }
+
+    /**
      * Idempotent set-list replace: claims the PRODUCT first (the URL's primary
      * resource — a failed claim is a non-revealing 404), then resolves every
      * proposed category in-tenant (a failed resolution is a 422 on
@@ -340,57 +377,97 @@ final class CategoryService
      * simply detached; issuing the same list twice is a no-op (no unnecessary
      * churn on unchanged pairs).
      *
+     * `$expectedRevision` (single-page product editor plan, Task A5): optional CAS
+     * guard, `null` by default -- absent preserves the unguarded claim above
+     * byte-for-byte. Present, it replaces the plain {@see ProductRepository::claimCatalogRevision()}
+     * call with {@see ProductRepository::claimCatalogRevisionExpecting()}; a
+     * revision mismatch on a still-live product throws
+     * {@see StaleCatalogRevisionException} INSIDE this transaction, so the claim
+     * itself is rolled back with everything else (409, no state change, no
+     * revision bump) -- AdminCategoryController maps it to 409. Tombstone/unknown
+     * still 404s first (see the pinned guard flow below): the checked-order
+     * `findLiveByUuid()` call before the stale check means a concurrently
+     * tombstoned product 404s even when its stored revision happened to match.
+     *
      * @param list<string> $categoryUuids
      * @return list<array<string,mixed>>
      */
-    public function setProductCategories(ApplicationContext $c, string $productUuid, array $categoryUuids): array
-    {
+    public function setProductCategories(
+        ApplicationContext $c,
+        string $productUuid,
+        array $categoryUuids,
+        ?int $expectedRevision = null
+    ): array {
         $tenant = $this->tenants->tenantUuid($c);
 
-        return db($c)->transaction(function () use ($c, $tenant, $productUuid, $categoryUuids): array {
-            if (!$this->products->claimCatalogRevision($c, $tenant, $productUuid)) {
-                throw new NotFoundException('Resource not found.');
-            }
-            if ($this->products->findLiveByUuid($c, $tenant, $productUuid) === null) {
-                throw new NotFoundException('Resource not found.');
-            }
-
-            $proposed = $this->normalizeUuidList($categoryUuids, 'category_uuids');
-            $current = $this->categories->categoryUuidsForProduct($c, $productUuid);
-
-            $union = array_values(array_unique(array_merge($current, $proposed)));
-            sort($union);
-
-            $claimed = [];
-            foreach ($union as $categoryUuid) {
-                $claimed[$categoryUuid] = $this->categories->claimRevision($c, $tenant, $categoryUuid);
-            }
-
-            foreach ($proposed as $categoryUuid) {
-                if (!($claimed[$categoryUuid] ?? false)) {
-                    throw ValidationException::forField(
-                        'category_uuids',
-                        'category_uuids must reference existing categories in this tenant.'
-                    );
-                }
-            }
-
-            foreach (array_diff($proposed, $current) as $categoryUuid) {
-                $this->categories->attachProduct($c, $productUuid, $categoryUuid);
-            }
-            foreach (array_diff($current, $proposed) as $categoryUuid) {
-                $this->categories->detachProduct($c, $productUuid, $categoryUuid);
-            }
-
-            $this->catalogEvents?->dispatch(
-                $c,
-                $tenant,
-                $productUuid,
-                StorefrontCatalogChanged::REASON_CATEGORY_CHANGED
+        if ($expectedRevision !== null && $expectedRevision < 0) {
+            throw ValidationException::forField(
+                'expected_revision',
+                'expected_revision must be a non-negative integer.'
             );
+        }
 
-            return $this->categories->categoriesForProduct($c, $tenant, $productUuid);
-        });
+        return db($c)->transaction(
+            function () use ($c, $tenant, $productUuid, $categoryUuids, $expectedRevision): array {
+                if ($expectedRevision === null) {
+                    if (!$this->products->claimCatalogRevision($c, $tenant, $productUuid)) {
+                        throw new NotFoundException('Resource not found.');
+                    }
+                } else {
+                    $claim = $this->products->claimCatalogRevisionExpecting(
+                        $c,
+                        $tenant,
+                        $productUuid,
+                        $expectedRevision
+                    );
+                    if ($claim === 'missing') {
+                        throw new NotFoundException('Resource not found.');
+                    }
+                }
+                if ($this->products->findLiveByUuid($c, $tenant, $productUuid) === null) {
+                    throw new NotFoundException('Resource not found.');
+                }
+                if (($claim ?? 'claimed') === 'stale') {
+                    throw new StaleCatalogRevisionException('Product was modified by another request.');
+                }
+
+                $proposed = $this->normalizeUuidList($categoryUuids, 'category_uuids');
+                $current = $this->categories->categoryUuidsForProduct($c, $productUuid);
+
+                $union = array_values(array_unique(array_merge($current, $proposed)));
+                sort($union);
+
+                $claimed = [];
+                foreach ($union as $categoryUuid) {
+                    $claimed[$categoryUuid] = $this->categories->claimRevision($c, $tenant, $categoryUuid);
+                }
+
+                foreach ($proposed as $categoryUuid) {
+                    if (!($claimed[$categoryUuid] ?? false)) {
+                        throw ValidationException::forField(
+                            'category_uuids',
+                            'category_uuids must reference existing categories in this tenant.'
+                        );
+                    }
+                }
+
+                foreach (array_diff($proposed, $current) as $categoryUuid) {
+                    $this->categories->attachProduct($c, $productUuid, $categoryUuid);
+                }
+                foreach (array_diff($current, $proposed) as $categoryUuid) {
+                    $this->categories->detachProduct($c, $productUuid, $categoryUuid);
+                }
+
+                $this->catalogEvents?->dispatch(
+                    $c,
+                    $tenant,
+                    $productUuid,
+                    StorefrontCatalogChanged::REASON_CATEGORY_CHANGED
+                );
+
+                return $this->categories->categoriesForProduct($c, $tenant, $productUuid);
+            }
+        );
     }
 
     /**

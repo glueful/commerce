@@ -16,20 +16,46 @@ use Glueful\Routing\Router;
  *
  * Router::getAllRoutes() enumerates static-then-dynamic, so both the fixture and the
  * live collection are canonically sorted by (path, method) before comparison.
+ *
+ * Task A6 adds 6 per-product read endpoints on top of the immutable 98-entry 1.3.x
+ * inventory. `tests/fixtures/admin_route_inventory_1_3.json` is NEVER touched again —
+ * the 6 additions live in a second, additive fixture
+ * (`admin_route_inventory_1_5_additions.json`) so the original 98 stay byte-parity-pinned
+ * while the new total (104) is independently pinned too.
  */
 final class AdminRouteMountParityTest extends CommerceRouterTestCase
 {
-    public function testNativeMountEqualsLegacyInventory(): void
+    private const LEGACY_COUNT = 98;
+    private const ADDITIONS_COUNT = 6;
+    private const TOTAL_COUNT = self::LEGACY_COUNT + self::ADDITIONS_COUNT;
+
+    public function testNativeMountEqualsLegacyInventoryPlusTaskA6Additions(): void
     {
-        $fixtureFile = dirname(__DIR__, 2) . '/fixtures/admin_route_inventory_1_3.json';
-        self::assertFileExists($fixtureFile);
-        /** @var list<array<string,mixed>> $expected */
-        $expected = json_decode((string) file_get_contents($fixtureFile), true, 512, JSON_THROW_ON_ERROR);
-        self::assertCount(98, $expected);
+        $legacy = $this->loadFixture('admin_route_inventory_1_3.json');
+        self::assertCount(
+            self::LEGACY_COUNT,
+            $legacy,
+            'the 1.3.x fixture is immutable and must stay pinned at exactly 98 entries',
+        );
+
+        $additions = $this->loadFixture('admin_route_inventory_1_5_additions.json');
+        self::assertCount(
+            self::ADDITIONS_COUNT,
+            $additions,
+            'Task A6 adds exactly 6 per-product read endpoints',
+        );
+
+        $expected = array_merge($legacy, $additions);
+        usort($expected, self::routeSortComparator());
+        self::assertCount(self::TOTAL_COUNT, $expected);
 
         $actual = $this->collectNonMarketplaceAdminRoutes($this->freshRouter());
 
-        self::assertCount(98, $actual, 'mounted non-marketplace admin route count drifted');
+        self::assertCount(
+            self::TOTAL_COUNT,
+            $actual,
+            'mounted non-marketplace admin route count drifted (expected 98 legacy + 6 Task A6 additions)',
+        );
         foreach ($expected as $i => $record) {
             self::assertSame(
                 $record,
@@ -37,6 +63,46 @@ final class AdminRouteMountParityTest extends CommerceRouterTestCase
                 "route inventory parity failure at [{$i}] {$record['method']} {$record['path']}",
             );
         }
+    }
+
+    /**
+     * Dedicated assertion on exactly the 6 Task A6 additions (spec §3 table): each is
+     * present, mounted with `view` mode (`require_scope:commerce:read`), and no
+     * additional per-product read endpoint snuck in unpinned.
+     */
+    public function testTaskA6AdditionsAreExactlyTheSixDeclaredReadEndpoints(): void
+    {
+        $additions = $this->loadFixture('admin_route_inventory_1_5_additions.json');
+        self::assertCount(self::ADDITIONS_COUNT, $additions);
+
+        $actual = $this->collectNonMarketplaceAdminRoutes($this->freshRouter());
+        $actualByRoute = [];
+        foreach ($actual as $record) {
+            $actualByRoute[$record['method'] . ' ' . $record['path']] = $record;
+        }
+
+        foreach ($additions as $record) {
+            $routeKey = $record['method'] . ' ' . $record['path'];
+            self::assertArrayHasKey($routeKey, $actualByRoute, "expected Task A6 read endpoint missing: {$routeKey}");
+            self::assertSame($record, $actualByRoute[$routeKey]);
+        }
+    }
+
+    /** @return list<array<string,mixed>> */
+    private function loadFixture(string $filename): array
+    {
+        $fixtureFile = dirname(__DIR__, 2) . '/fixtures/' . $filename;
+        self::assertFileExists($fixtureFile);
+        /** @var list<array<string,mixed>> $decoded */
+        $decoded = json_decode((string) file_get_contents($fixtureFile), true, 512, JSON_THROW_ON_ERROR);
+
+        return $decoded;
+    }
+
+    /** @return callable(array<string,mixed>, array<string,mixed>): int */
+    private static function routeSortComparator(): callable
+    {
+        return static fn (array $a, array $b): int => [$a['path'], $a['method']] <=> [$b['path'], $b['method']];
     }
 
     public function testMarketplaceGroupStillRegistersOnlyWhenFlagEnabled(): void
@@ -73,10 +139,7 @@ final class AdminRouteMountParityTest extends CommerceRouterTestCase
                 'name' => $route['name'],
             ];
         }
-        usort(
-            $records,
-            static fn (array $a, array $b): int => [$a['path'], $a['method']] <=> [$b['path'], $b['method']],
-        );
+        usort($records, self::routeSortComparator());
 
         return $records;
     }

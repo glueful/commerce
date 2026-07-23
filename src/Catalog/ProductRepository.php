@@ -472,6 +472,69 @@ SQL,
     }
 
     /**
+     * Guarded, CAS-style sibling of {@see self::claimCatalogRevision()}
+     * (single-page product editor plan, Task A1): the SAME claim SQL, plus
+     * `AND deleted_at IS NULL AND catalog_revision = ?` -- this claim only
+     * bumps the counter when the row is live AND its stored revision still
+     * matches the caller's `$expected` snapshot. `claimCatalogRevision()`
+     * itself is untouched (15 existing callers rely on its unconditional
+     * claim-then-bump); this is an ADDITIONAL primitive for a future guarded
+     * write (Task A5) that must fail a stale save instead of overwriting a
+     * concurrent edit.
+     *
+     * On 0 affected rows this distinguishes WHY via
+     * {@see self::findLiveByUuid()} (there is no `findByUuid()` on this
+     * repository): a live row still resolving means the stored revision
+     * moved -- `'stale'`; anything else (unknown uuid, cross-tenant uuid, or
+     * a tombstoned product) is `'missing'`. A tombstoned product is ALWAYS
+     * `'missing'`, even when its stored revision happens to equal
+     * `$expected` -- a deleted product is never bumped again, and is never
+     * reported as merely `'stale'`.
+     *
+     * @return 'claimed'|'stale'|'missing'
+     */
+    public function claimCatalogRevisionExpecting(
+        ApplicationContext $context,
+        string $tenant,
+        string $uuid,
+        int $expected
+    ): string {
+        $affected = db($context)->table('commerce_products')->executeModification(
+            <<<'SQL'
+UPDATE commerce_products
+SET catalog_revision = catalog_revision + 1, updated_at = ?
+WHERE tenant_uuid = ? AND uuid = ? AND deleted_at IS NULL AND catalog_revision = ?
+SQL,
+            [
+                db($context)->getDriver()->formatDateTime(),
+                $tenant,
+                $uuid,
+                $expected,
+            ]
+        );
+
+        if ($affected === 1) {
+            return 'claimed';
+        }
+
+        return $this->findLiveByUuid($context, $tenant, $uuid) === null ? 'missing' : 'stale';
+    }
+
+    /**
+     * Current `catalog_revision` for a LIVE product (single-page product
+     * editor plan, Task A1): the same live predicate as
+     * {@see self::findLiveByUuid()} (reused directly, so the two can never
+     * drift) -- null for an unknown uuid, a cross-tenant uuid, or a
+     * tombstoned product.
+     */
+    public function catalogRevision(ApplicationContext $context, string $tenant, string $uuid): ?int
+    {
+        $row = $this->findLiveByUuid($context, $tenant, $uuid);
+
+        return $row === null ? null : (int) $row['catalog_revision'];
+    }
+
+    /**
      * Affected-row-checked rating rollup primitive (design spec §5): a review
      * approval calls this with `(+rating, +1)`; an approved->spam reversal calls
      * it with `(-rating, -1)`. Raw SQL, not the fluent `update()`, so a

@@ -211,13 +211,17 @@ final class MarketplaceRegressionTest extends CommerceTestCase
     // =====================================================================
 
     /**
-     * Pinned pre-MV1 manifest (122 routes), captured from `routes.php` at
+     * Pinned pre-MV1 manifest (128 routes), captured from `routes.php` at
      * the commit immediately before the marketplace groups were added
      * (`git diff` from that commit confirms every marketplace/seller route
      * addition is purely inside a `if ($marketplaceEnabled)` block -- never
      * a change to a pre-existing route) and cross-checked by running this
      * exact `freshRouter()` walk against `commerce.marketplace.enabled`
-     * left at its default. `METHOD path`, sorted.
+     * left at its default. `METHOD path`, sorted. Updated for Task A6
+     * (1.5.0): +6 `GET .../products/{uuid}/{categories,tags,attributes,
+     * media,children,stock}` per-product read endpoints -- purely additive
+     * to the non-marketplace surface, unrelated to the marketplace flag this
+     * test guards.
      *
      * @var list<string>
      */
@@ -257,6 +261,12 @@ final class MarketplaceRegressionTest extends CommerceTestCase
         'GET /commerce/admin/products',
         'GET /commerce/admin/products/{uuid}',
         'GET /commerce/admin/products/{uuid}/addons',
+        'GET /commerce/admin/products/{uuid}/attributes',
+        'GET /commerce/admin/products/{uuid}/categories',
+        'GET /commerce/admin/products/{uuid}/children',
+        'GET /commerce/admin/products/{uuid}/media',
+        'GET /commerce/admin/products/{uuid}/stock',
+        'GET /commerce/admin/products/{uuid}/tags',
         'GET /commerce/admin/refunds',
         'GET /commerce/admin/refunds/{uuid}',
         'GET /commerce/admin/reports/customers',
@@ -361,7 +371,7 @@ final class MarketplaceRegressionTest extends CommerceTestCase
         sort($manifest);
 
         self::assertSame(self::PRE_MV1_ROUTE_MANIFEST, $manifest);
-        self::assertCount(122, $manifest);
+        self::assertCount(128, $manifest);
 
         foreach ($manifest as $route) {
             self::assertDoesNotMatchRegularExpression('#^\S+ /commerce/admin/marketplace#', $route);

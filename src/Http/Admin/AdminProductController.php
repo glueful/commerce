@@ -7,6 +7,7 @@ namespace Glueful\Extensions\Commerce\Http\Admin;
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Catalog\CatalogService;
 use Glueful\Extensions\Commerce\Catalog\ProductRepository;
+use Glueful\Extensions\Commerce\Catalog\StaleCatalogRevisionException;
 use Glueful\Extensions\Commerce\Catalog\VariantRepository;
 use Glueful\Extensions\Commerce\Http\DTOs\AdminProductListQuery;
 use Glueful\Extensions\Commerce\Http\DTOs\BulkPriceData;
@@ -224,16 +225,52 @@ final class AdminProductController
     #[ApiOperation(summary: 'Set the children attached to a grouped product', tags: ['Commerce Admin'])]
     #[ApiResponse(200, description: 'Product children updated')]
     #[ApiResponse(404, description: 'Product not found')]
+    #[ApiResponse(409, description: 'Product was modified by another request')]
     #[ApiResponse(422, description: 'Validation failed')]
     public function setChildren(SetProductChildrenData $input, Request $request, string $uuid): Response
     {
         try {
-            $children = $this->catalog->setProductChildren($this->context, $uuid, $input->child_uuids ?? []);
+            $children = $this->catalog->setProductChildren(
+                $this->context,
+                $uuid,
+                $input->child_uuids ?? [],
+                $input->expected_revision
+            );
 
             return Response::success($children, 'Product children updated');
+        } catch (StaleCatalogRevisionException $e) {
+            return Response::error($e->getMessage(), 409);
         } catch (ValidationException $e) {
             return Response::validation($e->firstErrors());
         }
+    }
+
+    #[ApiOperation(summary: 'List the children attached to a grouped product', tags: ['Commerce Admin'])]
+    #[ApiResponse(200, description: 'Product children retrieved')]
+    #[ApiResponse(404, description: 'Product not found')]
+    public function childrenForProductIndex(Request $request, string $uuid): Response
+    {
+        return Response::success(
+            $this->catalog->childrenForProduct($this->context, $uuid),
+            'Product children retrieved'
+        );
+    }
+
+    /**
+     * Deliberately uncaught: a {@see \Glueful\Extensions\Commerce\Inventory\StockIntegrityException}
+     * from {@see CatalogService::stockForProduct()} must bubble to the
+     * framework's default 500-class handler, never be mapped to a 4xx (Global
+     * Constraints: "the read fails loudly").
+     */
+    #[ApiOperation(summary: 'List the stock levels for a product\'s variants', tags: ['Commerce Admin'])]
+    #[ApiResponse(200, description: 'Product stock retrieved')]
+    #[ApiResponse(404, description: 'Product not found')]
+    public function stockForProductIndex(Request $request, string $uuid): Response
+    {
+        return Response::success(
+            $this->catalog->stockForProduct($this->context, $uuid),
+            'Product stock retrieved'
+        );
     }
 
     /** @return array<string,mixed> */

@@ -338,6 +338,40 @@ SQL,
         return array_map(fn (array $row): array => $this->decodeValuesColumn($row), $rows);
     }
 
+    /**
+     * Product->attribute read (single-page product editor plan, Task A3):
+     * whitelisted projection of exactly the editable `commerce_product_attributes`
+     * columns -- `{attribute_uuid, name, values, used_for_variants, visible,
+     * position}` -- ordered by `position` ASC (it's ordered editable data, NOT
+     * alphabetical, unlike the category/tag projections). No join needed: unlike
+     * categories/tags, a product-attribute row already carries its own
+     * name/values inline, so the whitelist is a plain column `select()` on this
+     * table rather than a join. `values` decodes to a list<string> and
+     * `used_for_variants`/`visible` cast to real booleans the same way
+     * {@see self::productAttributeRows()} does (SQLite returns 0/1); `position`
+     * is cast to int for the same reason.
+     *
+     * @return list<array{
+     *     attribute_uuid: ?string, name: ?string, values: list<string>,
+     *     used_for_variants: bool, visible: bool, position: int
+     * }>
+     */
+    public function attributeProjectionsForProduct(ApplicationContext $context, string $productUuid): array
+    {
+        $rows = db($context)->table('commerce_product_attributes')
+            ->select(['attribute_uuid', 'name', 'values', 'used_for_variants', 'visible', 'position'])
+            ->where('product_uuid', '=', $productUuid)
+            ->orderBy('position', 'ASC')
+            ->get();
+
+        return array_map(function (array $row): array {
+            $row = $this->decodeValuesColumn($row);
+            $row['position'] = (int) $row['position'];
+
+            return $row;
+        }, $rows);
+    }
+
     /** @param array<string,mixed> $row */
     public function insertProductAttribute(ApplicationContext $context, array $row): void
     {

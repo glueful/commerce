@@ -6,6 +6,7 @@ namespace Glueful\Extensions\Commerce\Http\Admin;
 
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Catalog\ProductMediaService;
+use Glueful\Extensions\Commerce\Catalog\StaleCatalogRevisionException;
 use Glueful\Extensions\Commerce\Http\DTOs\AttachMediaData;
 use Glueful\Extensions\Commerce\Http\DTOs\ReorderMediaData;
 use Glueful\Extensions\Commerce\Http\DTOs\UpdateMediaData;
@@ -25,6 +26,17 @@ final class AdminMediaController
         private ?ProductMediaService $media = null,
     ) {
         $this->media ??= app($context, ProductMediaService::class);
+    }
+
+    #[ApiOperation(summary: 'List the media attached to a product', tags: ['Commerce Admin'])]
+    #[ApiResponse(200, description: 'Product media retrieved')]
+    #[ApiResponse(404, description: 'Product not found')]
+    public function forProductIndex(Request $request, string $uuid): Response
+    {
+        return Response::success(
+            $this->media->forProduct($this->context, $uuid),
+            'Product media retrieved'
+        );
     }
 
     #[ApiOperation(summary: 'Attach media to a product', tags: ['Commerce Admin'])]
@@ -76,13 +88,21 @@ final class AdminMediaController
     #[ApiOperation(summary: 'Reorder product media', tags: ['Commerce Admin'])]
     #[ApiResponse(200, description: 'Media reordered')]
     #[ApiResponse(404, description: 'Product not found')]
+    #[ApiResponse(409, description: 'Product was modified by another request')]
     #[ApiResponse(422, description: 'Validation failed')]
     public function reorder(ReorderMediaData $input, Request $request, string $uuid): Response
     {
         try {
-            $media = $this->media->reorder($this->context, $uuid, $this->validatePositions($input->positions));
+            $media = $this->media->reorder(
+                $this->context,
+                $uuid,
+                $this->validatePositions($input->positions),
+                $input->expected_revision
+            );
 
             return Response::success($media, 'Media reordered');
+        } catch (StaleCatalogRevisionException $e) {
+            return Response::error($e->getMessage(), 409);
         } catch (ValidationException $e) {
             return Response::validation($e->firstErrors());
         }

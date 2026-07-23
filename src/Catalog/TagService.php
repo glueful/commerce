@@ -156,24 +156,85 @@ final class TagService
     }
 
     /**
+     * Product->tag read (single-page product editor plan, Task A2):
+     * `{revision, items}` envelope (Global Constraints) -- `items` is the
+     * whitelisted `{uuid, name, slug}` projection of every tag attached to
+     * the product.
+     *
+     * `catalogRevision()` reads `revision` FIRST, before `items` is queried
+     * (Global Constraints) -- see {@see CategoryService::forProduct()}'s
+     * docblock for the full rationale, identical here: a stale `revision`
+     * from a concurrent write only ever costs a later CAS save (Task A5) a
+     * harmless 409, never a false pass. `catalogRevision()` is also the 404
+     * guard -- null (unknown uuid, cross-tenant uuid, or a tombstoned
+     * product) is the same non-revealing 404 every write endpoint on this
+     * product uses, via the same tenant-scoped `findLiveByUuid()` predicate.
+     *
+     * @return array{revision: int, items: list<array{uuid: string, name: string, slug: string}>}
+     */
+    public function forProduct(ApplicationContext $c, string $productUuid): array
+    {
+        $tenant = $this->tenants->tenantUuid($c);
+
+        $revision = $this->products->catalogRevision($c, $tenant, $productUuid);
+        if ($revision === null) {
+            throw new NotFoundException('Resource not found.');
+        }
+
+        return [
+            'revision' => $revision,
+            'items' => $this->tags->tagProjectionsForProduct($c, $tenant, $productUuid),
+        ];
+    }
+
+    /**
      * Idempotent set-list replace: claims the PRODUCT only. A failed claim is a
      * non-revealing 404 (URL's primary resource); a proposed tag that doesn't
      * resolve in-tenant is a 422 on tag_uuids. Issuing the same list twice is a
      * no-op on already-matching pairs.
      *
+     * `$expectedRevision` (single-page product editor plan, Task A5): optional CAS
+     * guard -- see {@see CategoryService::setProductCategories()} for the full
+     * rationale (not repeated here to avoid drift between two copies of the same
+     * reasoning). `null` preserves the unguarded claim byte-for-byte; a revision
+     * mismatch on a still-live product throws {@see StaleCatalogRevisionException}
+     * inside this transaction (rolled back with everything else -- 409, no state
+     * change, no revision bump); a tombstoned/unknown product still 404s first.
+     *
      * @param list<string> $tagUuids
      * @return list<array<string,mixed>>
      */
-    public function setProductTags(ApplicationContext $c, string $productUuid, array $tagUuids): array
-    {
+    public function setProductTags(
+        ApplicationContext $c,
+        string $productUuid,
+        array $tagUuids,
+        ?int $expectedRevision = null
+    ): array {
         $tenant = $this->tenants->tenantUuid($c);
 
-        return db($c)->transaction(function () use ($c, $tenant, $productUuid, $tagUuids): array {
-            if (!$this->products->claimCatalogRevision($c, $tenant, $productUuid)) {
-                throw new NotFoundException('Resource not found.');
+        if ($expectedRevision !== null && $expectedRevision < 0) {
+            throw ValidationException::forField(
+                'expected_revision',
+                'expected_revision must be a non-negative integer.'
+            );
+        }
+
+        return db($c)->transaction(function () use ($c, $tenant, $productUuid, $tagUuids, $expectedRevision): array {
+            if ($expectedRevision === null) {
+                if (!$this->products->claimCatalogRevision($c, $tenant, $productUuid)) {
+                    throw new NotFoundException('Resource not found.');
+                }
+            } else {
+                $claim = $this->products->claimCatalogRevisionExpecting($c, $tenant, $productUuid, $expectedRevision);
+                if ($claim === 'missing') {
+                    throw new NotFoundException('Resource not found.');
+                }
             }
             if ($this->products->findLiveByUuid($c, $tenant, $productUuid) === null) {
                 throw new NotFoundException('Resource not found.');
+            }
+            if (($claim ?? 'claimed') === 'stale') {
+                throw new StaleCatalogRevisionException('Product was modified by another request.');
             }
 
             $proposed = $this->normalizeUuidList($tagUuids, 'tag_uuids');
