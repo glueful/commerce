@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Glueful\Extensions\Commerce\Marketplace;
 
+use Glueful\Extensions\Commerce\Support\CommerceSettings;
 use Glueful\Bootstrap\ApplicationContext;
 
 /**
@@ -32,7 +33,12 @@ final class MarketplaceMode
 {
     public function installEnabled(ApplicationContext $context): bool
     {
-        return (bool) config($context, 'commerce.marketplace.enabled', false);
+        // Through the runtime-settings seam: a host settings screen can switch marketplace
+        // mode on/off live (both behavioral consumers — CheckoutService's master-off fast
+        // path and the seller webhook publisher — re-check per call). Commerce's OWN
+        // marketplace REST routes stay gated on the raw env value in routes.php: route
+        // registration is genuinely boot-time and precedes any tenant context.
+        return CommerceSettings::marketplaceEnabled($context);
     }
 
     /**

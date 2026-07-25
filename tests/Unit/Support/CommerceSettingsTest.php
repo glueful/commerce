@@ -73,6 +73,28 @@ final class CommerceSettingsTest extends CommerceTestCase
         self::assertSame('ORD-{seq}', CommerceSettings::orderNumberFormat($this->context));
     }
 
+    public function testDownloadsUrlTtlIsOverridableAndDefensive(): void
+    {
+        self::assertSame(300, CommerceSettings::downloadsUrlTtl($this->context));
+
+        $this->bindOverride(['commerce.downloads.url_ttl' => '3600']);
+        self::assertSame(3600, CommerceSettings::downloadsUrlTtl($this->context));
+
+        $this->bindOverride(['commerce.downloads.url_ttl' => 'forever']);
+        self::assertSame(300, CommerceSettings::downloadsUrlTtl($this->context));
+    }
+
+    public function testMarketplaceEnabledIsOverridableAndDefensive(): void
+    {
+        self::assertFalse(CommerceSettings::marketplaceEnabled($this->context));
+
+        $this->bindOverride(['commerce.marketplace.enabled' => '1']);
+        self::assertTrue(CommerceSettings::marketplaceEnabled($this->context));
+
+        $this->bindOverride(['commerce.marketplace.enabled' => 'maybe']);
+        self::assertFalse(CommerceSettings::marketplaceEnabled($this->context));
+    }
+
     public function testSellerIdentityKeysAreNullableAndOverridable(): void
     {
         // Config default is null-tolerant (unset env) — getters answer null, never ''.

@@ -63,6 +63,24 @@ final class CommerceSettings
         return self::intValue($context, 'commerce.reports.low_stock_threshold', 2);
     }
 
+    public static function marketplaceEnabled(ApplicationContext $context): bool
+    {
+        $override = self::override($context, 'commerce.marketplace.enabled');
+        if ($override !== null) {
+            $flag = strtolower(trim($override));
+            if (in_array($flag, ['1', 'true', '0', 'false'], true)) {
+                return in_array($flag, ['1', 'true'], true);
+            }
+        }
+
+        return (bool) config($context, 'commerce.marketplace.enabled', false);
+    }
+
+    public static function downloadsUrlTtl(ApplicationContext $context): int
+    {
+        return self::intValue($context, 'commerce.downloads.url_ttl', 300);
+    }
+
     public static function sellerName(ApplicationContext $context): ?string
     {
         return self::nullableString($context, 'commerce.seller.name');
