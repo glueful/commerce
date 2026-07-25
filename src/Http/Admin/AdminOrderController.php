@@ -12,7 +12,9 @@ use Glueful\Extensions\Commerce\Events\OrderNoteAdded;
 use Glueful\Extensions\Commerce\Http\DTOs\CreateOrderNoteData;
 use Glueful\Extensions\Commerce\Http\DTOs\FulfillOrderData;
 use Glueful\Extensions\Commerce\Http\DTOs\FulfillSellerOrderData;
+use Glueful\Extensions\Commerce\Catalog\ProductRepository;
 use Glueful\Extensions\Commerce\Http\DTOs\OrderListQuery;
+use Glueful\Extensions\Commerce\Http\DTOs\ProductOrdersQuery;
 use Glueful\Extensions\Commerce\Invoices\InvoiceData;
 use Glueful\Extensions\Commerce\Invoices\SellerIdentityProvider;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
@@ -46,6 +48,7 @@ final class AdminOrderController
         private ?SellerOrderRepository $sellerOrders = null,
         private ?SellerOrderFulfillmentService $fulfillment = null,
         private ?SellerWebhookOutboxPublisher $webhooks = null,
+        private ?ProductRepository $products = null,
     ) {
         $this->orders ??= app($context, OrderRepository::class);
         $this->stock ??= app($context, StockRepository::class);
@@ -68,6 +71,9 @@ final class AdminOrderController
         // never breaks a pre-existing positional-arg test call site either
         // (design spec §2.8/§2.9, MV2 Task 9).
         $this->fulfillment ??= new SellerOrderFulfillmentService($this->orders, $this->sellerOrders);
+        // Appended like $sellerOrders above: zero-collaborator construction keeps every
+        // pre-existing positional-arg test call site working unchanged.
+        $this->products ??= new ProductRepository();
     }
 
     #[ApiOperation(summary: 'List orders', tags: ['Commerce Admin'])]
@@ -92,6 +98,35 @@ final class AdminOrderController
             null,
             'Orders retrieved'
         );
+    }
+
+    #[ApiOperation(summary: 'Recent orders and windowed activity for a product', tags: ['Commerce Admin'])]
+    #[ApiResponse(200, description: 'Product order activity retrieved')]
+    #[ApiResponse(404, description: 'Product not found')]
+    public function ordersForProductIndex(ProductOrdersQuery $query, Request $request, string $uuid): Response
+    {
+        $tenant = $this->tenants->tenantUuid($this->context);
+        // Same non-revealing live-product guard as every per-product read (1.5.0 convention).
+        if ($this->products->findLiveByUuid($this->context, $tenant, $uuid) === null) {
+            throw new NotFoundException('Resource not found.');
+        }
+
+        $days = max(1, min(365, $query->days ?? 30));
+        $limit = max(1, min(20, $query->per_page ?? 5));
+        // PHP-computed UTC cutoff: driver-portable windowing (no DB date functions), mirroring
+        // the reports' placed_at-falling-back-to-created_at report-time convention.
+        $cutoff = gmdate('Y-m-d H:i:s', time() - ($days * 86400));
+
+        return Response::success([
+            'window_days' => $days,
+            'summary' => $this->orders->productOrderSummary($this->context, $tenant, $uuid, $cutoff),
+            // Wire discipline (1.4.1): recent rows cross the wire through the SAME admin
+            // whitelist every order endpoint uses -- never raw commerce_orders rows.
+            'recent' => array_map(
+                [OrderProjection::class, 'forAdmin'],
+                $this->orders->recentForProduct($this->context, $tenant, $uuid, $limit)
+            ),
+        ], 'Product order activity retrieved');
     }
 
     #[ApiOperation(summary: 'Get an order', tags: ['Commerce Admin'])]

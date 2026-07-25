@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Glueful\Extensions\Commerce\Orders;
 
+use Glueful\Extensions\Commerce\Support\CommerceSettings;
 use Glueful\Bootstrap\ApplicationContext;
 
 final class OrderNumberGenerator
@@ -28,7 +29,7 @@ final class OrderNumberGenerator
             ->where('name', '=', 'order')
             ->first();
         $value = (int) ($row['value'] ?? 1);
-        $format = (string) config($context, 'commerce.orders.number_format', 'ORD-{seq}');
+        $format = CommerceSettings::orderNumberFormat($context);
 
         return str_replace('{seq}', str_pad((string) $value, 6, '0', STR_PAD_LEFT), $format);
     }

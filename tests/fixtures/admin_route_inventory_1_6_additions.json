@@ -1,0 +1,13 @@
+[
+    {
+        "method": "GET",
+        "path": "/commerce/admin/products/{uuid}/orders",
+        "controller": "Glueful\\Extensions\\Commerce\\Http\\Admin\\AdminOrderController",
+        "action": "ordersForProductIndex",
+        "middleware": [
+            "auth",
+            "require_scope:commerce:read"
+        ],
+        "name": null
+    }
+]

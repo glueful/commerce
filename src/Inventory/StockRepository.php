@@ -255,6 +255,52 @@ SQL,
     }
 
     /**
+     * Batched sibling of {@see self::stockProjectionsForProduct()} keyed by
+     * PRODUCT (admin product-list summary, 1.6.0): ONE LEFT JOIN resolving the
+     * stock state of every variant belonging to any of `$productUuids`, so a
+     * 25-row catalog page costs one query instead of 25.
+     *
+     * Same LEFT JOIN discipline and same tenant-scoping rationale as
+     * {@see self::stockProjectionsForProduct()} (see its docblock): a variant
+     * with NO `commerce_stock` row surfaces as `tracked: null, quantity: null`
+     * -- never a fabricated `{tracked: false, quantity: 0}` -- and the caller
+     * decides what that absence means. This method never throws.
+     *
+     * @param list<string> $productUuids
+     * @return array<string,list<array{tracked: ?bool, quantity: ?int}>> keyed by product_uuid
+     */
+    public function stockProjectionsForProducts(
+        ApplicationContext $context,
+        string $tenant,
+        array $productUuids
+    ): array {
+        if ($productUuids === []) {
+            return [];
+        }
+
+        $rows = db($context)->table('commerce_variants')
+            ->leftJoin('commerce_stock', 'commerce_stock.variant_uuid', '=', 'commerce_variants.uuid')
+            ->select([
+                'commerce_variants.product_uuid AS product_uuid',
+                'commerce_stock.tracked AS tracked',
+                'commerce_stock.quantity AS quantity',
+            ])
+            ->where('commerce_variants.tenant_uuid', '=', $tenant)
+            ->whereIn('commerce_variants.product_uuid', $productUuids)
+            ->get();
+
+        $grouped = [];
+        foreach ($rows as $row) {
+            $grouped[(string) $row['product_uuid']][] = [
+                'tracked' => $row['tracked'] === null ? null : (bool) $row['tracked'],
+                'quantity' => $row['quantity'] === null ? null : (int) $row['quantity'],
+            ];
+        }
+
+        return $grouped;
+    }
+
+    /**
      * Diagnostics-only cross-tenant integrity scan (single-page product
      * editor plan, Task A4; Global Constraints: "diagnostics report the
      * drift"): ONE LEFT JOIN across every variant in EVERY tenant --

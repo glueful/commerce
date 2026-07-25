@@ -13,6 +13,7 @@ use Glueful\Extensions\Commerce\Discounts\DiscountService;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
 use Glueful\Extensions\Commerce\Pricing\PricingEngine;
 use Glueful\Extensions\Commerce\Shipping\ShippingClassRepository;
+use Glueful\Extensions\Commerce\Support\CommerceSettings;
 use Glueful\Extensions\Commerce\Support\TokenHasher;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Glueful\Helpers\Utils;
@@ -54,7 +55,7 @@ final class CartService
         $token = TokenHasher::generate();
         $uuid = Utils::generateNanoID();
         $expiresAt = (new \DateTimeImmutable('now', new \DateTimeZone('UTC')))
-            ->modify('+' . (int) config($context, 'commerce.cart.ttl_days', 30) . ' days')
+            ->modify('+' . CommerceSettings::cartTtlDays($context) . ' days')
             ->format('Y-m-d H:i:s');
 
         $this->carts->insert($context, [

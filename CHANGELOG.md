@@ -2,6 +2,61 @@
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-07-25 — Per-Product Order Activity, Catalog List Summary & Settings Seam
+
+One additive admin read, an additive enrichment of the admin product list, and a host seam that
+makes store settings runtime-editable (Thallo's Store settings tab is built on it). No schema
+changes, no new env vars, no dependency changes; every addition is inert unless a host binds it.
+
+### Added
+- **`GET /admin/products/{uuid}/orders`** (`products.orders.index`, catalog 104 → 105): the
+  most recent orders CONTAINING a product plus a windowed, product-attributed activity summary
+  — `{window_days, summary: {orders, revenue_minor}, recent: [...]}`. Orders join through their
+  lines' variants, so a multi-line order appears once; `recent` rows cross the wire through the
+  same `OrderProjection::forAdmin` whitelist as every admin order surface; the summary mirrors
+  the products report's discipline exactly (statuses `paid/fulfilled/refunded`, report time
+  `placed_at` falling back to `created_at`, revenue = the SUM of THIS product's line totals,
+  never orders' grand totals). `days` clamps to 1-365 (default 30), `per_page` to 1-20
+  (default 5); unknown/cross-tenant/tombstoned products 404 non-revealing.
+- **Price/stock summary on `GET /admin/products`** — six additive keys per row
+  (`variant_count`, `price_from`, `price_to`, `currency`, `stock_quantity`, `stock_tracked`)
+  so an admin catalog list can show what a product costs and how many are on hand. Two batched
+  reads cover the whole page (`VariantRepository::forProducts` plus the new
+  `StockRepository::stockProjectionsForProducts`), never one pair per row. `price_from` equals
+  `price_to` for single-variant products, and price spans ALL variants — the merchant's own
+  catalog view, with the row's `status` answering sellability. `stock_quantity` is never a
+  fabricated zero: it is `null` when nothing is tracked AND when any variant has lost its
+  `commerce_stock` row (an unknown total beats a silently-short sum). Unlike the per-product
+  `products.stock.index` read, that drift does NOT throw here — a browsing list must not 500
+  because one variant drifted, and `DiagnosticsReport`'s `variants_missing_stock` remains the
+  loud channel. No new route: the existing `products.index` entry simply returns more per row.
+
+- **Runtime-editable store settings seam** — `Support\CommerceSettingsOverride` (a host
+  contract shaped like `CommerceTenantResolution`: apps MAY bind an implementation, e.g. one
+  backed by a tenant-scoped settings table) plus `Support\CommerceSettings`, the one typed read
+  surface for `commerce.currency`, `commerce.tax.flat_rate_bps`,
+  `commerce.orders.number_format`, `commerce.orders.expiry_minutes`, `commerce.cart.ttl_days`,
+  `commerce.reports.low_stock_threshold`, and the null-tolerant invoice identity keys
+  (`commerce.seller.name/address/tax_id`, read by `ConfigSellerIdentityProvider`). Every
+  internal read of those keys now goes
+  through it: a bound override wins (consulted at USE time, mid-request — the only ordering
+  compatible with tenant-scoped stores, since `overrideConfig()` is boot-only by design), a
+  malformed or null override falls back to config, and with no binding behavior is byte-for-byte
+  what it was. Implementations must return null rather than throw — config/env stays the
+  always-working fallback.
+- **Existence probes + setup-time currency support** — `OrderRepository::anyExistsForTenant`
+  (the currency LOCK's predicate for hosts: recorded orders are the durable money history),
+  `VariantRepository::anyExistsForTenant` (a "priced products exist" hint, e.g. to warn that a
+  setup-time currency change reinterprets draft prices), and
+  `VariantRepository::reassignCurrencyForTenant` (rewrites every variant's currency CODE while
+  keeping amounts exactly as typed — required because checkout hard-rejects variants whose
+  currency doesn't match the store, so an unlocked currency change must carry the catalog with
+  it).
+
+### Upgrade Notes
+- Hosts using restricted mounts must allowlist `products.orders.index` to adopt it (fail-closed
+  as always — nothing mounts until approved).
+
 ## [1.5.0] - 2026-07-23 — Per-Product Read Surface & Revision Guard
 
 Six new per-product read endpoints (categories, tags, attributes, media, children, stock) close

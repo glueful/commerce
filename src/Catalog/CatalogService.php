@@ -18,6 +18,7 @@ use Glueful\Extensions\Commerce\Marketplace\MarketplaceWorkspaceLock;
 use Glueful\Extensions\Commerce\Marketplace\SellerAttributionException;
 use Glueful\Extensions\Commerce\Marketplace\SellerRepository;
 use Glueful\Extensions\Commerce\Shipping\ShippingClassRepository;
+use Glueful\Extensions\Commerce\Support\CommerceSettings;
 use Glueful\Extensions\Commerce\Support\Money;
 use Glueful\Extensions\Commerce\Support\OpenVocabularySlug;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
@@ -1315,7 +1316,7 @@ final class CatalogService
 
     private function storeCurrency(ApplicationContext $context): string
     {
-        $currency = (string) config($context, 'commerce.currency', 'USD');
+        $currency = CommerceSettings::currency($context);
         Money::assertValidCurrency($currency);
 
         return $currency;

@@ -211,7 +211,7 @@ final class MarketplaceRegressionTest extends CommerceTestCase
     // =====================================================================
 
     /**
-     * Pinned pre-MV1 manifest (128 routes), captured from `routes.php` at
+     * Pinned pre-MV1 manifest (129 routes; grown additively at 1.5.0/1.6.0), captured from `routes.php` at
      * the commit immediately before the marketplace groups were added
      * (`git diff` from that commit confirms every marketplace/seller route
      * addition is purely inside a `if ($marketplaceEnabled)` block -- never
@@ -265,6 +265,7 @@ final class MarketplaceRegressionTest extends CommerceTestCase
         'GET /commerce/admin/products/{uuid}/categories',
         'GET /commerce/admin/products/{uuid}/children',
         'GET /commerce/admin/products/{uuid}/media',
+        'GET /commerce/admin/products/{uuid}/orders',
         'GET /commerce/admin/products/{uuid}/stock',
         'GET /commerce/admin/products/{uuid}/tags',
         'GET /commerce/admin/refunds',
@@ -371,7 +372,7 @@ final class MarketplaceRegressionTest extends CommerceTestCase
         sort($manifest);
 
         self::assertSame(self::PRE_MV1_ROUTE_MANIFEST, $manifest);
-        self::assertCount(128, $manifest);
+        self::assertCount(129, $manifest);
 
         foreach ($manifest as $route) {
             self::assertDoesNotMatchRegularExpression('#^\S+ /commerce/admin/marketplace#', $route);

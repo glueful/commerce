@@ -179,6 +179,8 @@ final class AdminRouteCatalog
             ['discounts.update', 'PATCH', '/discounts/{uuid}', AdminDiscountController::class, 'update', 'manage', 'json', 'discounts'],
             ['discounts.destroy', 'DELETE', '/discounts/{uuid}', AdminDiscountController::class, 'destroy', 'manage', 'json', 'discounts'],
             // — Orders —
+            // 1.6.0 (composed-editor phase 2): per-product order activity read.
+            ['products.orders.index', 'GET', '/products/{uuid}/orders', AdminOrderController::class, 'ordersForProductIndex', 'view', 'json', 'orders'],
             ['orders.index', 'GET', '/orders', AdminOrderController::class, 'index', 'view', 'json', 'orders'],
             ['orders.show', 'GET', '/orders/{uuid}', AdminOrderController::class, 'show', 'view', 'json', 'orders'],
             ['orders.cancel', 'POST', '/orders/{uuid}/cancel', AdminOrderController::class, 'cancel', 'manage', 'unusual', 'orders'],

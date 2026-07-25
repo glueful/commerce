@@ -18,6 +18,7 @@ use Glueful\Extensions\Commerce\Http\DTOs\ProductVariantData;
 use Glueful\Extensions\Commerce\Http\DTOs\SetProductChildrenData;
 use Glueful\Extensions\Commerce\Http\DTOs\UpdateProductData;
 use Glueful\Extensions\Commerce\Http\DTOs\UpdateVariantData;
+use Glueful\Extensions\Commerce\Inventory\StockRepository;
 use Glueful\Extensions\Commerce\Marketplace\CommissionPolicyException;
 use Glueful\Extensions\Commerce\Shipping\ShippingClassRepository;
 use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
@@ -42,6 +43,8 @@ final class AdminProductController
         private ?VariantRepository $variants = null,
         private ?CurrentTenantResolver $tenants = null,
         private ?ShippingClassRepository $shippingClasses = null,
+        // Appended (1.6.0): only the list summary reads stock from this controller.
+        private ?StockRepository $stockRepository = null,
     ) {
         $this->catalog ??= app($context, CatalogService::class);
         $this->products ??= app($context, ProductRepository::class);
@@ -50,6 +53,10 @@ final class AdminProductController
             ? container($context)->get(CurrentTenantResolver::class)
             : new SentinelTenantResolver();
         $this->shippingClasses ??= new ShippingClassRepository();
+        // Direct construction (like $shippingClasses above), NOT app(): this repository is a
+        // plain reader here and container-resolving it would make every caller that constructs
+        // this controller without a bound StockRepository fail at construction time.
+        $this->stockRepository ??= new StockRepository();
     }
 
     #[ApiOperation(summary: 'List products', tags: ['Commerce Admin'])]
@@ -70,7 +77,92 @@ final class AdminProductController
             $perPage
         );
 
-        return Response::paginated($result['items'], $result['total'], $page, $perPage, null, 'Products retrieved');
+        return Response::paginated(
+            $this->withListSummary($tenant, $result['items']),
+            $result['total'],
+            $page,
+            $perPage,
+            null,
+            'Products retrieved'
+        );
+    }
+
+    /**
+     * Attaches the price/stock summary an admin catalog list needs (1.6.0) using TWO batched
+     * reads for the WHOLE page -- {@see VariantRepository::forProducts()} and
+     * {@see StockRepository::stockProjectionsForProducts()} -- never one pair per row.
+     *
+     * Six additive keys per row; nothing existing is reshaped:
+     * `variant_count`, `price_from`, `price_to`, `currency`, `stock_quantity`, `stock_tracked`.
+     *
+     * Price spans ALL variants, not just active ones: this is the merchant's own catalog view
+     * ("what did I price this at?"), and the row's own `status` column already answers
+     * sellability. `price_from` equals `price_to` for a single-variant product, so a caller can
+     * render one amount or a range without inspecting variants itself.
+     *
+     * Stock honesty (Global Constraints: never fabricate quantities). Unlike the per-product
+     * `products.stock.index` read -- which throws {@see StockIntegrityException} on a missing
+     * `commerce_stock` row -- a BROWSING list must not 500 an entire catalog page because one
+     * variant drifted, so absence reports as `stock_quantity: null` and
+     * {@see \Glueful\Extensions\Commerce\Support\DiagnosticsReport}'s `variants_missing_stock`
+     * remains the loud channel. `null` means "untracked or unknown", NEVER zero: one variant
+     * missing its row makes the whole product's quantity unknown rather than a silently-short sum.
+     *
+     * @param list<array<string,mixed>> $items
+     * @return list<array<string,mixed>>
+     */
+    private function withListSummary(string $tenant, array $items): array
+    {
+        if ($items === []) {
+            return [];
+        }
+
+        $productUuids = array_map(static fn (array $row): string => (string) $row['uuid'], $items);
+        $variantsByProduct = $this->variants->forProducts($this->context, $tenant, $productUuids);
+        $stockByProduct = $this->stockRepository->stockProjectionsForProducts(
+            $this->context,
+            $tenant,
+            $productUuids
+        );
+
+        return array_map(static function (array $row) use ($variantsByProduct, $stockByProduct): array {
+            $uuid = (string) $row['uuid'];
+            $variants = $variantsByProduct[$uuid] ?? [];
+            $stockRows = $stockByProduct[$uuid] ?? [];
+
+            $prices = array_map(static fn (array $v): int => (int) ($v['price'] ?? 0), $variants);
+            $cheapest = $prices === [] ? null : min($prices);
+            $currency = null;
+            foreach ($variants as $variant) {
+                if ((int) ($variant['price'] ?? 0) === $cheapest && isset($variant['currency'])) {
+                    $currency = (string) $variant['currency'];
+                    break;
+                }
+            }
+
+            $tracked = false;
+            $anyMissing = false;
+            $quantity = 0;
+            foreach ($stockRows as $stockRow) {
+                if ($stockRow['tracked'] === null) {
+                    $anyMissing = true;
+                    continue;
+                }
+                if ($stockRow['tracked'] === true) {
+                    $tracked = true;
+                    $quantity += (int) ($stockRow['quantity'] ?? 0);
+                }
+            }
+
+            return $row + [
+                'variant_count' => count($variants),
+                'price_from' => $cheapest,
+                'price_to' => $prices === [] ? null : max($prices),
+                'currency' => $currency,
+                'stock_quantity' => ($tracked && !$anyMissing) ? $quantity : null,
+                'stock_tracked' => $tracked,
+            ];
+        }, $items);
     }
 
     #[ApiOperation(summary: 'Get a product', tags: ['Commerce Admin'])]

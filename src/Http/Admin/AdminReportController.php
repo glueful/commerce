@@ -15,6 +15,7 @@ use Glueful\Extensions\Commerce\Reports\ReportWindow;
 use Glueful\Extensions\Commerce\Reports\SalesReportRepository;
 use Glueful\Extensions\Commerce\Reports\StockReportRepository;
 use Glueful\Extensions\Commerce\Reports\StockThreshold;
+use Glueful\Extensions\Commerce\Support\CommerceSettings;
 use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Glueful\Http\Response;
@@ -144,7 +145,7 @@ final class AdminReportController
         $summaryOrdersCount = (int) array_sum(array_column($series, 'orders_count'));
 
         return Response::success([
-            'currency' => (string) config($this->context, 'commerce.currency', 'USD'),
+            'currency' => CommerceSettings::currency($this->context),
             'window' => [
                 'from' => $window->fromDate(),
                 'to' => $window->toDate(),
