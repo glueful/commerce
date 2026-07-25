@@ -27,7 +27,8 @@ final class AdminRouteMountParityTest extends CommerceRouterTestCase
 {
     private const LEGACY_COUNT = 98;
     private const ADDITIONS_COUNT = 6;
-    private const TOTAL_COUNT = self::LEGACY_COUNT + self::ADDITIONS_COUNT;
+    private const ADDITIONS_1_6_COUNT = 1;
+    private const TOTAL_COUNT = self::LEGACY_COUNT + self::ADDITIONS_COUNT + self::ADDITIONS_1_6_COUNT;
 
     public function testNativeMountEqualsLegacyInventoryPlusTaskA6Additions(): void
     {
@@ -45,7 +46,14 @@ final class AdminRouteMountParityTest extends CommerceRouterTestCase
             'Task A6 adds exactly 6 per-product read endpoints',
         );
 
-        $expected = array_merge($legacy, $additions);
+        $additions16 = $this->loadFixture('admin_route_inventory_1_6_additions.json');
+        self::assertCount(
+            self::ADDITIONS_1_6_COUNT,
+            $additions16,
+            '1.6.0 adds exactly the per-product order-activity read',
+        );
+
+        $expected = array_merge($legacy, $additions, $additions16);
         usort($expected, self::routeSortComparator());
         self::assertCount(self::TOTAL_COUNT, $expected);
 
@@ -54,7 +62,7 @@ final class AdminRouteMountParityTest extends CommerceRouterTestCase
         self::assertCount(
             self::TOTAL_COUNT,
             $actual,
-            'mounted non-marketplace admin route count drifted (expected 98 legacy + 6 Task A6 additions)',
+            'mounted non-marketplace admin route count drifted (expected 98 legacy + 6 Task A6 + 1 1.6.0 additions)',
         );
         foreach ($expected as $i => $record) {
             self::assertSame(
@@ -84,6 +92,12 @@ final class AdminRouteMountParityTest extends CommerceRouterTestCase
         foreach ($additions as $record) {
             $routeKey = $record['method'] . ' ' . $record['path'];
             self::assertArrayHasKey($routeKey, $actualByRoute, "expected Task A6 read endpoint missing: {$routeKey}");
+            self::assertSame($record, $actualByRoute[$routeKey]);
+        }
+
+        foreach ($this->loadFixture('admin_route_inventory_1_6_additions.json') as $record) {
+            $routeKey = $record['method'] . ' ' . $record['path'];
+            self::assertArrayHasKey($routeKey, $actualByRoute, "expected 1.6.0 read endpoint missing: {$routeKey}");
             self::assertSame($record, $actualByRoute[$routeKey]);
         }
     }

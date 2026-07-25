@@ -49,6 +49,40 @@ final class VariantRepository
     }
 
     /**
+     * Cheapest possible "does this tenant have ANY priced product?" probe: LIMIT 1, no
+     * ordering, no decode. Used by hosts to warn before a setup-time currency change
+     * reinterprets existing draft prices (store-settings spec §3.4, revised -- the LOCK
+     * predicate is {@see \Glueful\Extensions\Commerce\Orders\OrderRepository::anyExistsForTenant},
+     * i.e. recorded money history, not catalog prices).
+     */
+    public function anyExistsForTenant(ApplicationContext $context, string $tenant): bool
+    {
+        $rows = db($context)->table('commerce_variants')
+            ->select(['uuid'])
+            ->where('tenant_uuid', '=', $tenant)
+            ->limit(1)
+            ->get();
+
+        return $rows !== [];
+    }
+
+    /**
+     * Setup-time store-currency change (store-settings spec §3.4, revised): rewrite the
+     * `currency` CODE on every variant this tenant owns, keeping the integer amounts exactly as
+     * typed -- the merchant's own draft prices are reinterpreted, not converted. Required for
+     * consistency, not cosmetics: checkout HARD-REJECTS any variant whose currency no longer
+     * matches the store currency, so changing the store without rewriting rows would brick every
+     * existing product at checkout. Only ever called while the currency is UNLOCKED (no recorded
+     * orders), so no historical money is touched.
+     */
+    public function reassignCurrencyForTenant(ApplicationContext $context, string $tenant, string $currency): void
+    {
+        db($context)->table('commerce_variants')
+            ->where('tenant_uuid', '=', $tenant)
+            ->update(['currency' => $currency]);
+    }
+
+    /**
      * Batched `forProduct()`: one query for every variant across a LIST of
      * products via IN, grouped by product_uuid (ordered by position within each
      * group, same ordering as `forProduct()`) -- avoids one query per product

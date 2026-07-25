@@ -16,6 +16,7 @@ use Glueful\Extensions\Commerce\Marketplace\ReserveService;
 use Glueful\Extensions\Commerce\Marketplace\SellerBalanceService;
 use Glueful\Extensions\Commerce\Reports\ReportWindow;
 use Glueful\Extensions\Commerce\Reports\SellerFinancialReportRepository;
+use Glueful\Extensions\Commerce\Support\CommerceSettings;
 use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Glueful\Http\Response;
@@ -290,7 +291,7 @@ final class SellerFinancialController
     {
         $currencies = $this->balances->currencies($this->context, $tenant, $sellerUuid);
 
-        return $currencies[0] ?? (string) config($this->context, 'commerce.currency', 'USD');
+        return $currencies[0] ?? CommerceSettings::currency($this->context);
     }
 
     /**

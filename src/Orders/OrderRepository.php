@@ -23,6 +23,24 @@ final class OrderRepository
         }
     }
 
+    /**
+     * Cheapest possible "does this tenant have ANY recorded order?" probe (store-settings spec
+     * §3.4, revised): the currency lock's predicate. Orders are the DURABLE money history --
+     * their stored amounts are integers in the order's currency, so the first order ever placed
+     * is the moment the store currency stops being safely changeable. (Catalog prices alone
+     * don't lock: during setup a merchant's own draft prices are theirs to reinterpret.)
+     */
+    public function anyExistsForTenant(ApplicationContext $context, string $tenant): bool
+    {
+        $rows = db($context)->table('commerce_orders')
+            ->select(['uuid'])
+            ->where('tenant_uuid', '=', $tenant)
+            ->limit(1)
+            ->get();
+
+        return $rows !== [];
+    }
+
     /** @return array<string,mixed>|null */
     public function findByUuid(ApplicationContext $context, string $tenant, string $uuid): ?array
     {
@@ -481,5 +499,98 @@ SQL,
         }
 
         return $row;
+    }
+
+    /**
+     * The most recent orders CONTAINING a given product (composed-editor spec §5.4b, phase 2:
+     * the admin product page's "Recent orders" panel). Orders join through their lines' variants
+     * (`commerce_order_lines.variant_uuid` → `commerce_variants.product_uuid`) — a multi-line
+     * order matching twice still appears ONCE. Report time mirrors the reports' convention
+     * ({@see \Glueful\Extensions\Commerce\Reports\ProductSalesReportRepository}): `placed_at`
+     * when present, `created_at` otherwise. Raw SQL for the same reason the aggregation
+     * repositories use it — exact, driver-verified GROUP BY/DISTINCT semantics.
+     *
+     * @return list<array<string,mixed>> full order rows (callers project before the wire)
+     */
+    public function recentForProduct(
+        ApplicationContext $context,
+        string $tenant,
+        string $productUuid,
+        int $limit
+    ): array {
+        $uuidRows = db($context)->table('commerce_orders')->executeRaw(
+            <<<'SQL'
+SELECT o.uuid AS uuid, MAX(COALESCE(o.placed_at, o.created_at)) AS report_time
+FROM commerce_orders o
+JOIN commerce_order_lines l ON l.order_uuid = o.uuid
+JOIN commerce_variants v ON v.uuid = l.variant_uuid
+WHERE o.tenant_uuid = ? AND v.product_uuid = ?
+GROUP BY o.uuid
+ORDER BY report_time DESC
+LIMIT ?
+SQL,
+            [$tenant, $productUuid, $limit]
+        );
+        if ($uuidRows === []) {
+            return [];
+        }
+
+        $orderedUuids = array_map(static fn (array $row): string => (string) $row['uuid'], $uuidRows);
+        $rows = db($context)->table('commerce_orders')
+            ->where('tenant_uuid', '=', $tenant)
+            ->whereIn('uuid', $orderedUuids)
+            ->get();
+
+        // Restore the recency ordering the IN() fetch discarded.
+        $byUuid = [];
+        foreach ($rows as $row) {
+            $byUuid[(string) $row['uuid']] = $row;
+        }
+
+        $ordered = [];
+        foreach ($orderedUuids as $uuid) {
+            if (isset($byUuid[$uuid])) {
+                $ordered[] = $byUuid[$uuid];
+            }
+        }
+
+        return $ordered;
+    }
+
+    /**
+     * Windowed, product-attributed order activity (composed-editor spec §5.4b, phase 2: the
+     * "Last N days" tile). Mirrors the products report's revenue discipline exactly
+     * ({@see \Glueful\Extensions\Commerce\Reports\ProductSalesReportRepository}): only orders in
+     * `('paid','fulfilled','refunded')` count, windowed on `placed_at` falling back to
+     * `created_at`, and revenue is the SUM of THIS product's line totals — attributed, never the
+     * orders' grand totals. `$cutoff` is a PHP-computed UTC datetime string so the window
+     * arithmetic is driver-portable (no DB date functions).
+     *
+     * @return array{orders: int, revenue_minor: int}
+     */
+    public function productOrderSummary(
+        ApplicationContext $context,
+        string $tenant,
+        string $productUuid,
+        string $cutoff
+    ): array {
+        $row = db($context)->table('commerce_orders')->executeRawFirst(
+            <<<'SQL'
+SELECT COUNT(DISTINCT o.uuid) AS orders_count, COALESCE(SUM(l.line_total), 0) AS revenue_minor
+FROM commerce_orders o
+JOIN commerce_order_lines l ON l.order_uuid = o.uuid
+JOIN commerce_variants v ON v.uuid = l.variant_uuid
+WHERE o.tenant_uuid = ?
+  AND v.product_uuid = ?
+  AND o.status IN ('paid', 'fulfilled', 'refunded')
+  AND COALESCE(o.placed_at, o.created_at) >= ?
+SQL,
+            [$tenant, $productUuid, $cutoff]
+        );
+
+        return [
+            'orders' => (int) ($row['orders_count'] ?? 0),
+            'revenue_minor' => (int) ($row['revenue_minor'] ?? 0),
+        ];
     }
 }

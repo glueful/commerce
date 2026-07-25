@@ -8,6 +8,7 @@ use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerOrderRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerWebhookOutboxPublisher;
+use Glueful\Extensions\Commerce\Support\CommerceSettings;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 
 /**
@@ -33,7 +34,7 @@ final class ExpiryService
     public function expireStale(ApplicationContext $context): int
     {
         $tenant = $this->tenants->tenantUuid($context);
-        $cutoff = gmdate('Y-m-d H:i:s', time() - ((int) config($context, 'commerce.orders.expiry_minutes', 60) * 60));
+        $cutoff = gmdate('Y-m-d H:i:s', time() - (CommerceSettings::orderExpiryMinutes($context) * 60));
         $orders = db($context)->table('commerce_orders')
             ->where('tenant_uuid', '=', $tenant)
             ->where('status', '=', 'pending_payment')

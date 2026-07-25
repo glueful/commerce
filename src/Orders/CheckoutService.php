@@ -29,6 +29,7 @@ use Glueful\Extensions\Commerce\Pricing\ShippingQuote;
 use Glueful\Extensions\Commerce\Pricing\TaxBreakdown;
 use Glueful\Extensions\Commerce\Pricing\TaxQuote;
 use Glueful\Extensions\Commerce\Pricing\Totals;
+use Glueful\Extensions\Commerce\Support\CommerceSettings;
 use Glueful\Extensions\Commerce\Support\TokenHasher;
 use Glueful\Extensions\Commerce\Tax\DiscountAllocation;
 use Glueful\Extensions\Contracts\Payments\PayableReference;
@@ -155,7 +156,7 @@ final class CheckoutService
         ?CheckoutAttemptContext $attempt = null,
     ): array {
         $tenant = $this->tenants->tenantUuid($context);
-        $storeCurrency = (string) config($context, 'commerce.currency', 'USD');
+        $storeCurrency = CommerceSettings::currency($context);
         $guestToken = TokenHasher::generate();
 
         // MASTER-OFF FAST PATH: installEnabled() is config-only (zero DB
