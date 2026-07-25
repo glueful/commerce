@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-07-25 — Runtime Download-Link Lifetime & Marketplace Master Switch
+
+Two additive keys on the 1.6.0 settings seam. No schema changes, no new env vars, no dependency
+changes; installs without a seam binding behave exactly as before.
+
+### Added
+- **`commerce.marketplace.enabled` joins the runtime-settings seam** —
+  `CommerceSettings::marketplaceEnabled()` (boolean-ish override, config/env fallback `false`),
+  now backing `MarketplaceMode::installEnabled()` — the single choke point both behavioral
+  consumers (CheckoutService's master-off fast path, the seller webhook outbox publisher)
+  re-check per call. A host settings screen can therefore switch marketplace mode on and off at
+  runtime. Commerce's OWN marketplace REST routes remain gated on the raw env value in
+  routes.php — route registration is genuinely boot-time and precedes tenant context.
+
+### Added
+- **`commerce.downloads.url_ttl` joins the runtime-settings seam** — `CommerceSettings::downloadsUrlTtl()`
+  (override-first, defensive int casting, config/env fallback `300`), consulted by both signed
+  download URL producers (`DownloadUrlSigner` and `CommerceDownloadBlobPolicy`'s grant window),
+  so a host settings screen can tune download-link lifetime at runtime without touching env.
+
 ## [1.6.0] - 2026-07-25 — Per-Product Order Activity, Catalog List Summary & Settings Seam
 
 One additive admin read, an additive enrichment of the admin product list, and a host seam that

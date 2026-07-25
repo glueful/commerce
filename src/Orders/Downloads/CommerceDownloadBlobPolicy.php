@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Glueful\Extensions\Commerce\Orders\Downloads;
 
+use Glueful\Extensions\Commerce\Support\CommerceSettings;
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Uploader\Contracts\BlobAccessContext;
 use Glueful\Uploader\Contracts\BlobAccessPolicy;
@@ -114,7 +115,7 @@ final class CommerceDownloadBlobPolicy implements BlobAccessPolicy
             return true;
         }
 
-        $ttl = (int) config($this->context, 'commerce.downloads.url_ttl', 300);
+        $ttl = CommerceSettings::downloadsUrlTtl($this->context);
         $now = time();
 
         $rows = db($this->context)->table('commerce_download_grants')

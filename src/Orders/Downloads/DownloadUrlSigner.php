@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Glueful\Extensions\Commerce\Orders\Downloads;
 
+use Glueful\Extensions\Commerce\Support\CommerceSettings;
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Repository\BlobRepository;
 use Glueful\Support\SignedUrl;
@@ -46,7 +47,7 @@ final class DownloadUrlSigner
             throw new DownloadSigningException("Blob {$blobUuid} could not be resolved for signing.");
         }
 
-        $ttl = (int) config($context, 'commerce.downloads.url_ttl', 300);
+        $ttl = CommerceSettings::downloadsUrlTtl($context);
         $base = $this->publicUrlProvider?->publicBaseUrl($blob) ?? $requestBase;
         $baseUrl = rtrim($base, '/') . '/blobs/' . $blobUuid;
 
