@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+- Four additive batched catalog reads for storefront card surfaces (products-by-uuids with
+  buyer availability, first-category projections, required-add-on presence, primary media) —
+  `ProductRepository::findActiveBuyerAvailableByUuids()` (reuses `activeFilteredQuery()`, the
+  buyer-availability predicate authority), `CategoryRepository::firstCategoryProjectionsForProducts()`,
+  `AddonRepository::hasRequiredForProducts()`, and `ProductMediaRepository::primaryForProducts()`.
+  All four share one pinned uuid-list normalizer (`Support\UuidBatch`: malformed dropped,
+  first-occurrence dedupe, first-100 cap, empty → no query) and issue exactly one query per
+  non-empty call. No schema changes, no new routes, no writes.
+
 ## [1.7.0] - 2026-07-25 — Runtime Download-Link Lifetime & Marketplace Master Switch
 
 Two additive keys on the 1.6.0 settings seam. No schema changes, no new env vars, no dependency
