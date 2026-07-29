@@ -206,6 +206,8 @@ final class DiagnosticsReport
             'commerce_reviews',
             'commerce_customer_address_books',
             'commerce_customer_addresses',
+            'commerce_wishlists',
+            'commerce_wishlist_items',
             'commerce_downloads',
             'commerce_download_grants',
             'commerce_shipping_zones',

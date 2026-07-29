@@ -38,6 +38,7 @@ abstract class CommerceTestCase extends TestCase
         \Glueful\Extensions\Commerce\Database\Migrations\CreateSellerLifecycleEventsTable::class,
         \Glueful\Extensions\Commerce\Database\Migrations\CreateSellerApiKeysTables::class,
         \Glueful\Extensions\Commerce\Database\Migrations\CreateSellerWebhookTables::class,
+        \Glueful\Extensions\Commerce\Database\Migrations\CreateWishlistTables::class,
     ];
 
     protected function setUp(): void

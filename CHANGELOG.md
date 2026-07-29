@@ -2,6 +2,48 @@
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-07-29 — Storefront Card Reads & Account Seams
+
+Additive throughout: two new tables, four new storefront routes inside the existing `auth` +
+tenant account group, one new service seam, and four batched catalog reads. No changes to
+existing endpoints, no default changes, no dependency changes. Installs that use none of the new
+surfaces behave exactly as before.
+
+### Added
+- Four additive batched catalog reads for storefront card surfaces (products-by-uuids with
+  buyer availability, first-category projections, required-add-on presence, primary media) —
+  `ProductRepository::findActiveBuyerAvailableByUuids()` (reuses `activeFilteredQuery()`, the
+  buyer-availability predicate authority), `CategoryRepository::firstCategoryProjectionsForProducts()`,
+  `AddonRepository::hasRequiredForProducts()`, and `ProductMediaRepository::primaryForProducts()`.
+  All four share one pinned uuid-list normalizer (`Support\UuidBatch`: malformed dropped,
+  first-occurrence dedupe, first-100 cap, empty → no query) and issue exactly one query per
+  non-empty call. No schema changes, no new routes, no writes.
+- Account-backed wishlist: `commerce_wishlists` + `commerce_wishlist_items` (migration 020),
+  `WishlistService`, and `GET/POST/DELETE /commerce/account/wishlist` with
+  `POST /commerce/account/wishlist/import`. A parent list row per (tenant, user) carries the
+  revision claim every growth path takes, so the 100-item cap holds under concurrent saves and
+  imports instead of being a count-then-insert race (proved by three real-PostgreSQL races).
+  Display order is an explicit `position` — saves take the front, imports append to the back —
+  not a timestamp, which would put freshly imported rows ahead of the account's own older items.
+  Inserts run in a nested transaction so a unique violation cannot poison the caller's
+  transaction, and only a verified duplicate becomes an idempotent no-op. Availability is
+  checked before a product can consume a slot and re-checked on every read, so an inactive
+  product leaves the list without deleting the saved row. The cap is refused explicitly rather
+  than evicting a deliberately saved item, and import reports imported/unavailable/overflow
+  separately — including valid identifiers beyond the batch limit, which would otherwise be
+  dropped silently. Both tables join the tenancy inventory, so registration, adoption,
+  diagnostics and purge carry them.
+- `GuestOrderClaimService`: customer-safe claiming over the existing race-safe
+  `OrderRepository::linkGuestToUser()`. `claim()` requires BOTH the guest credential and a
+  normalized verified-email match; every failure returns the same non-revealing 404, and
+  re-claiming an order you already own is a no-op success. `claimAllByVerifiedEmail()` is a
+  deliberately weaker, bounded historical import for hosts to expose as an explicit, confirmed,
+  audited action. Shipped as a service seam with **no route**: Commerce cannot establish that an
+  email is verified, so the calling application — which owns the verified-account context —
+  invokes it server-side.
+- `UuidBatch::UUID_PATTERN` is now public: the single anchored catalog-identifier pattern shared
+  by batch normalization, the wishlist service and the HTTP DTOs.
+
 ## [1.7.0] - 2026-07-25 — Runtime Download-Link Lifetime & Marketplace Master Switch
 
 Two additive keys on the 1.6.0 settings seam. No schema changes, no new env vars, no dependency

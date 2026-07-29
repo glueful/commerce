@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Commerce\Catalog;
 
 use Glueful\Bootstrap\ApplicationContext;
+use Glueful\Extensions\Commerce\Support\UuidBatch;
 
 final class CategoryRepository
 {
@@ -177,6 +178,67 @@ SQL,
             ->orderBy('commerce_categories.name', 'ASC')
             ->orderBy('commerce_categories.uuid', 'ASC')
             ->get();
+    }
+
+    /**
+     * Batched storefront card read (storefront-v1 Task 1): each product's
+     * FIRST directly-assigned category as a `{name, slug}` projection, in
+     * ONE join query. "First" is pinned as `position ASC, name ASC, uuid ASC`
+     * over the tenant's category rows -- the read is ordered
+     * `product_uuid, position, name, uuid` and the per-product first-row
+     * reduction happens in PHP. Direct assignments only (mirrors
+     * {@see self::categoryProjectionsForProduct()}: no ancestor expansion);
+     * tenant scoping rides on `commerce_categories.tenant_uuid`, exactly like
+     * every other join through the tenant-less `commerce_product_categories`
+     * table. Input passes through {@see UuidBatch::normalize()} (malformed
+     * dropped, first-occurrence dedupe, first-100 cap); an empty normalized
+     * set issues NO query. A product with no direct assignment is absent.
+     *
+     * @param array<mixed> $productUuids
+     * @return array<string, array{name: string, slug: string}> keyed by product_uuid
+     */
+    public function firstCategoryProjectionsForProducts(
+        ApplicationContext $context,
+        string $tenant,
+        array $productUuids
+    ): array {
+        $productUuids = UuidBatch::normalize($productUuids);
+        if ($productUuids === []) {
+            return [];
+        }
+
+        $rows = db($context)->table('commerce_product_categories')
+            ->join(
+                'commerce_categories',
+                'commerce_product_categories.category_uuid',
+                '=',
+                'commerce_categories.uuid'
+            )
+            ->select([
+                'commerce_product_categories.product_uuid',
+                'commerce_categories.name',
+                'commerce_categories.slug',
+            ])
+            ->where('commerce_categories.tenant_uuid', '=', $tenant)
+            ->whereIn('commerce_product_categories.product_uuid', $productUuids)
+            ->orderBy('commerce_product_categories.product_uuid', 'ASC')
+            ->orderBy('commerce_categories.position', 'ASC')
+            ->orderBy('commerce_categories.name', 'ASC')
+            ->orderBy('commerce_categories.uuid', 'ASC')
+            ->get();
+
+        $result = [];
+        foreach ($rows as $row) {
+            $key = (string) $row['product_uuid'];
+            if (!isset($result[$key])) {
+                $result[$key] = [
+                    'name' => (string) $row['name'],
+                    'slug' => (string) $row['slug'],
+                ];
+            }
+        }
+
+        return $result;
     }
 
     public function attachProduct(ApplicationContext $context, string $productUuid, string $categoryUuid): void

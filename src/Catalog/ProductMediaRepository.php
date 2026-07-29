@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Commerce\Catalog;
 
 use Glueful\Bootstrap\ApplicationContext;
+use Glueful\Extensions\Commerce\Support\UuidBatch;
 
 final class ProductMediaRepository
 {
@@ -101,6 +102,51 @@ final class ProductMediaRepository
         }
 
         return $covers;
+    }
+
+    /**
+     * Batched storefront card read (storefront-v1 Task 1): each product's
+     * primary media row in ONE `IN (...)` query -- its `cover`-role row when
+     * one exists (regardless of position; at-most-one cover per product is
+     * {@see self::demoteCover()}'s invariant), else its first gallery row.
+     * The read is ordered `product_uuid, position ASC, uuid ASC`
+     * (deterministic tie-break) and the cover preference is a PHP-side
+     * reduction over that ordered set -- unlike {@see self::coversForProducts()},
+     * a coverless product still resolves here. Input passes through
+     * {@see UuidBatch::normalize()} (malformed dropped, first-occurrence
+     * dedupe, first-100 cap); an empty normalized set issues NO query.
+     * Products without media are absent.
+     *
+     * @param array<mixed> $productUuids
+     * @return array<string, array<string,mixed>> keyed by product_uuid
+     */
+    public function primaryForProducts(ApplicationContext $context, string $tenant, array $productUuids): array
+    {
+        $productUuids = UuidBatch::normalize($productUuids);
+        if ($productUuids === []) {
+            return [];
+        }
+
+        $rows = db($context)->table('commerce_product_media')
+            ->where('tenant_uuid', '=', $tenant)
+            ->whereIn('product_uuid', $productUuids)
+            ->orderBy('product_uuid', 'ASC')
+            ->orderBy('position', 'ASC')
+            ->orderBy('uuid', 'ASC')
+            ->get();
+
+        $result = [];
+        foreach ($rows as $row) {
+            $key = (string) $row['product_uuid'];
+            if (isset($result[$key]) && (string) $result[$key]['role'] === 'cover') {
+                continue;
+            }
+            if ((string) $row['role'] === 'cover' || !isset($result[$key])) {
+                $result[$key] = $row;
+            }
+        }
+
+        return $result;
     }
 
     /** @param array<string,mixed> $changes */

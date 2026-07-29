@@ -38,6 +38,9 @@ use Glueful\Extensions\Commerce\Contracts\TaxCalculator;
 use Glueful\Extensions\Commerce\Customers\AddressBookRepository;
 use Glueful\Extensions\Commerce\Customers\AddressBookService;
 use Glueful\Extensions\Commerce\Customers\CustomerAggregationRepository;
+use Glueful\Extensions\Commerce\Orders\GuestOrderClaimService;
+use Glueful\Extensions\Commerce\Wishlist\WishlistRepository;
+use Glueful\Extensions\Commerce\Wishlist\WishlistService;
 use Glueful\Extensions\Commerce\Discounts\DiscountRepository;
 use Glueful\Extensions\Commerce\Discounts\DiscountService;
 use Glueful\Extensions\Commerce\Events\Listeners\ProviderChargebackListener;
@@ -78,6 +81,7 @@ use Glueful\Extensions\Commerce\Http\Seller\SellerMembershipController;
 use Glueful\Extensions\Commerce\Http\Seller\SellerOrderController;
 use Glueful\Extensions\Commerce\Http\Seller\SellerWebhookController;
 use Glueful\Extensions\Commerce\Http\Storefront\AccountAddressController;
+use Glueful\Extensions\Commerce\Http\Storefront\AccountWishlistController;
 use Glueful\Extensions\Commerce\Http\Storefront\CartController;
 use Glueful\Extensions\Commerce\Http\Storefront\CategoryController;
 use Glueful\Extensions\Commerce\Http\Storefront\CheckoutController;
@@ -794,6 +798,18 @@ final class CommerceServiceProvider extends ServiceProvider
             ],
             AccountAddressController::class => [
                 'factory' => [self::class, 'makeAccountAddressController'],
+                'shared' => true,
+            ],
+            WishlistService::class => [
+                'factory' => [self::class, 'makeWishlistService'],
+                'shared' => true,
+            ],
+            AccountWishlistController::class => [
+                'factory' => [self::class, 'makeAccountWishlistController'],
+                'shared' => true,
+            ],
+            GuestOrderClaimService::class => [
+                'factory' => [self::class, 'makeGuestOrderClaimService'],
                 'shared' => true,
             ],
             ShippingZoneRepository::class => [
@@ -1575,6 +1591,31 @@ final class CommerceServiceProvider extends ServiceProvider
     {
         return new AddressBookService(
             $container->get(AddressBookRepository::class),
+            self::tenantResolver($container)
+        );
+    }
+
+    public static function makeWishlistService(ContainerInterface $container): WishlistService
+    {
+        return new WishlistService(
+            new WishlistRepository(),
+            $container->get(ProductRepository::class),
+            self::tenantResolver($container)
+        );
+    }
+
+    public static function makeAccountWishlistController(ContainerInterface $container): AccountWishlistController
+    {
+        return new AccountWishlistController(
+            $container->get(ApplicationContext::class),
+            $container->get(WishlistService::class)
+        );
+    }
+
+    public static function makeGuestOrderClaimService(ContainerInterface $container): GuestOrderClaimService
+    {
+        return new GuestOrderClaimService(
+            $container->get(OrderRepository::class),
             self::tenantResolver($container)
         );
     }

@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Glueful\Extensions\Commerce\Http\Storefront\AccountAddressController;
+use Glueful\Extensions\Commerce\Http\Storefront\AccountWishlistController;
 use Glueful\Extensions\Commerce\Http\Storefront\CartController;
 use Glueful\Extensions\Commerce\Http\Storefront\CategoryController;
 use Glueful\Extensions\Commerce\Http\Storefront\CheckoutController;
@@ -126,6 +127,12 @@ $router->group([
     $router->post('/addresses', [AccountAddressController::class, 'store']);
     $router->patch('/addresses/{uuid}', [AccountAddressController::class, 'update']);
     $router->delete('/addresses/{uuid}', [AccountAddressController::class, 'destroy']);
+    $router->get('/wishlist', [AccountWishlistController::class, 'index']);
+    $router->post('/wishlist', [AccountWishlistController::class, 'store']);
+    $router->post('/wishlist/import', [AccountWishlistController::class, 'import']);
+    $router->delete('/wishlist/{productUuid}', [AccountWishlistController::class, 'destroy']);
+    // No guest-order claim route: Commerce cannot establish that an email is verified, so
+    // claiming is a service seam the calling application invokes with an email it verified.
 });
 
 // The non-marketplace admin surface is declared once in AdminRouteCatalog and mounted

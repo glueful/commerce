@@ -10,6 +10,7 @@ use Glueful\Extensions\Commerce\Marketplace\MarketplaceMode;
 use Glueful\Extensions\Commerce\Support\JsonStringArrayContainsSql;
 use Glueful\Extensions\Commerce\Support\LiteralLike;
 use Glueful\Extensions\Commerce\Support\UtcNowSql;
+use Glueful\Extensions\Commerce\Support\UuidBatch;
 
 final class ProductRepository
 {
@@ -334,6 +335,41 @@ SQL,
         }
 
         return $query;
+    }
+
+    /**
+     * Batched storefront card read (storefront-v1 Task 1): resolves each
+     * candidate uuid to exactly the row {@see self::listActive()} would
+     * consider buyable, by reusing {@see self::activeFilteredQuery()}
+     * verbatim (the live+active+buyer-available predicate authority) plus a
+     * single `IN (...)` -- never a re-derived predicate, so a suspended/
+     * reinstated seller's products drop out of/return to this read in
+     * lockstep with every other buyer surface. Input passes through
+     * {@see UuidBatch::normalize()} (malformed dropped, first-occurrence
+     * dedupe, first-100 cap); an empty normalized set issues NO query.
+     *
+     * @param array<mixed> $uuids
+     * @return array<string, array<string,mixed>> uuid => decoded product row;
+     *   an absent key means "not buyer-available" (unknown, inactive,
+     *   tombstoned, cross-tenant, or seller-unavailable)
+     */
+    public function findActiveBuyerAvailableByUuids(ApplicationContext $context, string $tenant, array $uuids): array
+    {
+        $uuids = UuidBatch::normalize($uuids);
+        if ($uuids === []) {
+            return [];
+        }
+
+        $rows = $this->activeFilteredQuery($context, $tenant, null)
+            ->whereIn('uuid', $uuids)
+            ->get();
+
+        $result = [];
+        foreach ($rows as $row) {
+            $result[(string) $row['uuid']] = $this->decodeJson($row);
+        }
+
+        return $result;
     }
 
     /**

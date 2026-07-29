@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Commerce\Catalog;
 
 use Glueful\Bootstrap\ApplicationContext;
+use Glueful\Extensions\Commerce\Support\UuidBatch;
 
 final class AddonRepository
 {
@@ -55,6 +56,46 @@ final class AddonRepository
             ->get();
 
         return array_map(fn (array $row): array => $this->decodeJson($row), $rows);
+    }
+
+    /**
+     * Batched storefront card presence read (storefront-v1 Task 1):
+     * `product_uuid => true` exactly where an ACTIVE `required` add-on
+     * definition exists, in ONE `IN (...)` query. Mirrors the pool
+     * {@see self::activeForProduct()} feeds AddonSnapshot: an `inactive`
+     * definition is no longer selectable, so it must not flag the product.
+     * The `required` test is the same PHP-side `(bool)` cast every existing
+     * consumer of this flag uses (portable across sqlite's 0/1 and pgsql's
+     * real booleans, unlike a driver-specific `required = 1` predicate).
+     * Input passes through {@see UuidBatch::normalize()} (malformed dropped,
+     * first-occurrence dedupe, first-100 cap); an empty normalized set
+     * issues NO query. Products without an active required add-on are absent.
+     *
+     * @param array<mixed> $productUuids
+     * @return array<string, true> keyed by product_uuid
+     */
+    public function hasRequiredForProducts(ApplicationContext $context, string $tenant, array $productUuids): array
+    {
+        $productUuids = UuidBatch::normalize($productUuids);
+        if ($productUuids === []) {
+            return [];
+        }
+
+        $rows = db($context)->table('commerce_product_addons')
+            ->select(['product_uuid', 'required'])
+            ->where('tenant_uuid', '=', $tenant)
+            ->whereIn('product_uuid', $productUuids)
+            ->where('status', '=', 'active')
+            ->get();
+
+        $result = [];
+        foreach ($rows as $row) {
+            if ((bool) $row['required']) {
+                $result[(string) $row['product_uuid']] = true;
+            }
+        }
+
+        return $result;
     }
 
     /** @param array<string,mixed> $changes */

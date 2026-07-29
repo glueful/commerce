@@ -39,6 +39,45 @@ final class TenantAdopterTest extends CommerceTestCase
      * test -- {@see \Glueful\Extensions\Commerce\Support\DiagnosticsReport::tenantTables()}
      * feeds `TenantAdopter` unconditionally.
      */
+    /**
+     * A parent list rekeyed without its items would leave a wishlist whose contents belong to a
+     * different tenant -- invisible until a visitor's list renders somebody else's products.
+     */
+    public function testAdoptRekeysWishlistParentsAndItems(): void
+    {
+        $this->connection->table('commerce_wishlists')->insert([
+            'uuid' => 'wlstadopt001',
+            'tenant_uuid' => '',
+            'user_uuid' => 'useradopt001',
+            'revision' => 0,
+        ]);
+        $this->connection->table('commerce_wishlist_items')->insert([
+            'uuid' => 'wishadopt001',
+            'tenant_uuid' => '',
+            'user_uuid' => 'useradopt001',
+            'product_uuid' => 'prodadopt001',
+            'position' => 0,
+        ]);
+
+        $result = (new TenantAdopter())->adopt($this->context, 'tenantWSH0001');
+
+        self::assertSame(1, $result['tables']['commerce_wishlists']);
+        self::assertSame(1, $result['tables']['commerce_wishlist_items']);
+
+        foreach (['commerce_wishlists', 'commerce_wishlist_items'] as $table) {
+            self::assertSame(
+                0,
+                $this->connection->table($table)->where('tenant_uuid', '=', '')->count(),
+                "{$table} must have no sentinel rows left behind"
+            );
+            self::assertSame(
+                1,
+                $this->connection->table($table)->where('tenant_uuid', '=', 'tenantWSH0001')->count(),
+                "{$table} row must be rekeyed to the adopted tenant"
+            );
+        }
+    }
+
     public function testAdoptRekeysMarketplaceTablesEvenWhenTheMasterSwitchIsOff(): void
     {
         self::assertFalse(
