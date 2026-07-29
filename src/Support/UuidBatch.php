@@ -18,7 +18,13 @@ final class UuidBatch
 {
     public const LIMIT = 100;
 
-    private const UUID_PATTERN = '/\A[A-Za-z0-9]{12}\z/';
+    /**
+     * The pinned catalog-identifier shape, shared with the HTTP boundary and the wishlist
+     * service so there is exactly one anchored pattern rather than copies that drift.
+     * `\A..\z`, never `^..$`: PCRE's `$` also matches immediately before a trailing
+     * newline, which would let "prod00000001\n" pass and then match nothing downstream.
+     */
+    public const UUID_PATTERN = '/\A[A-Za-z0-9]{12}\z/';
 
     /**
      * @param array<mixed> $values

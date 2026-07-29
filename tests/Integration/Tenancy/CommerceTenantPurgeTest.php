@@ -70,6 +70,7 @@ final class CommerceTenantPurgeTest extends CommerceTestCase
             'commerce_products', 'commerce_orders', 'commerce_sellers', 'commerce_carts',
             'commerce_categories', 'commerce_tags', 'commerce_attributes',
             'commerce_shipping_zones', 'commerce_refunds',
+            'commerce_wishlists', 'commerce_wishlist_items',
         ];
         foreach ($this->existingTenantTables() as $table) {
             $expected = in_array($table, $seededTenantTables, true) ? 1 : 0;
@@ -214,6 +215,21 @@ final class CommerceTenantPurgeTest extends CommerceTestCase
             'tenant_uuid' => $tenant,
             'slug' => 'tee-' . $tenant,
             'name' => 'Tee',
+        ]);
+        // Wishlist parent + item: listing the tables in the inventory is not coverage --
+        // an unseeded table passes the "expect 0 deletes" branch while proving nothing.
+        $this->connection->table('commerce_wishlists')->insert([
+            'uuid' => Utils::generateNanoID(),
+            'tenant_uuid' => $tenant,
+            'user_uuid' => substr('user' . $tenant, 0, 12),
+            'revision' => 0,
+        ]);
+        $this->connection->table('commerce_wishlist_items')->insert([
+            'uuid' => Utils::generateNanoID(),
+            'tenant_uuid' => $tenant,
+            'user_uuid' => substr('user' . $tenant, 0, 12),
+            'product_uuid' => $productUuid,
+            'position' => 0,
         ]);
         $this->connection->table('commerce_orders')->insert([
             'uuid' => $orderUuid,

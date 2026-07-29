@@ -411,9 +411,10 @@ final class CatalogBreadthTenancyTest extends CommerceTestCase
         // five MV5c-2 seller-webhook tables (`commerce_seller_webhook_endpoints`,
         // `commerce_seller_webhook_secrets`, `commerce_seller_webhook_events`,
         // `commerce_seller_webhook_deliveries`,
-        // `commerce_seller_webhook_endpoint_events`) added in migration 019),
-        // so a future accidental removal/addition is caught here as well as
-        // locally.
+        // `commerce_seller_webhook_endpoint_events`) added in migration 019,
+        // and the two wishlist tables (`commerce_wishlists`,
+        // `commerce_wishlist_items`) added in migration 020), so a future
+        // accidental removal/addition is caught here as well as locally.
         self::assertSame([
             'commerce_products',
             'commerce_variants',
@@ -433,6 +434,8 @@ final class CatalogBreadthTenancyTest extends CommerceTestCase
             'commerce_reviews',
             'commerce_customer_address_books',
             'commerce_customer_addresses',
+            'commerce_wishlists',
+            'commerce_wishlist_items',
             'commerce_downloads',
             'commerce_download_grants',
             'commerce_shipping_zones',

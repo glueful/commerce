@@ -38,6 +38,8 @@ use Glueful\Extensions\Commerce\Contracts\TaxCalculator;
 use Glueful\Extensions\Commerce\Customers\AddressBookRepository;
 use Glueful\Extensions\Commerce\Customers\AddressBookService;
 use Glueful\Extensions\Commerce\Customers\CustomerAggregationRepository;
+use Glueful\Extensions\Commerce\Wishlist\WishlistRepository;
+use Glueful\Extensions\Commerce\Wishlist\WishlistService;
 use Glueful\Extensions\Commerce\Discounts\DiscountRepository;
 use Glueful\Extensions\Commerce\Discounts\DiscountService;
 use Glueful\Extensions\Commerce\Events\Listeners\ProviderChargebackListener;
@@ -794,6 +796,10 @@ final class CommerceServiceProvider extends ServiceProvider
             ],
             AccountAddressController::class => [
                 'factory' => [self::class, 'makeAccountAddressController'],
+                'shared' => true,
+            ],
+            WishlistService::class => [
+                'factory' => [self::class, 'makeWishlistService'],
                 'shared' => true,
             ],
             ShippingZoneRepository::class => [
@@ -1575,6 +1581,15 @@ final class CommerceServiceProvider extends ServiceProvider
     {
         return new AddressBookService(
             $container->get(AddressBookRepository::class),
+            self::tenantResolver($container)
+        );
+    }
+
+    public static function makeWishlistService(ContainerInterface $container): WishlistService
+    {
+        return new WishlistService(
+            new WishlistRepository(),
+            $container->get(ProductRepository::class),
             self::tenantResolver($container)
         );
     }
