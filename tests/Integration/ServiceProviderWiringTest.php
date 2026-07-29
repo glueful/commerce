@@ -250,6 +250,9 @@ final class ServiceProviderWiringTest extends CommerceTestCase
     private function expectedServiceIds(): array
     {
         return [
+            \Glueful\Extensions\Commerce\Wishlist\WishlistService::class,
+            \Glueful\Extensions\Commerce\Orders\GuestOrderClaimService::class,
+            \Glueful\Extensions\Commerce\Http\Storefront\AccountWishlistController::class,
             ProductRepository::class,
             VariantRepository::class,
             CatalogService::class,

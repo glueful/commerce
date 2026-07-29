@@ -227,6 +227,7 @@ final class MarketplaceRegressionTest extends CommerceTestCase
      */
     private const PRE_MV1_ROUTE_MANIFEST = [
         'DELETE /commerce/account/addresses/{uuid}',
+        'DELETE /commerce/account/wishlist/{productUuid}',
         'DELETE /commerce/admin/addons/{uuid}',
         'DELETE /commerce/admin/attribute-values/{uuid}',
         'DELETE /commerce/admin/attributes/{uuid}',
@@ -245,6 +246,7 @@ final class MarketplaceRegressionTest extends CommerceTestCase
         'DELETE /commerce/cart/discount',
         'DELETE /commerce/cart/lines/{uuid}',
         'GET /commerce/account/addresses',
+        'GET /commerce/account/wishlist',
         'GET /commerce/admin/attributes',
         'GET /commerce/admin/attributes/{uuid}',
         'GET /commerce/admin/categories',
@@ -313,6 +315,8 @@ final class MarketplaceRegressionTest extends CommerceTestCase
         'PATCH /commerce/admin/variants/{uuid}',
         'PATCH /commerce/cart/lines/{uuid}',
         'POST /commerce/account/addresses',
+        'POST /commerce/account/wishlist',
+        'POST /commerce/account/wishlist/import',
         'POST /commerce/admin/attributes',
         'POST /commerce/admin/attributes/{uuid}/values',
         'POST /commerce/admin/categories',
@@ -372,7 +376,7 @@ final class MarketplaceRegressionTest extends CommerceTestCase
         sort($manifest);
 
         self::assertSame(self::PRE_MV1_ROUTE_MANIFEST, $manifest);
-        self::assertCount(129, $manifest);
+        self::assertCount(133, $manifest);
 
         foreach ($manifest as $route) {
             self::assertDoesNotMatchRegularExpression('#^\S+ /commerce/admin/marketplace#', $route);
