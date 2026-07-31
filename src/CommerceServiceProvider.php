@@ -33,6 +33,7 @@ use Glueful\Extensions\Commerce\Catalog\VariantRepository;
 use Glueful\Extensions\Commerce\Cart\CartPruner;
 use Glueful\Extensions\Commerce\Cart\CartRepository;
 use Glueful\Extensions\Commerce\Cart\CartService;
+use Glueful\Extensions\Commerce\Contracts\OrderPaymentReturnUrlProvider;
 use Glueful\Extensions\Commerce\Contracts\ShippingRateProvider;
 use Glueful\Extensions\Commerce\Contracts\TaxCalculator;
 use Glueful\Extensions\Commerce\Customers\AddressBookRepository;
@@ -1127,8 +1128,39 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(ProductRepository::class),
             $container->get(SellerOrderRepository::class),
             webhooks: $container->get(SellerWebhookOutboxPublisher::class),
-            attemptAuthority: self::makeCheckoutAttemptAuthority($container)
+            attemptAuthority: self::makeCheckoutAttemptAuthority($container),
+            returnUrls: self::makeOrderPaymentReturnUrlProvider($container),
+            logger: self::makeOptionalLogger($container)
         );
+    }
+
+    /** The bound app logger when present (same guarded idiom as {@see self::makeCheckoutPresentation()}). */
+    private static function makeOptionalLogger(ContainerInterface $container): ?LoggerInterface
+    {
+        if (!$container->has(LoggerInterface::class)) {
+            return null;
+        }
+
+        $logger = $container->get(LoggerInterface::class);
+
+        return $logger instanceof LoggerInterface ? $logger : null;
+    }
+
+    /**
+     * Soft-resolved, same pattern as {@see self::makeCheckoutAttemptAuthority()}: Commerce never
+     * binds an {@see OrderPaymentReturnUrlProvider} itself — a host-bound provider is used when
+     * present, otherwise `CheckoutService` gets null and payables carry no return-URL metadata.
+     */
+    public static function makeOrderPaymentReturnUrlProvider(
+        ContainerInterface $container
+    ): ?OrderPaymentReturnUrlProvider {
+        if (!$container->has(OrderPaymentReturnUrlProvider::class)) {
+            return null;
+        }
+
+        $provider = $container->get(OrderPaymentReturnUrlProvider::class);
+
+        return $provider instanceof OrderPaymentReturnUrlProvider ? $provider : null;
     }
 
     /**

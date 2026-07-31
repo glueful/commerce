@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Added
+- **Payment payable metadata + host-bound return URLs** — `CheckoutService::initiatePayment()`
+  now feeds payvia's payable metadata convention: the payer `email` on every payable (Paystack
+  requires it at initialize), and `callback_url`/`cancel_url` from a new optional
+  `Glueful\Extensions\Commerce\Contracts\OrderPaymentReturnUrlProvider` a HOST app may bind
+  (commerce is headless and cannot know the storefront's return pages). The provider receives the
+  COMPLETED order row (order number final), so one path serves initial placement, durable replay,
+  and `retryPayment()` — no placeholder substitution, no request-host trust. Returned URLs are
+  validated as absolute HTTPS; a throwing provider or invalid output is logged and degrades the
+  payment leg to the existing `init_failed` result without rolling back the placed order. Absent
+  binding = no URL metadata, byte-identical to today. `CheckoutService` also gains an optional
+  trailing `LoggerInterface` collaborator (NullLogger default) — every existing construction site
+  is unaffected.
+
 ## [1.8.0] - 2026-07-29 — Storefront Card Reads & Account Seams
 
 Additive throughout: two new tables, four new storefront routes inside the existing `auth` +
