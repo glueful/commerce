@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-08-01 — Host-Bound Payment Return URLs & Payable Metadata
+
+Additive throughout: one new optional contract, two optional trailing constructor collaborators,
+and richer payable metadata. No changes to existing endpoints, no default changes, no dependency
+changes — an install that binds nothing new behaves exactly as 1.8.0.
+
 ### Added
 - **Payment payable metadata + host-bound return URLs** — `CheckoutService::initiatePayment()`
   now feeds payvia's payable metadata convention: the payer `email` on every payable (Paystack
