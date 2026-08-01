@@ -9,6 +9,7 @@ use Glueful\Extensions\Commerce\Cart\CartService;
 use Glueful\Extensions\Commerce\Catalog\DownloadRepository;
 use Glueful\Extensions\Commerce\Catalog\ProductRepository;
 use Glueful\Extensions\Commerce\Contracts\LineTaxCalculator;
+use Glueful\Extensions\Commerce\Contracts\OrderPaymentReturnUrlProvider;
 use Glueful\Extensions\Commerce\Contracts\ShippingRateProvider;
 use Glueful\Extensions\Commerce\Contracts\TaxCalculator;
 use Glueful\Extensions\Commerce\Discounts\DiscountRepository;
@@ -38,6 +39,8 @@ use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Glueful\Events\EventService;
 use Glueful\Helpers\Utils;
 use Glueful\Validation\ValidationException;
+use Psr\Log\LoggerInterface;
+use Psr\Log\NullLogger;
 
 /**
  * **Marketplace shared checkout (design spec §2.7, MV2).** `$marketplaceMode`/
@@ -92,7 +95,11 @@ final class CheckoutService
         ?callable $afterOwnershipSnapshotHook = null,
         private ?SellerWebhookOutboxPublisher $webhooks = null,
         private ?CheckoutAttemptAuthority $attemptAuthority = null,
+        /** Host-bound browser-return URLs for hosted payments; absent = no URL metadata. */
+        private ?OrderPaymentReturnUrlProvider $returnUrls = null,
+        private ?LoggerInterface $logger = null,
     ) {
+        $this->logger ??= new NullLogger();
         $this->afterOwnershipSnapshotHook = $afterOwnershipSnapshotHook ?? static function (
             ApplicationContext $context,
             string $tenant,
@@ -884,15 +891,21 @@ final class CheckoutService
     /** @param array<string,mixed> $order @return array<string,mixed> */
     private function initiatePayment(ApplicationContext $context, array $order): array
     {
-        $payable = new PayableReference(
-            'commerce_order',
-            (string) $order['uuid'],
-            (int) $order['grand_total'],
-            (string) $order['currency'],
-            'Order ' . (string) $order['order_number']
-        );
-
         try {
+            // The payable metadata convention (payvia's initiation seam): the payer email always;
+            // browser return/cancel URLs when a host bound the provider. Resolved INSIDE the
+            // try/catch, on the COMPLETED order (number final) — so a throwing provider or
+            // invalid output degrades the payment leg to init_failed without rolling back the
+            // already-placed order. The same path serves placement, durable replay, and retry.
+            $payable = new PayableReference(
+                'commerce_order',
+                (string) $order['uuid'],
+                (int) $order['grand_total'],
+                (string) $order['currency'],
+                'Order ' . (string) $order['order_number'],
+                ['email' => (string) $order['email']] + $this->paymentReturnMetadata($context, $order)
+            );
+
             $initiation = $this->collector->initiate($context, $payable);
             $this->orders->recordEvent($context, (string) $order['uuid'], 'payment_initiated', [
                 'provider' => $initiation->provider,
@@ -910,6 +923,41 @@ final class CheckoutService
 
             return ['status' => 'init_failed', 'retryable' => true];
         }
+    }
+
+    /**
+     * The optional host-bound return/cancel URLs, validated as absolute HTTPS. Invalid output is
+     * logged and THROWN — the caller's try/catch maps it to init_failed (a misconfigured provider
+     * must degrade the payment leg loudly, never silently strip a URL the gateway then replaces
+     * with a dashboard-global default). Absent provider = no URL metadata.
+     *
+     * @param array<string,mixed> $order
+     * @return array{}|array{callback_url: string, cancel_url: string}
+     */
+    private function paymentReturnMetadata(ApplicationContext $context, array $order): array
+    {
+        if ($this->returnUrls === null) {
+            return [];
+        }
+
+        $urls = $this->returnUrls->urlsFor($context, $order);
+        if ($urls === null) {
+            return [];
+        }
+
+        foreach (['return', 'cancel'] as $key) {
+            $url = $urls[$key] ?? '';
+            $parts = is_string($url) ? parse_url($url) : false;
+            if (!is_array($parts) || ($parts['scheme'] ?? '') !== 'https' || ($parts['host'] ?? '') === '') {
+                ($this->logger ?? new NullLogger())->warning(
+                    'Order payment return-URL provider returned an invalid URL; payment initiation degraded',
+                    ['key' => $key, 'order' => (string) ($order['order_number'] ?? '')]
+                );
+                throw new \RuntimeException("Order payment return-URL provider returned an invalid '{$key}' URL");
+            }
+        }
+
+        return ['callback_url' => (string) $urls['return'], 'cancel_url' => (string) $urls['cancel']];
     }
 
     /**

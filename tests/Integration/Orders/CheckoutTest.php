@@ -11,6 +11,7 @@ use Glueful\Extensions\Commerce\Catalog\CatalogService;
 use Glueful\Extensions\Commerce\Catalog\DownloadRepository;
 use Glueful\Extensions\Commerce\Catalog\ProductRepository;
 use Glueful\Extensions\Commerce\Catalog\VariantRepository;
+use Glueful\Extensions\Commerce\Contracts\OrderPaymentReturnUrlProvider;
 use Glueful\Extensions\Commerce\Contracts\ShippingRateProvider;
 use Glueful\Extensions\Commerce\Contracts\TaxCalculator;
 use Glueful\Extensions\Commerce\Discounts\DiscountRepository;
@@ -33,6 +34,8 @@ use Glueful\Extensions\Contracts\Payments\PayableReference;
 use Glueful\Extensions\Contracts\Payments\PaymentCollector;
 use Glueful\Extensions\Contracts\Payments\PaymentInitiation;
 use Glueful\Validation\ValidationException;
+use Psr\Log\AbstractLogger;
+use Psr\Log\LoggerInterface;
 
 final class CheckoutTest extends CommerceTestCase
 {
@@ -135,6 +138,101 @@ final class CheckoutTest extends CommerceTestCase
             ->first());
     }
 
+    public function testPayableMetadataAlwaysCarriesTheBuyerEmail(): void
+    {
+        // The payable metadata convention (checkout-ui plan Task 2): the collector's gateway leg
+        // needs the payer email (Paystack requires it) — supplied on EVERY payable, provider or not.
+        [$token] = $this->seedCartWithLine('SKU-M1', 2, 1, 1000);
+        $recording = $this->recordingCollector();
+
+        $this->checkout($recording)->placeOrder($this->context, $token, $this->buyer(), $this->addresses(), 'std');
+
+        self::assertSame('buyer@example.com', $recording->last?->metadata['email']);
+        self::assertArrayNotHasKey('callback_url', $recording->last->metadata);
+        self::assertArrayNotHasKey('cancel_url', $recording->last->metadata);
+    }
+
+    public function testReturnUrlProviderFeedsCallbackAndCancelOnPlacementAndRetry(): void
+    {
+        // The host-bound provider receives the COMPLETED order (number final), so the same path
+        // serves initial placement, durable replay, and retryPayment — initiatePayment is the
+        // single call site all three share.
+        [$token] = $this->seedCartWithLine('SKU-M2', 2, 1, 1000);
+        $recording = $this->recordingCollector();
+
+        $placed = $this->checkoutWith($recording, $this->urlProvider())
+            ->placeOrder($this->context, $token, $this->buyer(), $this->addresses(), 'std');
+
+        $number = (string) $placed['order']['order_number'];
+        self::assertSame("https://shop.test/checkout/return/{$number}", $recording->last?->metadata['callback_url']);
+        self::assertSame("https://shop.test/checkout/cancel/{$number}", $recording->last->metadata['cancel_url']);
+        self::assertSame('buyer@example.com', $recording->last->metadata['email']);
+
+        $retryRecording = $this->recordingCollector();
+        $this->checkoutWith($retryRecording, $this->urlProvider())
+            ->retryPayment($this->context, $placed['order']);
+
+        self::assertSame("https://shop.test/checkout/return/{$number}", $retryRecording->last?->metadata['callback_url']);
+    }
+
+    public function testProviderExceptionMapsToInitFailedWithoutRollingBackTheOrder(): void
+    {
+        [$token] = $this->seedCartWithLine('SKU-M3', 2, 1, 1000);
+        $throwing = new class implements OrderPaymentReturnUrlProvider {
+            public function urlsFor(ApplicationContext $context, array $order): ?array
+            {
+                throw new \RuntimeException('resolver exploded');
+            }
+        };
+
+        $placed = $this->checkoutWith($this->recordingCollector(), $throwing)
+            ->placeOrder($this->context, $token, $this->buyer(), $this->addresses(), 'std');
+
+        self::assertSame('pending_payment', $placed['order']['status']);
+        self::assertSame('init_failed', $placed['payment']['status']);
+        self::assertNotNull($this->connection->table('commerce_order_events')
+            ->where('type', '=', 'payment_init_failed')
+            ->first());
+    }
+
+    public function testInvalidProviderOutputMapsToInitFailedAndLogs(): void
+    {
+        [$token] = $this->seedCartWithLine('SKU-M4', 2, 1, 1000);
+        $insecure = new class implements OrderPaymentReturnUrlProvider {
+            public function urlsFor(ApplicationContext $context, array $order): ?array
+            {
+                return ['return' => 'http://insecure.test/return', 'cancel' => 'https://shop.test/cancel'];
+            }
+        };
+        $logger = new class extends AbstractLogger {
+            /** @var list<string> */
+            public array $messages = [];
+
+            public function log($level, string|\Stringable $message, array $context = []): void
+            {
+                $this->messages[] = (string) $message;
+            }
+        };
+
+        $placed = $this->checkoutWith($this->recordingCollector(), $insecure, $logger)
+            ->placeOrder($this->context, $token, $this->buyer(), $this->addresses(), 'std');
+
+        self::assertSame('init_failed', $placed['payment']['status']);
+        self::assertSame('pending_payment', $placed['order']['status']);
+        self::assertNotSame([], $logger->messages, 'invalid provider output must be logged');
+    }
+
+    public function testAbsentProviderAddsNoUrlMetadata(): void
+    {
+        [$token] = $this->seedCartWithLine('SKU-M5', 2, 1, 1000);
+        $recording = $this->recordingCollector();
+
+        $this->checkoutWith($recording, null)
+            ->placeOrder($this->context, $token, $this->buyer(), $this->addresses(), 'std');
+
+        self::assertSame(['email' => 'buyer@example.com'], $recording->last?->metadata);
+    }
+
     public function testExpiryRestocksAndCancels(): void
     {
         [$token, $variantUuid] = $this->seedCartWithLine('SKU-E', 3, 2, 1000);
@@ -165,6 +263,66 @@ final class CheckoutTest extends CommerceTestCase
             $this->connection->table('commerce_orders')
                 ->where('uuid', '=', $placed['order']['uuid'])
                 ->first()['guest_token_hash']
+        );
+    }
+
+    /** @return PaymentCollector&object{last: ?PayableReference} */
+    private function recordingCollector(): PaymentCollector
+    {
+        return new class implements PaymentCollector {
+            public ?PayableReference $last = null;
+
+            public function initiate(ApplicationContext $context, PayableReference $payable): PaymentInitiation
+            {
+                $this->last = $payable;
+
+                return new PaymentInitiation('test', 'manual', ['instructions' => 'recorded']);
+            }
+        };
+    }
+
+    private function urlProvider(): OrderPaymentReturnUrlProvider
+    {
+        return new class implements OrderPaymentReturnUrlProvider {
+            public function urlsFor(ApplicationContext $context, array $order): ?array
+            {
+                $number = (string) $order['order_number'];
+
+                return [
+                    'return' => 'https://shop.test/checkout/return/' . $number,
+                    'cancel' => 'https://shop.test/checkout/cancel/' . $number,
+                ];
+            }
+        };
+    }
+
+    private function checkoutWith(
+        PaymentCollector $collector,
+        ?OrderPaymentReturnUrlProvider $returnUrls,
+        ?LoggerInterface $logger = null,
+    ): CheckoutService {
+        return new CheckoutService(
+            $this->cart(),
+            new DiscountRepository(),
+            new DiscountService(new DiscountRepository(), new SentinelTenantResolver()),
+            new StockRepository(),
+            new PricingEngine(),
+            $this->shipping(),
+            $this->tax(),
+            new OrderNumberGenerator(),
+            new OrderRepository(),
+            new DownloadRepository(),
+            $collector,
+            new SentinelTenantResolver(),
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            $returnUrls,
+            $logger,
         );
     }
 
