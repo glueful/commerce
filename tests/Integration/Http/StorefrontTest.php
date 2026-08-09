@@ -29,6 +29,7 @@ use Glueful\Extensions\Commerce\Payments\ManualPaymentCollector;
 use Glueful\Extensions\Commerce\Pricing\PricingEngine;
 use Glueful\Extensions\Commerce\Pricing\ShippingQuote;
 use Glueful\Extensions\Commerce\Pricing\TaxQuote;
+use Glueful\Extensions\Commerce\Support\TokenHasher;
 use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
 use Glueful\Extensions\Commerce\Tests\Support\CommerceTestCase;
 use Glueful\Http\Exceptions\Client\NotFoundException;
@@ -103,6 +104,12 @@ final class StorefrontTest extends CommerceTestCase
      * this pins that a NULL row genuinely grants no guest access, for any header
      * value including one that would otherwise coincidentally hash-match an empty
      * credential.
+     *
+     * Positive control (review fix, minor): the SAME route/controller, against a
+     * row differing ONLY in `guest_token_hash`, DOES grant access when the header
+     * carries the matching raw token -- proving the negative result above isn't
+     * vacuous (a broken route, a controller that always 404s, etc.), it's genuinely
+     * the NULL value that denies access.
      */
     public function testNullGuestTokenHashGrantsNoGuestAccess(): void
     {
@@ -125,6 +132,32 @@ final class StorefrontTest extends CommerceTestCase
 
         $this->expectException(NotFoundException::class);
         $this->orderController()->show($req, 'ORD-WALKINNOACC');
+    }
+
+    public function testPositiveControlNonNullGuestTokenHashWithMatchingTokenGrantsAccess(): void
+    {
+        $rawToken = 'walkin-positive-control-raw-token';
+        $this->connection->table('commerce_orders')->insert([
+            'uuid' => 'walkinacc0001',
+            'tenant_uuid' => '',
+            'order_number' => 'ORD-WALKINACC1',
+            'status' => 'paid',
+            'fulfillment_status' => 'unfulfilled',
+            'email' => null,
+            'user_uuid' => null,
+            'guest_token_hash' => TokenHasher::hash($rawToken),
+            'currency' => 'USD',
+            'subtotal' => 1000,
+            'grand_total' => 1000,
+        ]);
+
+        $req = Request::create('/commerce/orders/ORD-WALKINACC1', 'GET');
+        $req->headers->set('X-Order-Token', $rawToken);
+
+        $response = $this->orderController()->show($req, 'ORD-WALKINACC1');
+
+        self::assertSame(200, $response->getStatusCode());
+        self::assertSame('ORD-WALKINACC1', $this->json($response)['data']['order_number']);
     }
 
     public function testCheckoutShortStockReturnsConflictShape(): void

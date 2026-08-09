@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Commerce\Orders;
 
 use Glueful\Bootstrap\ApplicationContext;
-use Glueful\Database\Exceptions\UniqueConstraintViolationException;
+use Glueful\Database\Exceptions\ConstraintViolationException;
 
 /**
  * Owns ALL access to `commerce_order_draft_attempts` (admin-order-creation
@@ -31,15 +31,24 @@ use Glueful\Database\Exceptions\UniqueConstraintViolationException;
  * of a raw driver error, and the caller can still commit further work of its
  * own afterward.
  *
- * {@see UniqueConstraintViolationException} (framework >= 1.76.0) is the
- * precise catch target: the framework's `QueryExecutor` classifies every
- * PDO failure through `ExceptionClassifier` before it reaches calling code,
- * and SQLite's extended result codes 2067/1555, MySQL's 1062, and
- * PostgreSQL's SQLSTATE 23505 are ALL mapped to this one type (see
- * `ExceptionClassifier::SQLSTATE_MAP`/`VENDOR_MAP`) -- so the same catch
- * clause is correct on every driver this codebase tests against. Any other
- * `\Throwable` (a genuinely unrelated insert failure) is never caught here
- * and propagates to the caller unchanged.
+ * Catch target: {@see ConstraintViolationException}, NOT its
+ * `UniqueConstraintViolationException` subclass. The framework does NOT enable
+ * `PDO::SQLITE_ATTR_EXTENDED_RESULT_CODES` (`ExceptionClassifier`'s own
+ * docblock), so on SQLite a duplicate-key insert reports the BARE vendor code
+ * 19 (`SQLITE_CONSTRAINT`) -- which `ExceptionClassifier::VENDOR_MAP['sqlite']`
+ * maps to the PARENT `ConstraintViolationException`, "kind unknowable without
+ * messages", never to `UniqueConstraintViolationException` (that needs the
+ * EXTENDED codes 2067/1555 this framework never turns on). Catching only the
+ * subclass would let every SQLite duplicate-key race escape uncaught as a raw
+ * 500. PostgreSQL's SQLSTATE 23505 and MySQL's vendor code 1062 both still map
+ * to `UniqueConstraintViolationException`, which IS a `ConstraintViolationException`,
+ * so this wider catch loses no coverage on either driver. The real
+ * discriminator is the winner re-read below, not the exception's exact
+ * subtype: catching the parent also catches a genuinely UNRELATED constraint
+ * failure on this same insert (e.g. a NOT NULL violation on some other
+ * column), but such a failure leaves no row behind under this
+ * `(tenant, idempotency_key)`, so `$winner === null` and the original
+ * exception is rethrown -- never silently misreported as a replay/mismatch.
  */
 final class DraftAttemptRepository
 {
@@ -76,7 +85,7 @@ final class DraftAttemptRepository
                     'status' => 'pending',
                 ]);
             });
-        } catch (UniqueConstraintViolationException $e) {
+        } catch (ConstraintViolationException $e) {
             // A concurrent claim for this (tenant, idempotency_key) won the race
             // between our lookup above and our own insert. Re-read and verify the
             // winner -- if it is genuinely not there (should be unreachable, since

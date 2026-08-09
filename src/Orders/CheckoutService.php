@@ -392,6 +392,16 @@ final class CheckoutService
             'addresses' => $addresses,
             'placed_at' => gmdate('Y-m-d H:i:s'),
             'marketplace_partitioned' => $partitioned,
+            // Admin-order-creation cycle 2, Task 6 (design spec §2.6/§2.9): written
+            // explicitly rather than left to `commerce_orders`' standing column
+            // defaults -- this is the ONLY place a storefront order is ever created,
+            // so its origin/mode are always these two literal values, never a guess.
+            // TODO(Task 9/10): the admin/draft order writer must set BOTH of these
+            // explicitly too ('admin' / the operator's chosen mode) -- never rely on
+            // this same standing default, which exists only for legacy-row backfill
+            // and defense-in-depth, not as a substitute for a real writer decision.
+            'origin' => 'storefront',
+            'fulfillment_mode' => 'delivery',
         ], $lines);
         $this->orders->recordEvent($context, $orderUuid, 'placed', ['number' => $number]);
 

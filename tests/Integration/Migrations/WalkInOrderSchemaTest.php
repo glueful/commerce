@@ -407,6 +407,107 @@ final class WalkInOrderSchemaTest extends CommerceTestCase
             1,
             $connection->table('commerce_orders')->where('uuid', '=', 'walkindwn02')->count()
         );
+
+        // Review fix (minor): the re-converged shape after up()->down()->up() must
+        // still enforce every guarantee migration 022 makes, not just accept NULLs --
+        // a duplicate non-null (tenant_uuid, order_number) is still rejected.
+        $connection->table('commerce_orders')->insert([
+            'uuid' => 'walkindwn03',
+            'tenant_uuid' => 'walkindwntn1',
+            'order_number' => 'ORD-WALKINDWN-1',
+            'currency' => 'USD',
+            'subtotal' => 100,
+            'grand_total' => 100,
+        ]);
+        try {
+            $connection->table('commerce_orders')->insert([
+                'uuid' => 'walkindwn04',
+                'tenant_uuid' => 'walkindwntn1',
+                'order_number' => 'ORD-WALKINDWN-1',
+                'currency' => 'USD',
+                'subtotal' => 100,
+                'grand_total' => 100,
+            ]);
+            self::fail('duplicate non-null (tenant_uuid, order_number) must still be rejected after up->down->up');
+        } catch (\PDOException) {
+            $this->addToAssertionCount(1);
+        }
+    }
+
+    /**
+     * Review fix (Important 1): `down()`'s precondition is that no `commerce_orders`
+     * row is relying on the nullable shape (a draft/walk-in row with a NULL
+     * `order_number`/`email`/`guest_token_hash`). Restoring NOT NULL against such a
+     * row must fail LOUDLY (never silently drop the row or invent a placeholder) AND
+     * leave the database EXACTLY as `up()` left it -- no partial column drops, and
+     * critically, `commerce_order_draft_attempts` must NOT have been dropped either,
+     * even though `down()` normally drops it (a real bug this test would have caught:
+     * an earlier draft of this migration dropped the ledger table via a SEPARATE,
+     * already-committed statement BEFORE the column-restoration step failed).
+     */
+    public function testDownFailsLoudlyAndNonDestructivelyWhenADraftRowExists(): void
+    {
+        $connection = $this->preMigrationConnection(['engine' => 'sqlite', 'sqlite' => ['primary' => ':memory:']]);
+        $migration = new AddWalkInOrderFieldsAndDraftAttemptLedger();
+        $schema = $connection->getSchemaBuilder();
+
+        $migration->up($schema);
+
+        // A draft order -- representable ONLY because this migration relaxed
+        // order_number to nullable.
+        $connection->table('commerce_orders')->insert([
+            'uuid' => 'walkindraft1',
+            'tenant_uuid' => '',
+            'order_number' => null,
+            'customer_name' => 'In-progress walk-in',
+            'currency' => 'USD',
+            'subtotal' => 100,
+            'grand_total' => 100,
+        ]);
+
+        try {
+            $migration->down($schema);
+            self::fail('down() must throw loudly when a draft row violates the restored NOT NULL constraint');
+        } catch (\Throwable) {
+            $this->addToAssertionCount(1);
+        }
+
+        // Non-destructive: every up()-added column is still there...
+        foreach (
+            ['phone_normalized', 'phone_display', 'customer_name', 'origin', 'fulfillment_mode', 'draft_revision']
+            as $column
+        ) {
+            self::assertTrue(
+                $schema->hasColumn('commerce_orders', $column),
+                "{$column} must survive a failed down() -- no partial column drops"
+            );
+        }
+        // ...and critically, the ledger table was never dropped either, even though
+        // down() normally drops it as its first step.
+        self::assertTrue(
+            $schema->hasTable('commerce_order_draft_attempts'),
+            'commerce_order_draft_attempts must survive a failed down() -- the whole rollback is one unit'
+        );
+
+        // The draft row itself is untouched.
+        $row = $connection->table('commerce_orders')->where('uuid', '=', 'walkindraft1')->first();
+        self::assertNotNull($row);
+        self::assertNull($row['order_number']);
+        self::assertSame('In-progress walk-in', $row['customer_name']);
+
+        // The database is still fully usable: a fresh draft insert still works.
+        $connection->table('commerce_orders')->insert([
+            'uuid' => 'walkindraft2',
+            'tenant_uuid' => '',
+            'order_number' => null,
+            'currency' => 'USD',
+            'subtotal' => 200,
+            'grand_total' => 200,
+        ]);
+        self::assertSame(
+            1,
+            $connection->table('commerce_orders')->where('uuid', '=', 'walkindraft2')->count()
+        );
     }
 
     // =====================================================================

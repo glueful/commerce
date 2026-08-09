@@ -54,6 +54,8 @@ final class StorefrontOrderProjectionTest extends CommerceTestCase
     private const METADATA_SENTINEL = 'ORDER_METADATA_LEAK_SENTINEL_DO_NOT_EXPOSE';
     private const GUEST_TOKEN_RAW = 'ord-proj-guest-token-raw-value';
     private const CUSTOMER_NAME_SENTINEL = 'RATCHET_LEAK_SENTINEL_CUSTOMER_NAME';
+    private const PHONE_NORMALIZED_SENTINEL = '+15550009999';
+    private const PHONE_DISPLAY_SENTINEL = '+1 (555) 000-9999 RATCHET_LEAK';
 
     /**
      * Every `commerce_orders` column that legitimately reaches the storefront wire, in the
@@ -148,6 +150,8 @@ final class StorefrontOrderProjectionTest extends CommerceTestCase
         self::assertStringNotContainsString(self::METADATA_SENTINEL, $raw);
         self::assertStringNotContainsString($seeded['guest_token_hash'], $raw);
         self::assertStringNotContainsString(self::CUSTOMER_NAME_SENTINEL, $raw);
+        self::assertStringNotContainsString(self::PHONE_NORMALIZED_SENTINEL, $raw);
+        self::assertStringNotContainsString(self::PHONE_DISPLAY_SENTINEL, $raw);
     }
 
     /**
@@ -186,6 +190,8 @@ final class StorefrontOrderProjectionTest extends CommerceTestCase
         self::assertStringNotContainsString(self::METADATA_SENTINEL, $raw);
         self::assertStringNotContainsString($seeded['guest_token_hash'], $raw);
         self::assertStringNotContainsString(self::CUSTOMER_NAME_SENTINEL, $raw);
+        self::assertStringNotContainsString(self::PHONE_NORMALIZED_SENTINEL, $raw);
+        self::assertStringNotContainsString(self::PHONE_DISPLAY_SENTINEL, $raw);
     }
 
     /** @return array{order_number: string, guest_token_hash: string} */
@@ -219,8 +225,8 @@ final class StorefrontOrderProjectionTest extends CommerceTestCase
             'addresses' => ['shipping' => ['country' => 'US'], 'billing' => ['country' => 'US']],
             'metadata' => ['note' => self::METADATA_SENTINEL],
             'customer_name' => self::CUSTOMER_NAME_SENTINEL,
-            'phone_normalized' => '+15551234999',
-            'phone_display' => '+1 (555) 123-4999',
+            'phone_normalized' => self::PHONE_NORMALIZED_SENTINEL,
+            'phone_display' => self::PHONE_DISPLAY_SENTINEL,
             'origin' => 'admin',
             'fulfillment_mode' => 'in_store',
             'draft_revision' => 7,

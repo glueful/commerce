@@ -53,6 +53,26 @@ use Glueful\Database\Schema\Interfaces\SchemaBuilderInterface;
  * up NULLs already sitting in an existing column), there is no separate
  * UPDATE step here.
  *
+ * Review fix (Important 2): `origin`/`fulfillment_mode` keep their STANDING
+ * column default rather than a backfill-then-drop-default two-step -- a
+ * genuine fail-open risk (a future insert that forgets either column silently
+ * records 'storefront'/'delivery' instead of erroring) that was deliberately
+ * accepted, not overlooked. Dropping the default is technically supported by
+ * this schema builder on every driver (confirmed against the generators), but
+ * `commerce_orders` already has a large, pre-existing body of test fixtures
+ * across this suite that insert rows directly and predate these two columns
+ * entirely -- dropping the default would turn EVERY one of them into a NOT
+ * NULL failure, a blast radius far outside a schema-only task's scope to
+ * safely sweep. Mitigation instead: the ONLY real production write path today
+ * ({@see \Glueful\Extensions\Commerce\Orders\CheckoutService}'s order insert)
+ * sets both columns EXPLICITLY, never relying on this default -- pinned by
+ * `Orders\CheckoutOriginFulfillmentModeTest`, which defeats the default at the
+ * schema level before exercising the real checkout path, so the test would
+ * fail if that call site ever regressed to omitting either field. A `TODO`
+ * at that call site flags that Task 9/10's admin/draft order writer must do
+ * the same (`origin: 'admin'`, an operator-chosen `fulfillment_mode`) rather
+ * than lean on this default either.
+ *
  * New table `commerce_order_draft_attempts` (engine-owned; the host's
  * `CheckoutAttemptAuthority` is deliberately NOT reused -- its completion
  * shape assumes an order reference plus a raw guest credential that a
@@ -157,32 +177,55 @@ final class AddWalkInOrderFieldsAndDraftAttemptLedger implements MigrationInterf
         }
     }
 
+    /**
+     * Rollback PRECONDITION (review fix, Important 1): `down()` requires that no
+     * `commerce_orders` row is currently relying on the nullable shape this
+     * migration introduced -- concretely, no row may have a NULL `order_number`,
+     * `email`, or `guest_token_hash` (an admin-created draft or finalized walk-in
+     * order). Restoring NOT NULL on any of the three against a row that violates
+     * it throws loudly (a real constraint failure, never silently swallowed) --
+     * this is intentional, not a gap: rollback must never invent a placeholder
+     * value or silently drop such a row's data to force convergence. Operators
+     * must cancel/finalize (assign a real number to) every admin draft before
+     * rolling this migration back.
+     *
+     * On failure, this method leaves the database EXACTLY as it was before
+     * `down()` was called -- both operations run inside one connection-level
+     * transaction (SQLite/PostgreSQL genuinely roll back the whole thing;
+     * MySQL's DDL auto-commits per statement regardless of any wrapping
+     * transaction, so the ordering below -- the failure-prone `alterTable()`
+     * BEFORE the unconditionally-safe `dropTableIfExists()` -- is what actually
+     * protects MySQL: a thrown exception from `alterTable()` means
+     * `commerce_order_draft_attempts` is never touched at all).
+     */
     public function down(SchemaBuilderInterface $schema): void
     {
-        $schema->dropTableIfExists('commerce_order_draft_attempts');
+        $schema->getConnection()->transaction(function () use ($schema): void {
+            $isSqlite = $schema->getConnection()->getDriverName() === 'sqlite';
+            $existingIndex = $isSqlite ? $this->tenantOrderNumberUniqueIndexName($schema) : null;
 
-        $isSqlite = $schema->getConnection()->getDriverName() === 'sqlite';
-        $existingIndex = $isSqlite ? $this->tenantOrderNumberUniqueIndexName($schema) : null;
+            $schema->alterTable('commerce_orders', function ($table) use ($isSqlite, $existingIndex): void {
+                if ($existingIndex !== null) {
+                    $table->dropIndex($existingIndex);
+                }
 
-        $schema->alterTable('commerce_orders', function ($table) use ($isSqlite, $existingIndex): void {
-            if ($existingIndex !== null) {
-                $table->dropIndex($existingIndex);
-            }
+                $table->dropColumn('draft_revision');
+                $table->dropColumn('fulfillment_mode');
+                $table->dropColumn('origin');
+                $table->dropColumn('customer_name');
+                $table->dropColumn('phone_display');
+                $table->dropColumn('phone_normalized');
 
-            $table->dropColumn('draft_revision');
-            $table->dropColumn('fulfillment_mode');
-            $table->dropColumn('origin');
-            $table->dropColumn('customer_name');
-            $table->dropColumn('phone_display');
-            $table->dropColumn('phone_normalized');
+                $table->modifyColumn('guest_token_hash')->string(64)->notNull();
+                $table->modifyColumn('email')->string(255)->notNull();
+                $table->modifyColumn('order_number')->string(64)->notNull();
 
-            $table->modifyColumn('guest_token_hash')->string(64)->notNull();
-            $table->modifyColumn('email')->string(255)->notNull();
-            $table->modifyColumn('order_number')->string(64)->notNull();
+                if ($isSqlite) {
+                    $table->unique(['tenant_uuid', 'order_number']);
+                }
+            });
 
-            if ($isSqlite) {
-                $table->unique(['tenant_uuid', 'order_number']);
-            }
+            $schema->dropTableIfExists('commerce_order_draft_attempts');
         });
     }
 
