@@ -16,6 +16,7 @@ use Glueful\Extensions\Commerce\Contracts\TaxCalculator;
 use Glueful\Extensions\Commerce\Discounts\DiscountRepository;
 use Glueful\Extensions\Commerce\Discounts\DiscountService;
 use Glueful\Extensions\Commerce\Http\Admin\AdminOrderController;
+use Glueful\Extensions\Commerce\Http\DTOs\OrderListQuery;
 use Glueful\Extensions\Commerce\Http\Storefront\OrderController;
 use Glueful\Extensions\Commerce\Invoices\ConfigSellerIdentityProvider;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
@@ -28,8 +29,10 @@ use Glueful\Extensions\Commerce\Payments\ManualPaymentCollector;
 use Glueful\Extensions\Commerce\Pricing\PricingEngine;
 use Glueful\Extensions\Commerce\Pricing\ShippingQuote;
 use Glueful\Extensions\Commerce\Pricing\TaxQuote;
+use Glueful\Extensions\Commerce\Support\TokenHasher;
 use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
 use Glueful\Extensions\Commerce\Tests\Support\CommerceTestCase;
+use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Symfony\Component\HttpFoundation\Request;
 
 /**
@@ -43,6 +46,189 @@ final class StorefrontOrderProjectionTest extends CommerceTestCase
     private const OPERATOR_REASON = 'ESCALATED_TO_TIER2_FRAUD_REVIEW_DO_NOT_LEAK';
     private const INTERNAL_NOTE_BODY = 'Customer flagged as high chargeback risk internally.';
     private const CUSTOMER_NOTE_BODY = 'Your package shipped a day late, sorry for the delay!';
+
+    /** Sentinel values seeded directly into columns that must NEVER reach the storefront wire. */
+    private const TENANT_SENTINEL = 'TENANTLEAK01';
+    private const METADATA_SENTINEL = 'ORDER_METADATA_LEAK_SENTINEL_DO_NOT_EXPOSE';
+    private const GUEST_TOKEN_RAW = 'ord-proj-guest-token-raw-value';
+
+    /**
+     * Every `commerce_orders` column that legitimately reaches the storefront wire, in the
+     * exact order `array_intersect_key` preserves. This is the RATCHET: a column added to
+     * `commerce_orders` (or dropped from the wire) must force a conscious edit HERE, not just
+     * inside the projection implementation -- enumerated literally, never sourced from the
+     * production FIELDS constant, so widening that constant alone can't silently relax this.
+     * Excluded on purpose: `id`, `tenant_uuid`, `guest_token_hash`, `marketplace_partitioned`,
+     * `fulfillment_revision`, `refund_revision`, `metadata` (an app-internal channel, same
+     * treatment as the storefront PRODUCT projection's `metadata` exclusion).
+     */
+    private const BASE_ORDER_FIELDS = [
+        'uuid',
+        'order_number',
+        'status',
+        'fulfillment_status',
+        'tracking_ref',
+        'email',
+        'user_uuid',
+        'currency',
+        'subtotal',
+        'discount_total',
+        'shipping_total',
+        'tax_total',
+        'grand_total',
+        'refunded_total',
+        'discount_code',
+        'shipping_method',
+        'addresses',
+        'placed_at',
+        'created_at',
+        'updated_at',
+    ];
+
+    /** Internal `commerce_orders` columns that must never appear on the storefront wire. */
+    private const INTERNAL_ORDER_COLUMNS = [
+        'id',
+        'tenant_uuid',
+        'guest_token_hash',
+        'marketplace_partitioned',
+        'fulfillment_revision',
+        'refund_revision',
+        'metadata',
+    ];
+
+    /**
+     * The ratchet: every column populated (sentinels in `metadata`, `tenant_uuid`, and the
+     * hash backing `guest_token_hash`) so a future column addition can't hide behind a NULL
+     * default. `show()` receives the fully enriched {@see \Glueful\Extensions\Commerce\Http\Storefront\OrderController::authorizedOrder()}
+     * result -- exactly the allowlisted base fields plus `refunds`/`notes`/`lines` -- and no
+     * sentinel value may appear anywhere in the raw serialized body.
+     */
+    public function testStorefrontShowExposesOnlyAllowlistedKeysAndNeverLeaksSentinels(): void
+    {
+        $userUuid = 'showprojuser';
+        $seeded = $this->seedFullyPopulatedOrder('showprojord1', self::TENANT_SENTINEL, $userUuid);
+
+        $request = Request::create('/commerce/orders/' . $seeded['order_number'], 'GET');
+        $request->attributes->set('user', ['uuid' => $userUuid]);
+
+        $response = $this->orderControllerForTenant(self::TENANT_SENTINEL)
+            ->show($request, $seeded['order_number']);
+        $raw = (string) $response->getContent();
+        $body = $this->json($response);
+
+        self::assertSame(200, $response->getStatusCode());
+        self::assertEqualsCanonicalizing(
+            array_merge(self::BASE_ORDER_FIELDS, ['refunds', 'notes', 'lines']),
+            array_keys($body['data'])
+        );
+
+        foreach (self::INTERNAL_ORDER_COLUMNS as $column) {
+            self::assertArrayNotHasKey(
+                $column,
+                $body['data'],
+                "internal column `{$column}` leaked onto the storefront `show` wire"
+            );
+        }
+
+        self::assertStringNotContainsString(self::TENANT_SENTINEL, $raw);
+        self::assertStringNotContainsString(self::METADATA_SENTINEL, $raw);
+        self::assertStringNotContainsString($seeded['guest_token_hash'], $raw);
+    }
+
+    /**
+     * `mine()` maps every listed item through the SAME allowlist as `show()` -- proven here
+     * against raw, unenriched `commerce_orders` rows (no `refunds`/`notes`/`lines` are ever
+     * attached by the listing path), which is exactly why `mine()` leaked every internal
+     * column, including `guest_token_hash` itself, before this projection existed.
+     */
+    public function testStorefrontMineMapsEveryOrderThroughTheSameAllowlist(): void
+    {
+        $userUuid = 'mineprojuser';
+        $seeded = $this->seedFullyPopulatedOrder('mineprojord1', self::TENANT_SENTINEL, $userUuid);
+
+        $request = Request::create('/commerce/orders', 'GET');
+        $request->attributes->set('user', ['uuid' => $userUuid]);
+
+        $response = $this->orderControllerForTenant(self::TENANT_SENTINEL)
+            ->mine(new OrderListQuery(), $request);
+        $raw = (string) $response->getContent();
+        $body = $this->json($response);
+
+        self::assertSame(200, $response->getStatusCode());
+        self::assertCount(1, $body['data']);
+        $item = $body['data'][0];
+
+        self::assertEqualsCanonicalizing(self::BASE_ORDER_FIELDS, array_keys($item));
+        foreach (self::INTERNAL_ORDER_COLUMNS as $column) {
+            self::assertArrayNotHasKey(
+                $column,
+                $item,
+                "internal column `{$column}` leaked onto the storefront `mine` wire"
+            );
+        }
+
+        self::assertStringNotContainsString(self::TENANT_SENTINEL, $raw);
+        self::assertStringNotContainsString(self::METADATA_SENTINEL, $raw);
+        self::assertStringNotContainsString($seeded['guest_token_hash'], $raw);
+    }
+
+    /** @return array{order_number: string, guest_token_hash: string} */
+    private function seedFullyPopulatedOrder(string $uuid, string $tenant, string $userUuid): array
+    {
+        $orderNumber = 'ORD-' . $uuid;
+        $guestTokenHash = TokenHasher::hash(self::GUEST_TOKEN_RAW);
+
+        (new OrderRepository())->insert($this->context, [
+            'uuid' => $uuid,
+            'tenant_uuid' => $tenant,
+            'order_number' => $orderNumber,
+            'status' => 'paid',
+            'fulfillment_status' => 'fulfilled',
+            'marketplace_partitioned' => false,
+            'fulfillment_revision' => 4,
+            'tracking_ref' => 'TRACK-REF-1',
+            'email' => 'buyer@example.com',
+            'user_uuid' => $userUuid,
+            'guest_token_hash' => $guestTokenHash,
+            'currency' => 'USD',
+            'subtotal' => 5000,
+            'discount_total' => 300,
+            'shipping_total' => 500,
+            'tax_total' => 200,
+            'grand_total' => 5400,
+            'refunded_total' => 100,
+            'refund_revision' => 2,
+            'discount_code' => 'SAVE10',
+            'shipping_method' => 'std',
+            'addresses' => ['shipping' => ['country' => 'US'], 'billing' => ['country' => 'US']],
+            'metadata' => ['note' => self::METADATA_SENTINEL],
+            'placed_at' => '2026-01-01 00:00:00',
+            'created_at' => '2026-01-01 00:00:00',
+            'updated_at' => '2026-01-02 00:00:00',
+        ]);
+
+        return ['order_number' => $orderNumber, 'guest_token_hash' => $guestTokenHash];
+    }
+
+    private function orderControllerForTenant(string $tenant): OrderController
+    {
+        return new OrderController(
+            $this->context,
+            new OrderRepository(),
+            $this->checkout(),
+            new class ($tenant) implements CurrentTenantResolver {
+                public function __construct(private string $tenant)
+                {
+                }
+
+                public function tenantUuid(ApplicationContext $context): string
+                {
+                    return $this->tenant;
+                }
+            },
+            new RefundRepository()
+        );
+    }
 
     public function testStorefrontShowExposesOnlySanitizedRefundsAndCustomerNotes(): void
     {

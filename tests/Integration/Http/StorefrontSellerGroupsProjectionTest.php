@@ -154,13 +154,14 @@ final class StorefrontSellerGroupsProjectionTest extends CommerceTestCase
         }
         self::assertStringNotContainsString('sellerAAAA01', $raw, 'seller_uuid must never leak into the raw body');
         self::assertStringNotContainsString('sellerBBBB01', $raw, 'seller_uuid must never leak into the raw body');
-        // The top-level order row has always echoed its own `tenant_uuid`
-        // (pre-existing, unrelated to MV2/Task 9); the assertion here is that
-        // seller_groups does NOT introduce a SECOND occurrence of it.
+        // The top-level order row used to echo its own `tenant_uuid` (pre-existing, unrelated
+        // to MV2/Task 9) until the storefront closed wire projection (StorefrontOrderProjection)
+        // started excluding it entirely -- zero occurrences now, from either the order or
+        // seller_groups.
         self::assertSame(
-            1,
+            0,
             substr_count($raw, self::TENANT),
-            'tenant_uuid must not additionally leak inside seller_groups'
+            'tenant_uuid must never leak, from the order OR seller_groups'
         );
         self::assertStringNotContainsString(
             'aggregate_allocated',
