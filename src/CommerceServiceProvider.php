@@ -154,6 +154,7 @@ use Glueful\Extensions\Commerce\Orders\Downloads\DownloadGrantRepository;
 use Glueful\Extensions\Commerce\Orders\Downloads\DownloadGrantService;
 use Glueful\Extensions\Commerce\Orders\Downloads\DownloadUrlSigner;
 use Glueful\Extensions\Commerce\Orders\ExpiryService;
+use Glueful\Extensions\Commerce\Orders\OrderFulfillmentService;
 use Glueful\Extensions\Commerce\Orders\OrderPaymentService;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
 use Glueful\Extensions\Commerce\Orders\Refunds\RefundRepository;
@@ -358,6 +359,11 @@ final class CommerceServiceProvider extends ServiceProvider
             ],
             OrderPaymentService::class => [
                 'class' => OrderPaymentService::class,
+                'shared' => true,
+                'autowire' => true,
+            ],
+            OrderFulfillmentService::class => [
+                'class' => OrderFulfillmentService::class,
                 'shared' => true,
                 'autowire' => true,
             ],
