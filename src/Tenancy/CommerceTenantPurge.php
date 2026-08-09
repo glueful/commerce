@@ -48,6 +48,9 @@ final class CommerceTenantPurge
      * @var array<string,array{0:string,1:string}>
      */
     private const CHILD_TABLES = [
+        // Draft isolation (admin-order-creation cycle 2, Task 8): a tenant purge
+        // deliberately INCLUDES drafts -- purging a workspace must remove its
+        // unfinished paperwork too, so no OrderScope predicate belongs here.
         'commerce_order_lines' => ['order_uuid', 'commerce_orders'],
         'commerce_order_events' => ['order_uuid', 'commerce_orders'],
         'commerce_refund_lines' => ['refund_uuid', 'commerce_refunds'],

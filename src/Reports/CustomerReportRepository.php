@@ -6,6 +6,7 @@ namespace Glueful\Extensions\Commerce\Reports;
 
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Customers\CustomerAggregationRepository;
+use Glueful\Extensions\Commerce\Orders\OrderScope;
 use Glueful\Extensions\Commerce\Support\DateBucketSql;
 use Glueful\Extensions\Commerce\Support\ReportBoundarySql;
 
@@ -276,14 +277,18 @@ final class CustomerReportRepository
      */
     private function windowedOrdersDerivedTableSql(): string
     {
+        $notDraft = OrderScope::excludeDraftsSql();
+
         return '('
             . 'SELECT placed_at AS report_at, status, user_uuid, email '
             . 'FROM commerce_orders '
-            . 'WHERE tenant_uuid = ? AND placed_at IS NOT NULL AND placed_at >= ? AND placed_at < ? '
+            . 'WHERE ' . $notDraft
+            . ' AND tenant_uuid = ? AND placed_at IS NOT NULL AND placed_at >= ? AND placed_at < ? '
             . 'UNION ALL '
             . 'SELECT created_at AS report_at, status, user_uuid, email '
             . 'FROM commerce_orders '
-            . 'WHERE tenant_uuid = ? AND placed_at IS NULL AND created_at >= ? AND created_at < ?'
+            . 'WHERE ' . $notDraft
+            . ' AND tenant_uuid = ? AND placed_at IS NULL AND created_at >= ? AND created_at < ?'
             . ')';
     }
 
@@ -298,14 +303,16 @@ final class CustomerReportRepository
      */
     private function allTimeOrdersDerivedTableSql(): string
     {
+        $notDraft = OrderScope::excludeDraftsSql();
+
         return '('
             . 'SELECT placed_at AS report_at, status, user_uuid, email '
             . 'FROM commerce_orders '
-            . 'WHERE tenant_uuid = ? AND placed_at IS NOT NULL '
+            . 'WHERE ' . $notDraft . ' AND tenant_uuid = ? AND placed_at IS NOT NULL '
             . 'UNION ALL '
             . 'SELECT created_at AS report_at, status, user_uuid, email '
             . 'FROM commerce_orders '
-            . 'WHERE tenant_uuid = ? AND placed_at IS NULL'
+            . 'WHERE ' . $notDraft . ' AND tenant_uuid = ? AND placed_at IS NULL'
             . ')';
     }
 

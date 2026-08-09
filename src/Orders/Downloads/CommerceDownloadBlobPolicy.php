@@ -109,6 +109,16 @@ final class CommerceDownloadBlobPolicy implements BlobAccessPolicy
             ->count() > 0;
     }
 
+    /**
+     * Draft isolation (admin-order-creation cycle 2, Task 8): this join is
+     * deliberately NOT draft-excluded. A draft can never own a download grant
+     * (grants are minted from paid orders only), so the predicate would be a
+     * no-op today -- and if a draft-owned grant ever DID exist, dropping its
+     * row here would remove a reason to BLOCK deletion, i.e. fail OPEN on a
+     * blob still reachable by a live signed URL. A safety gate must not be
+     * narrowed by an isolation rule; the exclusion belongs upstream, on the
+     * order readers that decide what may become a grant at all.
+     */
     private function blocksDeletion(string $blobUuid): bool
     {
         if ($this->definitionReferences($blobUuid)) {

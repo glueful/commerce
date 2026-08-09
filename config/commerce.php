@@ -43,6 +43,14 @@ return [
         'expiry_minutes' => (int) env('COMMERCE_ORDER_EXPIRY_MINUTES', 60),
         // {seq} placeholder, zero-padded to 6.
         'number_format' => env('COMMERCE_ORDER_NUMBER_FORMAT', 'ORD-{seq}'),
+        // Admin-order-creation cycle 2, Task 8: how long an untouched admin
+        // ("walk-in") DRAFT order survives before the expiry cron cancels it.
+        // Measured from the draft's LAST TOUCH (`updated_at`, falling back to
+        // `created_at`), so an actively edited draft never expires under an
+        // operator. Deliberately generous and independent of `expiry_minutes`:
+        // that governs unpaid REAL orders holding reserved stock, this governs
+        // an operator's unfinished paperwork, which holds nothing.
+        'draft_ttl_days' => (int) env('COMMERCE_ORDER_DRAFT_TTL_DAYS', 30),
     ],
 
     'tenancy' => [

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Commerce\Reports;
 
 use Glueful\Bootstrap\ApplicationContext;
+use Glueful\Extensions\Commerce\Orders\OrderScope;
 
 /**
  * Products report's raw-SQL ranked-variant aggregate (design spec §4.2, plan
@@ -189,14 +190,18 @@ final class ProductSalesReportRepository
      */
     private function reportOrdersDerivedTableSql(): string
     {
+        $notDraft = OrderScope::excludeDraftsSql();
+
         return '('
             . 'SELECT uuid AS order_uuid, status '
             . 'FROM commerce_orders '
-            . 'WHERE tenant_uuid = ? AND placed_at IS NOT NULL AND placed_at >= ? AND placed_at < ? '
+            . 'WHERE ' . $notDraft
+            . ' AND tenant_uuid = ? AND placed_at IS NOT NULL AND placed_at >= ? AND placed_at < ? '
             . 'UNION ALL '
             . 'SELECT uuid AS order_uuid, status '
             . 'FROM commerce_orders '
-            . 'WHERE tenant_uuid = ? AND placed_at IS NULL AND created_at >= ? AND created_at < ?'
+            . 'WHERE ' . $notDraft
+            . ' AND tenant_uuid = ? AND placed_at IS NULL AND created_at >= ? AND created_at < ?'
             . ')';
     }
 

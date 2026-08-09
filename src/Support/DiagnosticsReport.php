@@ -186,6 +186,10 @@ final class DiagnosticsReport
             'commerce_stock_movements',
             'commerce_carts',
             'commerce_cart_lines',
+            // Draft isolation (admin-order-creation cycle 2, Task 8): this is a
+            // SCHEMA/health probe over raw table presence and row counts, not a
+            // business reader -- drafts are counted like every other row on
+            // purpose, so no OrderScope predicate belongs here.
             'commerce_orders',
             'commerce_order_lines',
             'commerce_refunds',

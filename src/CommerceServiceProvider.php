@@ -153,6 +153,7 @@ use Glueful\Extensions\Commerce\Orders\Downloads\DownloadAccessService;
 use Glueful\Extensions\Commerce\Orders\Downloads\DownloadGrantRepository;
 use Glueful\Extensions\Commerce\Orders\Downloads\DownloadGrantService;
 use Glueful\Extensions\Commerce\Orders\Downloads\DownloadUrlSigner;
+use Glueful\Extensions\Commerce\Orders\DraftCleanupService;
 use Glueful\Extensions\Commerce\Orders\ExpiryService;
 use Glueful\Extensions\Commerce\Orders\OrderFulfillmentService;
 use Glueful\Extensions\Commerce\Orders\OrderPaymentService;
@@ -673,6 +674,10 @@ final class CommerceServiceProvider extends ServiceProvider
             ],
             ExpiryService::class => [
                 'factory' => [self::class, 'makeExpiryService'],
+                'shared' => true,
+            ],
+            DraftCleanupService::class => [
+                'factory' => [self::class, 'makeDraftCleanupService'],
                 'shared' => true,
             ],
             OrderPaymentConfirmationHandler::class => [
@@ -1361,6 +1366,21 @@ final class CommerceServiceProvider extends ServiceProvider
             self::tenantResolver($container),
             $container->get(SellerOrderRepository::class),
             $container->get(SellerWebhookOutboxPublisher::class)
+        );
+    }
+
+    /**
+     * Admin-order-creation cycle 2, Task 8: the draft TTL sweep, driven by the
+     * same `commerce:orders:expire` cron command as {@see ExpiryService} but
+     * deliberately a separate service -- a draft cancellation releases no
+     * stock, dispatches no lifecycle event, and captures no seller webhook, so
+     * it takes none of the expiry service's marketplace collaborators.
+     */
+    public static function makeDraftCleanupService(ContainerInterface $container): DraftCleanupService
+    {
+        return new DraftCleanupService(
+            $container->get(OrderRepository::class),
+            self::tenantResolver($container)
         );
     }
 

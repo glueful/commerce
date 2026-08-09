@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Commerce\Marketplace;
 
 use Glueful\Bootstrap\ApplicationContext;
+use Glueful\Extensions\Commerce\Orders\OrderScope;
 
 /**
  * Read-only settlement-ledger reconciliation (design spec §2.11, MV3 Task 10):
@@ -165,13 +166,20 @@ final class ReconciliationService
     {
         // Joined through commerce_orders so a non-partitioned order's completed
         // refunds (which never post to the ledger at all -- §2.8) are never
-        // scanned here.
-        $refunds = db($context)->table('commerce_refunds')
-            ->join('commerce_orders', 'commerce_refunds.order_uuid', '=', 'commerce_orders.uuid')
-            ->select(['commerce_refunds.*'])
-            ->where('commerce_refunds.tenant_uuid', '=', $tenant)
-            ->where('commerce_refunds.status', '=', 'completed')
-            ->where('commerce_orders.marketplace_partitioned', '=', true)
+        // scanned here. Draft isolation (admin-order-creation cycle 2, Task 8):
+        // the shared predicate is applied even though a draft can neither be
+        // partitioned nor carry a completed refund -- this is an enumerated
+        // `commerce_orders` reader, so it states its scope explicitly rather
+        // than relying on two upstream invariants staying true.
+        $refunds = OrderScope::excludeDrafts(
+            db($context)->table('commerce_refunds')
+                ->join('commerce_orders', 'commerce_refunds.order_uuid', '=', 'commerce_orders.uuid')
+                ->select(['commerce_refunds.*'])
+                ->where('commerce_refunds.tenant_uuid', '=', $tenant)
+                ->where('commerce_refunds.status', '=', 'completed')
+                ->where('commerce_orders.marketplace_partitioned', '=', true),
+            'commerce_orders.status'
+        )
             ->orderBy('commerce_refunds.id', 'ASC')
             ->get();
 

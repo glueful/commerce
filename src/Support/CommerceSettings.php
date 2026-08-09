@@ -53,6 +53,18 @@ final class CommerceSettings
         return self::intValue($context, 'commerce.orders.expiry_minutes', 60);
     }
 
+    /**
+     * Admin-order-creation cycle 2, Task 8: the draft-order TTL, in days, that
+     * {@see \Glueful\Extensions\Commerce\Orders\DraftCleanupService::cancelStale()}
+     * sweeps against. Same defensive-cast contract as every sibling here -- a
+     * malformed override falls through to config rather than reaching the
+     * cutoff arithmetic.
+     */
+    public static function draftTtlDays(ApplicationContext $context): int
+    {
+        return self::intValue($context, 'commerce.orders.draft_ttl_days', 30);
+    }
+
     public static function cartTtlDays(ApplicationContext $context): int
     {
         return self::intValue($context, 'commerce.cart.ttl_days', 30);

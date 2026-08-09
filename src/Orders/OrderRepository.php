@@ -29,36 +29,70 @@ final class OrderRepository
      * their stored amounts are integers in the order's currency, so the first order ever placed
      * is the moment the store currency stops being safely changeable. (Catalog prices alone
      * don't lock: during setup a merchant's own draft prices are theirs to reinterpret.)
+     *
+     * Admin-order-creation cycle 2, Task 8: DRAFTS DON'T LOCK either, for the
+     * exact same reason catalog prices don't -- an unfinalized draft is the
+     * merchant's own scratch work, not recorded money history. A store whose
+     * only "orders" are drafts is still in setup and its currency is still
+     * freely changeable ({@see OrderScope}).
      */
     public function anyExistsForTenant(ApplicationContext $context, string $tenant): bool
     {
-        $rows = db($context)->table('commerce_orders')
-            ->select(['uuid'])
-            ->where('tenant_uuid', '=', $tenant)
+        $rows = OrderScope::excludeDrafts(
+            db($context)->table('commerce_orders')
+                ->select(['uuid'])
+                ->where('tenant_uuid', '=', $tenant)
+        )
             ->limit(1)
             ->get();
 
         return $rows !== [];
     }
 
-    /** @return array<string,mixed>|null */
-    public function findByUuid(ApplicationContext $context, string $tenant, string $uuid): ?array
-    {
-        $row = db($context)->table('commerce_orders')
+    /**
+     * Finalized-order lookup. `$includeDrafts` is the ONLY way to resolve a
+     * draft row through this repository (admin-order-creation cycle 2, Task 8)
+     * -- every pre-existing caller (admin show/cancel/fulfill, refunds,
+     * downloads, payment confirmation, chargebacks, marketplace) keeps the
+     * default and therefore fail-closes to its own non-revealing 404 when
+     * handed a draft uuid. Only the admin draft surfaces (Task 9) and the
+     * finalization path (Task 10) opt in.
+     *
+     * @return array<string,mixed>|null
+     */
+    public function findByUuid(
+        ApplicationContext $context,
+        string $tenant,
+        string $uuid,
+        bool $includeDrafts = false
+    ): ?array {
+        $query = db($context)->table('commerce_orders')
             ->where('tenant_uuid', '=', $tenant)
-            ->where('uuid', '=', $uuid)
-            ->first();
+            ->where('uuid', '=', $uuid);
+        if (!$includeDrafts) {
+            OrderScope::excludeDrafts($query);
+        }
+
+        $row = $query->first();
 
         return $row === null ? null : $this->decodeJson($row);
     }
 
-    /** @return array<string,mixed>|null */
+    /**
+     * Number-keyed lookup -- the storefront's only order entry point. A draft
+     * carries a NULL `order_number` by construction, so it could not match a
+     * bound string anyway; the explicit exclusion is defense in depth, so this
+     * surface stays draft-free even if a number were ever stamped early.
+     *
+     * @return array<string,mixed>|null
+     */
     public function findByNumber(ApplicationContext $context, string $tenant, string $number): ?array
     {
-        $row = db($context)->table('commerce_orders')
-            ->where('tenant_uuid', '=', $tenant)
-            ->where('order_number', '=', $number)
-            ->first();
+        $row = OrderScope::excludeDrafts(
+            db($context)->table('commerce_orders')
+                ->where('tenant_uuid', '=', $tenant)
+                ->where('order_number', '=', $number)
+        )->first();
 
         return $row === null ? null : $this->decodeJson($row);
     }
@@ -69,8 +103,9 @@ final class OrderRepository
      */
     public function listFor(ApplicationContext $context, string $tenant, array $filters = []): array
     {
-        $query = db($context)->table('commerce_orders')
-            ->where('tenant_uuid', '=', $tenant)
+        $query = OrderScope::excludeDrafts(
+            db($context)->table('commerce_orders')->where('tenant_uuid', '=', $tenant)
+        )
             ->orderBy('created_at', 'DESC');
         if (isset($filters['status'])) {
             $query->where('status', '=', (string) $filters['status']);
@@ -87,6 +122,12 @@ final class OrderRepository
      *     `LOWER(TRIM(email))` matches the already-normalized value, scoped to
      *     `user_uuid IS NULL` so a linked order never double-counts under both
      *     its owner's user-keyed listing and its old guest email.
+     * @param bool $includeDrafts admin-order-creation cycle 2, Task 8: drafts are
+     *     excluded from this listing unless explicitly requested. Note the
+     *     ordering -- the exclusion is applied BEFORE the `status` filter, so
+     *     `['status' => 'draft']` on the ordinary orders surface returns an
+     *     empty page rather than acting as a back door; only this flag opens
+     *     the draft surface (Task 9's admin draft listing).
      * @return array{items: list<array<string,mixed>>, total: int}
      */
     public function paginatedFor(
@@ -95,9 +136,15 @@ final class OrderRepository
         array $filters,
         int $page,
         int $perPage,
+        bool $includeDrafts = false,
     ): array {
         $count = db($context)->table('commerce_orders')->where('tenant_uuid', '=', $tenant);
         $rows = db($context)->table('commerce_orders')->where('tenant_uuid', '=', $tenant);
+
+        if (!$includeDrafts) {
+            OrderScope::excludeDrafts($count);
+            OrderScope::excludeDrafts($rows);
+        }
 
         foreach (['status', 'user_uuid'] as $field) {
             if (isset($filters[$field])) {
@@ -133,15 +180,19 @@ final class OrderRepository
      * download-URL mint, claims the order this way before reading any state or
      * capacity; validation and capacity reads only ever happen after the claim
      * succeeds. A full-refund completion and a mint therefore serialize on the same
-     * row. Returns false for an unknown or cross-tenant order.
+     * row. Returns false for an unknown or cross-tenant order -- and, since
+     * Task 8, for a DRAFT: a draft has no money history to mutate, so every
+     * refund/mint surface fail-closes to its own 404 without needing its own
+     * status check.
      */
     public function claimOrderFinancialMutation(ApplicationContext $context, string $tenant, string $uuid): bool
     {
+        $notDraft = OrderScope::excludeDraftsSql();
         $affected = db($context)->table('commerce_orders')->executeModification(
-            <<<'SQL'
+            <<<SQL
 UPDATE commerce_orders
 SET refund_revision = refund_revision + 1, updated_at = ?
-WHERE tenant_uuid = ? AND uuid = ?
+WHERE tenant_uuid = ? AND uuid = ? AND {$notDraft}
 SQL,
             [
                 db($context)->getDriver()->formatDateTime(),
@@ -165,15 +216,18 @@ SQL,
      * spec §4). Unlike that sibling, this THROWS rather than returning a
      * bool: every caller in the fulfillment chain treats an unknown or
      * cross-tenant order identically (a non-revealing 404), so there is no
-     * caller that needs to distinguish/handle a false return.
+     * caller that needs to distinguish/handle a false return. Task 8 folds
+     * DRAFTS into that same non-revealing 404 -- nothing may be fulfilled
+     * before it is an order.
      */
     public function claimFulfillmentMutation(ApplicationContext $context, string $tenant, string $uuid): void
     {
+        $notDraft = OrderScope::excludeDraftsSql();
         $affected = db($context)->table('commerce_orders')->executeModification(
-            <<<'SQL'
+            <<<SQL
 UPDATE commerce_orders
 SET fulfillment_revision = fulfillment_revision + 1, updated_at = ?
-WHERE tenant_uuid = ? AND uuid = ?
+WHERE tenant_uuid = ? AND uuid = ? AND {$notDraft}
 SQL,
             [
                 db($context)->getDriver()->formatDateTime(),
@@ -194,15 +248,17 @@ SQL,
      * overwrite an existing owner. Returns false for an unknown/cross-tenant
      * order, an order that's already linked, or a race lost to a concurrent
      * linker — the CLI caller treats any of those as "nothing changed" and
-     * reports it, never a hard failure.
+     * reports it, never a hard failure. Task 8 adds drafts to that list: a
+     * draft carries no email to match on and is not a guest order at all.
      */
     public function linkGuestToUser(ApplicationContext $context, string $tenant, string $uuid, string $userUuid): bool
     {
+        $notDraft = OrderScope::excludeDraftsSql();
         $affected = db($context)->table('commerce_orders')->executeModification(
-            <<<'SQL'
+            <<<SQL
 UPDATE commerce_orders
 SET user_uuid = ?, updated_at = ?
-WHERE tenant_uuid = ? AND uuid = ? AND user_uuid IS NULL
+WHERE tenant_uuid = ? AND uuid = ? AND user_uuid IS NULL AND {$notDraft}
 SQL,
             [$userUuid, db($context)->getDriver()->formatDateTime(), $tenant, $uuid]
         );
@@ -210,7 +266,19 @@ SQL,
         return $affected === 1;
     }
 
-    /** @param array<string,mixed> $changes */
+    /**
+     * The generic lifecycle CAS. Reads drafts on purpose (`includeDrafts:
+     * true`) -- `draft -> canceled` is a perfectly ordinary transition that
+     * runs through here -- but REFUSES the one pair that must never be reached
+     * generically: `draft -> pending_payment`. That pair is legal in
+     * {@see OrderStateMachine} yet belongs exclusively to
+     * {@see self::finalizeDraftTransition()}, so finalization can only ever
+     * happen through the single audited path that owns it (Task 10's
+     * `DraftFinalizationService`). The rejection fires BEFORE any write, so a
+     * refused finalize leaves neither a status change nor an audit row.
+     *
+     * @param array<string,mixed> $changes
+     */
     public function transition(
         ApplicationContext $context,
         string $tenant,
@@ -218,13 +286,19 @@ SQL,
         string $to,
         array $changes = []
     ): void {
-        $order = $this->findByUuid($context, $tenant, $uuid);
+        $order = $this->findByUuid($context, $tenant, $uuid, true);
         if ($order === null) {
             throw new \RuntimeException('Order not found.');
         }
 
         $from = (string) $order['status'];
         OrderStateMachine::assertTransition($from, $to);
+
+        if ($from === OrderScope::DRAFT && $to === 'pending_payment') {
+            throw new \DomainException(
+                'Draft finalization must go through finalizeDraftTransition(), not transition().'
+            );
+        }
 
         unset($changes['tenant_uuid'], $changes['uuid'], $changes['status']);
         $changes['status'] = $to;
@@ -241,6 +315,54 @@ SQL,
         }
 
         $this->recordEvent($context, $uuid, 'status:' . $to);
+    }
+
+    /**
+     * The DEDICATED draft-finalization compare-and-set (admin-order-creation
+     * cycle 2, Task 8, design spec §2.7) -- the only code path in the engine
+     * that may perform `draft -> pending_payment`; {@see self::transition()}
+     * refuses that pair outright.
+     *
+     * CALLER CONTRACT (enforced by convention + this docblock, since no caller
+     * exists yet): the ONLY permitted caller is Task 10's
+     * `DraftFinalizationService`, inside the finalize transaction that also
+     * stamps the order number, customer identity, and `placed_at`. Nothing
+     * else -- no controller, no console command, no listener -- may call this.
+     * A second caller would mean a second definition of "finalized", which is
+     * exactly what the dedicated path exists to prevent.
+     *
+     * Semantics: `WHERE ... AND status = 'draft'` makes this a genuine
+     * compare-and-set. Two concurrent finalizations of the same draft cannot
+     * both win -- the loser matches zero rows and throws, whether it lost to a
+     * concurrent finalize, a concurrent draft cancellation, an unknown uuid,
+     * or a cross-tenant one. It deliberately does NOT read `draft_revision`:
+     * that counter guards draft EDITS (optimistic concurrency on the draft
+     * body), and finalization is guarded by the status flip itself, so a
+     * finalize never has to be retried merely because a concurrent edit bumped
+     * the revision.
+     *
+     * Records the same `status:pending_payment` audit row `transition()` would
+     * have, so the finalized order's event trail is indistinguishable from an
+     * ordinary one; the draft-side story lives in the
+     * {@see \Glueful\Extensions\Commerce\Orders\Events\DraftOrderEvents} rows
+     * already on the order.
+     */
+    public function finalizeDraftTransition(ApplicationContext $context, string $tenant, string $uuid): void
+    {
+        $affected = db($context)->table('commerce_orders')->executeModification(
+            <<<'SQL'
+UPDATE commerce_orders
+SET status = 'pending_payment', updated_at = ?
+WHERE tenant_uuid = ? AND uuid = ? AND status = 'draft'
+SQL,
+            [db($context)->getDriver()->formatDateTime(), $tenant, $uuid]
+        );
+
+        if ($affected !== 1) {
+            throw new \DomainException('Draft is no longer finalizable; re-read the draft and retry.');
+        }
+
+        $this->recordEvent($context, $uuid, 'status:pending_payment');
     }
 
     /**
@@ -312,6 +434,14 @@ SQL,
      * the trusted, full-visibility surface; storefront-facing reads must filter by
      * `visibility` themselves.
      *
+     * Draft isolation (Task 8): CALLER-GATED, deliberately NOT draft-excluding.
+     * The join exists for tenant scoping, not order selection -- every caller
+     * has already resolved the order through a draft-aware finder
+     * ({@see self::findByUuid()}), so excluding drafts a second time here would
+     * buy nothing and would break Task 9's admin draft-detail surface, which
+     * legitimately reads a draft's own
+     * {@see \Glueful\Extensions\Commerce\Orders\Events\DraftOrderEvents} trail.
+     *
      * @return list<array<string,mixed>>
      */
     public function eventsForOrder(ApplicationContext $context, string $tenant, string $orderUuid): array
@@ -334,6 +464,10 @@ SQL,
      * `option_values` json is decoded (design spec §4) — every caller
      * (invoice-data, storefront/admin order projections) gets already-decoded
      * `addons` and `option_values` arrays, never the raw JSON string.
+     *
+     * Draft isolation (Task 8): CALLER-GATED for the same reason as
+     * {@see self::eventsForOrder()} -- the join is tenant scoping, not order
+     * selection, and Task 9's draft editor reads a draft's lines through here.
      *
      * @return list<array<string,mixed>>
      */
@@ -518,13 +652,14 @@ SQL,
         string $productUuid,
         int $limit
     ): array {
+        $notDraft = OrderScope::excludeDraftsSql('o');
         $uuidRows = db($context)->table('commerce_orders')->executeRaw(
-            <<<'SQL'
+            <<<SQL
 SELECT o.uuid AS uuid, MAX(COALESCE(o.placed_at, o.created_at)) AS report_time
 FROM commerce_orders o
 JOIN commerce_order_lines l ON l.order_uuid = o.uuid
 JOIN commerce_variants v ON v.uuid = l.variant_uuid
-WHERE o.tenant_uuid = ? AND v.product_uuid = ?
+WHERE o.tenant_uuid = ? AND v.product_uuid = ? AND {$notDraft}
 GROUP BY o.uuid
 ORDER BY report_time DESC
 LIMIT ?
@@ -536,8 +671,9 @@ SQL,
         }
 
         $orderedUuids = array_map(static fn (array $row): string => (string) $row['uuid'], $uuidRows);
-        $rows = db($context)->table('commerce_orders')
-            ->where('tenant_uuid', '=', $tenant)
+        $rows = OrderScope::excludeDrafts(
+            db($context)->table('commerce_orders')->where('tenant_uuid', '=', $tenant)
+        )
             ->whereIn('uuid', $orderedUuids)
             ->get();
 
@@ -565,6 +701,12 @@ SQL,
      * `created_at`, and revenue is the SUM of THIS product's line totals — attributed, never the
      * orders' grand totals. `$cutoff` is a PHP-computed UTC datetime string so the window
      * arithmetic is driver-portable (no DB date functions).
+     *
+     * Draft isolation (Task 8): the revenue-status ALLOWLIST below is strictly
+     * stronger than {@see OrderScope}'s exclusion -- `draft` is not in it and
+     * never can be (a draft is by definition not paid/fulfilled/refunded), so
+     * a redundant `status <> 'draft'` here would be pure noise. This note is
+     * the ratchet: the allowlist must stay an allowlist.
      *
      * @return array{orders: int, revenue_minor: int}
      */
