@@ -186,7 +186,7 @@ final class OrderFulfillmentServiceTest extends CommerceTestCase
         $pgConfig = $this->pgConfig();
         $connectionA = $this->migratedConnection($pgConfig);
         $contextA = $this->pgsqlContext($connectionA);
-        $tenant = 'orderfulrace1';
+        $tenant = 'orderfulrac1';
         $orderUuid = 'orderfulrace';
 
         $this->cleanupRaceOrder($connectionA, $orderUuid);
