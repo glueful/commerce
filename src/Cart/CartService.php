@@ -377,15 +377,34 @@ final class CartService
      *
      * Per-line resolution (variant lookup, buyer availability, unit-price
      * math, variant-derived option values, shipping/tax attachment, digital/
-     * marketplace classification) is delegated to
+     * seller classification) is delegated to
      * {@see \Glueful\Extensions\Commerce\Orders\PurchasableLineResolver::resolvePersistedSnapshot()} --
-     * this method's own job is purely cart-line bookkeeping: reading each
-     * persisted line, translating the resolver's generic `variant_uuid`
-     * errors back onto ITS OWN two established outcomes (a genuinely
-     * orphaned variant reference silently skipped, a buyer-unavailable
-     * product surfaced as a `lines.{n}` 422), and re-embedding the cart
-     * line's own uuid into a negative-unit-price backstop's message. The
-     * resolver call is BYTE-IDENTICAL to this method's pre-extraction body.
+     * this method's own job is cart-line bookkeeping: a batched shipping-
+     * class pre-pass (see below), reading each persisted line, translating
+     * the resolver's generic `variant_uuid` errors back onto ITS OWN two
+     * established outcomes (a genuinely orphaned variant reference silently
+     * skipped, a buyer-unavailable product surfaced as a `lines.{n}` 422),
+     * and re-embedding the cart line's own uuid into a negative-unit-price
+     * backstop's message.
+     *
+     * VALUE-identical to this method's pre-extraction body for any single
+     * outcome -- but NOT byte-identical for FAILURE ORDERING on a
+     * multi-line cart carrying more than one bad line: the pre-extraction
+     * body checked EVERY line's buyer-availability first (across the whole
+     * cart) before pricing ANY of them, so an unavailable-product error on
+     * line 3 always surfaced even when line 2 also had a corrupted negative
+     * price. This method now resolves one line fully (availability THEN
+     * price) before moving to the next, so whichever bad line comes FIRST
+     * in cart order wins, regardless of failure kind. A cart with at most
+     * one failing line -- the overwhelmingly common and only currently
+     * tested case -- is unaffected either way.
+     *
+     * Shipping-class slugs are batch-resolved ONCE for the whole cart (one
+     * `IN (...)` query via {@see \Glueful\Extensions\Commerce\Catalog\VariantRepository::findByUuids()}
+     * + {@see ShippingClassRepository::slugsByUuids()}, mirroring this
+     * method's pre-Task-7 body) and threaded into the resolver via its
+     * optional `$shippingClassSlugsByUuid` parameter -- never one lookup
+     * per line.
      *
      * `line_uuid` (the cart line's own uuid, for deterministic discount-allocation
      * ties, {@see \Glueful\Extensions\Commerce\Tax\DiscountAllocation}), `shipping_class`
@@ -430,9 +449,27 @@ final class CartService
     public function pricedLines(ApplicationContext $context, array $cart): array
     {
         $tenant = $this->tenants->tenantUuid($context);
+        $lines = $this->carts->lines($context, (string) $cart['uuid']);
+
+        // Batched shipping-class pre-pass (ONE query per cart, restoring
+        // this method's pre-Task-7 behavior): a lightweight variant-uuid
+        // batch JUST to collect distinct shipping_class_uuid values -- the
+        // resolver below still owns its OWN authoritative per-line variant
+        // lookup (availability, live price, etc.); this pre-pass exists
+        // ONLY so `commerce_shipping_classes` is never queried once per line.
+        $variantUuids = array_values(array_unique(array_map(
+            static fn (array $line): string => (string) $line['variant_uuid'],
+            $lines
+        )));
+        $variantsByUuid = $this->variants->findByUuids($context, $tenant, $variantUuids);
+        $classUuids = array_values(array_unique(array_filter(array_map(
+            static fn (array $variant): ?string => $variant['shipping_class_uuid'] ?? null,
+            $variantsByUuid
+        ))));
+        $slugsByUuid = $this->shippingClasses->slugsByUuids($context, $tenant, $classUuids);
 
         $priced = [];
-        foreach ($this->carts->lines($context, (string) $cart['uuid']) as $index => $line) {
+        foreach ($lines as $index => $line) {
             $snapshot = is_array($line['addons'] ?? null) ? $line['addons'] : [];
 
             try {
@@ -441,7 +478,8 @@ final class CartService
                     $tenant,
                     (string) $line['variant_uuid'],
                     (int) $line['quantity'],
-                    $snapshot
+                    $snapshot,
+                    $slugsByUuid
                 );
             } catch (AddonValidationException) {
                 throw new AddonValidationException(

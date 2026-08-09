@@ -24,19 +24,24 @@ namespace Glueful\Extensions\Commerce\Orders;
  * previously-persisted line's `addons_hash` is how a caller detects addon
  * drift (definition changed since the line was drafted).
  *
- * `isMarketplacePartitioned` mirrors ONLY the config-only, zero-query
- * marketplace INSTALL master switch
- * ({@see \Glueful\Extensions\Commerce\Marketplace\MarketplaceMode::installEnabled()}) --
- * the SAME fast-path signal `CheckoutService::placeOrder()` computes ONCE
- * (as `$marketplaceInstalled`) before ever touching a per-tenant row. The
- * per-tenant ACTIVATED state
- * ({@see \Glueful\Extensions\Commerce\Marketplace\MarketplaceMode::activeFor()})
- * is deliberately NOT re-resolved per line here: it is a workspace-level
- * concern `CheckoutService` already resolves exactly ONCE per checkout
- * (never once per line, {@see CommissionSnapshotTest}'s pinned
- * exactly-once-query assertion against `commerce_marketplace_settings`)--
- * duplicating that read inside a per-line resolver called once per cart line
- * would multiply it.
+ * `sellerUuid` is the genuine PER-LINE marketplace fact: the product's own
+ * `seller_uuid` column, riding the ALREADY-fetched buyer-available product
+ * row (zero new queries) -- `null` for an ordinary, non-marketplace-store
+ * product. This is deliberately NOT a resolved "is this line partitioned"
+ * boolean: whether a checkout/order is partitioned at all is an
+ * ORDER-LEVEL decision (`installEnabled($context) && activeFor($context,
+ * $tenant)`, {@see \Glueful\Extensions\Commerce\Marketplace\MarketplaceMode}),
+ * computed exactly ONCE per checkout by
+ * {@see \Glueful\Extensions\Commerce\Orders\CheckoutService::placeOrder()} --
+ * never once per line ({@see CommissionSnapshotTest}'s pinned
+ * exactly-once-query assertion against `commerce_marketplace_settings`
+ * would break if a per-line resolver re-queried it). A caller deciding
+ * whether THIS line participates in a partitioned order combines the two:
+ * `sellerUuid !== null && <that order-level decision>` -- the same
+ * composition `CheckoutService::partitionCheckout()` already performs
+ * (per-product `seller_uuid` presence, gated on the order already being
+ * partitioned), not something this resolver can decide alone since it never
+ * sees the whole cart/order in one call.
  */
 final readonly class ResolvedLine
 {
@@ -62,7 +67,7 @@ final readonly class ResolvedLine
         public ?int $commissionBps,
         public ?int $commissionFixed,
         public bool $isDigital,
-        public bool $isMarketplacePartitioned,
+        public ?string $sellerUuid,
     ) {
     }
 }

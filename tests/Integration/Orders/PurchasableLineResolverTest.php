@@ -19,6 +19,8 @@ use Glueful\Extensions\Commerce\Pricing\PricingEngine;
 use Glueful\Extensions\Commerce\Shipping\ShippingClassRepository;
 use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
 use Glueful\Extensions\Commerce\Tests\Support\CommerceTestCase;
+use Glueful\Extensions\Commerce\Tests\Support\QueryLoggingPdoStatement;
+use Glueful\Helpers\Utils;
 use Glueful\Validation\ValidationException;
 
 /**
@@ -26,15 +28,19 @@ use Glueful\Validation\ValidationException;
  * two typed entry points over the one private base extracted from
  * `CartService::pricedLines()`.
  *
- * - `resolvePersistedSnapshot()` (carts/checkout): byte-identical to
+ * - `resolvePersistedSnapshot()` (carts/checkout): value-identical to
  *   `pricedLines()`'s pre-extraction per-line output, and immune to an
  *   addon-definition edit made AFTER the snapshot it prices was persisted.
  * - `resolveSelections()` (admin drafts): resolves raw selections against
  *   CURRENT active addon definitions, so an edited definition IS picked up
  *   as a fresh, differently-hashed canonical snapshot -- drift a caller can
- *   detect by comparing hashes.
+ *   detect by comparing hashes. It ALSO rejects an unpurchasable product
+ *   type (`external`/`grouped`) -- `resolvePersistedSnapshot()` deliberately
+ *   does not, since a persisted cart line was already gated at add-time.
  * - Both share variant lookup / buyer-availability rejection, variant-only
- *   option values, and digital/marketplace classification.
+ *   option values, digital classification, and the raw per-line
+ *   `sellerUuid` fact (never a resolved partitioned boolean -- see
+ *   {@see \Glueful\Extensions\Commerce\Orders\ResolvedLine}'s docblock).
  */
 final class PurchasableLineResolverTest extends CommerceTestCase
 {
@@ -298,7 +304,7 @@ final class PurchasableLineResolverTest extends CommerceTestCase
     }
 
     // -----------------------------------------------------------------
-    // Digital / marketplace classification
+    // Digital classification / raw per-line seller identity
     // -----------------------------------------------------------------
 
     public function testIsDigitalTrueForADigitalProductFalseForPhysical(): void
@@ -315,26 +321,103 @@ final class PurchasableLineResolverTest extends CommerceTestCase
         self::assertSame('physical', $physical->type);
     }
 
-    public function testIsMarketplacePartitionedReflectsTheZeroQueryInstallSwitchOnly(): void
+    public function testSellerUuidIsNullForAnOrdinaryProductAndSetForASellerAttributedOneForBothMethods(): void
     {
-        ['variant_uuid' => $variantUuid] = $this->seedProduct('SKU-R11', 100, 5);
+        $this->activateMarketplace();
+        $this->seedSeller('sellerATTR001', 'active');
+        ['variant_uuid' => $ordinaryVariant] = $this->seedProduct('SKU-R11', 100, 5);
+        ['variant_uuid' => $attributedVariant] = $this->seedProduct('SKU-R12', 100, 5, null, null, 'sellerATTR001');
 
-        $off = $this->resolver()->resolvePersistedSnapshot($this->context, self::TENANT, $variantUuid, 1, []);
-        self::assertFalse($off->isMarketplacePartitioned, 'master switch off (default config)');
+        $ordinaryPersisted = $this->resolver()
+            ->resolvePersistedSnapshot($this->context, self::TENANT, $ordinaryVariant, 1, []);
+        $ordinarySelected = $this->resolver()
+            ->resolveSelections($this->context, self::TENANT, $ordinaryVariant, 1, []);
+        $attributedPersisted = $this->resolver()
+            ->resolvePersistedSnapshot($this->context, self::TENANT, $attributedVariant, 1, []);
+        $attributedSelected = $this->resolver()
+            ->resolveSelections($this->context, self::TENANT, $attributedVariant, 1, []);
 
-        // Master switch ON, but the tenant workspace was NEVER activated
-        // (no commerce_marketplace_settings row) -- installEnabled() is
-        // still the ONLY signal this flag reflects (see ResolvedLine's
-        // docblock for why activeFor() is deliberately not re-queried here).
-        $this->context->mergeConfigDefaults('commerce', ['marketplace' => ['enabled' => true]]);
-        $onButNotActivated = $this->resolver()->resolvePersistedSnapshot(
-            $this->context,
-            self::TENANT,
-            $variantUuid,
+        self::assertNull($ordinaryPersisted->sellerUuid);
+        self::assertNull($ordinarySelected->sellerUuid);
+        self::assertSame('sellerATTR001', $attributedPersisted->sellerUuid);
+        self::assertSame('sellerATTR001', $attributedSelected->sellerUuid);
+    }
+
+    // -----------------------------------------------------------------
+    // Shipping-class batching: exactly one query for a multi-line cart
+    // -----------------------------------------------------------------
+
+    public function testCartServicePricedLinesResolvesShippingClassesInExactlyOneQueryForAMultiLineCart(): void
+    {
+        $fragile = $this->seedShippingClass('fragile', 'Fragile');
+        $oversized = $this->seedShippingClass('oversized', 'Oversized');
+        $variantA = $this->seedProduct('SKU-QC1', 100, 5, $fragile)['variant_uuid'];
+        $variantB = $this->seedProduct('SKU-QC2', 100, 5, $oversized)['variant_uuid'];
+        $variantC = $this->seedProduct('SKU-QC3', 100, 5)['variant_uuid'];
+
+        $cartService = $this->cartService();
+        ['cart' => $cart] = $cartService->create($this->context);
+        $cartService->addLine($this->context, $cart, $variantA, 1);
+        $cartService->addLine($this->context, $cart, $variantB, 1);
+        $cartService->addLine($this->context, $cart, $variantC, 1);
+
+        $pdo = $this->connection->getPDO();
+        $pdo->setAttribute(\PDO::ATTR_STATEMENT_CLASS, [QueryLoggingPdoStatement::class]);
+        QueryLoggingPdoStatement::$queries = [];
+
+        $priced = $cartService->pricedLines($this->context, $cart);
+
+        self::assertCount(3, $priced);
+        $bySku = [];
+        foreach ($priced as $line) {
+            $bySku[$line['sku']] = $line['shipping_class'];
+        }
+        self::assertSame('fragile', $bySku['SKU-QC1']);
+        self::assertSame('oversized', $bySku['SKU-QC2']);
+        self::assertNull($bySku['SKU-QC3']);
+
+        $shippingClassQueries = array_values(array_filter(
+            QueryLoggingPdoStatement::$queries,
+            static fn (string $sql): bool => str_starts_with($sql, 'SELECT')
+                && str_contains($sql, 'commerce_shipping_classes')
+        ));
+        self::assertCount(
             1,
-            []
+            $shippingClassQueries,
+            'a 3-line cart referencing 2 distinct shipping classes must resolve them in ONE batched query'
         );
-        self::assertTrue($onButNotActivated->isMarketplacePartitioned);
+    }
+
+    // -----------------------------------------------------------------
+    // resolveSelections() rejects unpurchasable product types;
+    // resolvePersistedSnapshot() stays unaffected (already gated at add-time)
+    // -----------------------------------------------------------------
+
+    public function testResolveSelectionsRejectsAnExternalProductType(): void
+    {
+        $variantUuid = $this->seedExternalProductWithDirectlyInsertedVariant('SKU-R13');
+
+        try {
+            $this->resolver()->resolveSelections($this->context, self::TENANT, $variantUuid, 1, []);
+            self::fail('Expected ValidationException.');
+        } catch (ValidationException $e) {
+            self::assertSame(
+                ["Products of type 'external' cannot be purchased."],
+                $e->errorsFor('variant_uuid')
+            );
+        }
+    }
+
+    public function testResolvePersistedSnapshotStillResolvesAnExternalProductTypeUnchanged(): void
+    {
+        // resolvePersistedSnapshot() carries NO purchasability-type guard --
+        // a persisted cart line was already gated at add-time, and this path
+        // must stay unchanged from pricedLines()'s pre-extraction body.
+        $variantUuid = $this->seedExternalProductWithDirectlyInsertedVariant('SKU-R14');
+
+        $resolved = $this->resolver()->resolvePersistedSnapshot($this->context, self::TENANT, $variantUuid, 1, []);
+
+        self::assertSame('external', $resolved->type);
     }
 
     // -----------------------------------------------------------------
@@ -477,6 +560,47 @@ final class PurchasableLineResolverTest extends CommerceTestCase
         (new StockRepository())->increment($this->context, self::TENANT, $variantUuid, 5);
 
         return ['product_uuid' => (string) $product['uuid'], 'variant_uuid' => $variantUuid];
+    }
+
+    /**
+     * `CatalogService::createProduct()` itself refuses to attach variants to
+     * an `external`/`grouped` product ({@see \Glueful\Extensions\Commerce\Cart\CartService::assertVariantCanSupply()}'s
+     * own docblock: "a variant referencing one of them could still exist
+     * (e.g. seeded directly, or a future code path)") -- so this fixture
+     * creates the product NORMALLY (no variants key) and inserts the
+     * variant row DIRECTLY, exactly matching that documented scenario.
+     */
+    private function seedExternalProductWithDirectlyInsertedVariant(string $sku): string
+    {
+        $catalog = new CatalogService(
+            new ProductRepository(),
+            new VariantRepository(),
+            new SentinelTenantResolver(),
+            new StockRepository()
+        );
+        $product = $catalog->createProduct($this->context, [
+            'slug' => strtolower($sku),
+            'name' => $sku,
+            'type' => 'external',
+            'status' => 'active',
+            'metadata' => ['external_url' => 'https://example.com/' . strtolower($sku)],
+        ]);
+
+        $variantUuid = Utils::generateNanoID();
+        (new VariantRepository())->insert($this->context, [
+            'uuid' => $variantUuid,
+            'tenant_uuid' => self::TENANT,
+            'product_uuid' => (string) $product['uuid'],
+            'sku' => $sku,
+            'option_values' => [],
+            'price' => 100,
+            'currency' => 'USD',
+            'position' => 0,
+            'status' => 'active',
+        ]);
+        (new StockRepository())->increment($this->context, self::TENANT, $variantUuid, 5);
+
+        return $variantUuid;
     }
 
     private function createCheckboxAddon(string $productUuid, int $priceDelta): array

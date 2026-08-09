@@ -1079,8 +1079,7 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(VariantRepository::class),
             $container->get(ProductRepository::class),
             $container->get(AddonRepository::class),
-            $container->get(ShippingClassRepository::class),
-            $container->get(MarketplaceMode::class)
+            $container->get(ShippingClassRepository::class)
         );
     }
 
