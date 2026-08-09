@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## [1.9.1] - 2026-08-09 — Order Payable Constant & Invoice Currency Exponent
+
+Additive: one new shared constant, one new invoice-data field, one schema-version bump. No changes
+to existing endpoints, no default changes, no dependency changes.
+
+### Added
+- **`OrderPayable::TYPE` constant** (`Glueful\Extensions\Commerce\Payments\OrderPayable`) — the one
+  Commerce payable-type string (`'commerce_order'`), now consumed by every production call site that
+  previously re-declared the literal privately (`CheckoutService::initiatePayment()`,
+  `OrderPaymentConfirmationHandler::supports()`, `OrderNotifiable::getNotifiableType()`,
+  `RefundService::callAndFinalize()`, `ChargebackService::SUPPORTED_PAYABLE_TYPE`).
+- **`InvoiceData` gains `order.currency_exponent`** — derived from the order's own `currency`
+  through the existing `Money::exponentFor()` authority (never a second ISO map, never tenant
+  settings). An order whose stored currency isn't a recognized ISO 4217 code now throws rather than
+  silently defaulting the exponent to 2. `schema_version` bumps `1 → 2` to reflect the new field.
+
 ## [1.9.0] - 2026-08-01 — Host-Bound Payment Return URLs & Payable Metadata
 
 Additive throughout: one new optional contract, two optional trailing constructor collaborators,
