@@ -25,6 +25,7 @@ use Glueful\Extensions\Commerce\Marketplace\SellerAllocationCalculator;
 use Glueful\Extensions\Commerce\Marketplace\SellerOrderRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerWebhookOutboxPublisher;
+use Glueful\Extensions\Commerce\Payments\OrderPayable;
 use Glueful\Extensions\Commerce\Pricing\PricingEngine;
 use Glueful\Extensions\Commerce\Pricing\ShippingQuote;
 use Glueful\Extensions\Commerce\Pricing\TaxBreakdown;
@@ -898,7 +899,7 @@ final class CheckoutService
             // invalid output degrades the payment leg to init_failed without rolling back the
             // already-placed order. The same path serves placement, durable replay, and retry.
             $payable = new PayableReference(
-                'commerce_order',
+                OrderPayable::TYPE,
                 (string) $order['uuid'],
                 (int) $order['grand_total'],
                 (string) $order['currency'],

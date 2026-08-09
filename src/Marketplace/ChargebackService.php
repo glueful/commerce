@@ -6,6 +6,7 @@ namespace Glueful\Extensions\Commerce\Marketplace;
 
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
+use Glueful\Extensions\Commerce\Payments\OrderPayable;
 use Glueful\Extensions\Commerce\Support\LargestRemainder;
 use Glueful\Extensions\Contracts\Payments\ProviderChargebackEvent;
 
@@ -77,7 +78,7 @@ use Glueful\Extensions\Contracts\Payments\ProviderChargebackEvent;
 final class ChargebackService
 {
     /** The one Commerce payable type this service accepts (design spec §2.4). */
-    private const SUPPORTED_PAYABLE_TYPE = 'commerce_order';
+    private const SUPPORTED_PAYABLE_TYPE = OrderPayable::TYPE;
 
     public function __construct(
         private readonly OrderRepository $orders,
