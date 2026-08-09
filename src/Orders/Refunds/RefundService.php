@@ -15,6 +15,7 @@ use Glueful\Extensions\Commerce\Marketplace\SellerRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerWebhookOutboxPublisher;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
 use Glueful\Extensions\Commerce\Orders\OrderStateMachine;
+use Glueful\Extensions\Commerce\Payments\OrderPayable;
 use Glueful\Extensions\Contracts\Payments\PayableReference;
 use Glueful\Extensions\Contracts\Payments\RefundCollector;
 use Glueful\Extensions\Contracts\Payments\RefundRequest;
@@ -273,7 +274,7 @@ final class RefundService
             $result = $collector->refund(
                 $c,
                 new PayableReference(
-                    'commerce_order',
+                    OrderPayable::TYPE,
                     (string) $refund['order_uuid'],
                     (int) $refund['amount'],
                     (string) $refund['currency']

@@ -17,6 +17,7 @@ use Glueful\Extensions\Commerce\Discounts\DiscountRepository;
 use Glueful\Extensions\Commerce\Discounts\DiscountService;
 use Glueful\Extensions\Commerce\Http\Admin\AdminOrderController;
 use Glueful\Extensions\Commerce\Invoices\ConfigSellerIdentityProvider;
+use Glueful\Extensions\Commerce\Invoices\InvoiceData;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
 use Glueful\Extensions\Commerce\Orders\CheckoutService;
 use Glueful\Extensions\Commerce\Orders\OrderNumberGenerator;
@@ -73,7 +74,7 @@ final class InvoiceDataTest extends CommerceTestCase
         $data = $this->json($response)['data'];
 
         // schema
-        self::assertSame(1, $data['schema_version']);
+        self::assertSame(2, $data['schema_version']);
 
         // seller: no config set anywhere in this test -> present-as-null, never missing.
         self::assertSame(['name', 'address', 'tax_id'], array_keys($data['seller']));
@@ -87,8 +88,13 @@ final class InvoiceDataTest extends CommerceTestCase
         self::assertSame('US', $data['buyer']['addresses']['shipping']['country']);
 
         // order
+        self::assertSame(
+            ['number', 'dates', 'currency', 'currency_exponent', 'status'],
+            array_keys($data['order'])
+        );
         self::assertSame($order['order_number'], $data['order']['number']);
         self::assertSame('USD', $data['order']['currency']);
+        self::assertSame(2, $data['order']['currency_exponent']);
         self::assertSame('paid', $data['order']['status']);
         self::assertSame(['placed_at', 'created_at', 'updated_at'], array_keys($data['order']['dates']));
         self::assertNotEmpty($data['order']['dates']['created_at']);
@@ -170,6 +176,27 @@ final class InvoiceDataTest extends CommerceTestCase
         ], $data['seller']);
     }
 
+    public function testCurrencyExponentForGhsAndUsdIsTwo(): void
+    {
+        $ghs = InvoiceData::build($this->context, $this->minimalOrder('GHS'), [], [], $this->emptySeller());
+        self::assertSame(2, $ghs['order']['currency_exponent']);
+
+        $usd = InvoiceData::build($this->context, $this->minimalOrder('USD'), [], [], $this->emptySeller());
+        self::assertSame(2, $usd['order']['currency_exponent']);
+    }
+
+    public function testCurrencyExponentForJpyIsZero(): void
+    {
+        $jpy = InvoiceData::build($this->context, $this->minimalOrder('JPY'), [], [], $this->emptySeller());
+        self::assertSame(0, $jpy['order']['currency_exponent']);
+    }
+
+    public function testInvalidStoredCurrencyFailsLoudlyInsteadOfDefaultingToTwo(): void
+    {
+        $this->expectException(\RuntimeException::class);
+        InvoiceData::build($this->context, $this->minimalOrder('NOT_A_REAL_CURRENCY'), [], [], $this->emptySeller());
+    }
+
     public function testUnknownOrderReturns404(): void
     {
         $this->expectException(NotFoundException::class);
@@ -201,6 +228,33 @@ final class InvoiceDataTest extends CommerceTestCase
             Request::create('/commerce/admin/orders/' . $otherTenantOrder['uuid'] . '/invoice-data', 'GET'),
             (string) $otherTenantOrder['uuid']
         );
+    }
+
+    /** @return array<string,mixed> */
+    private function minimalOrder(string $currency): array
+    {
+        return [
+            'order_number' => 'ORD-EXPONENT-TEST',
+            'placed_at' => '2026-01-01 00:00:00',
+            'created_at' => '2026-01-01 00:00:00',
+            'updated_at' => '2026-01-01 00:00:00',
+            'currency' => $currency,
+            'status' => 'paid',
+            'email' => 'buyer@example.com',
+            'addresses' => null,
+            'subtotal' => 1000,
+            'discount_total' => 0,
+            'shipping_total' => 0,
+            'tax_total' => 0,
+            'grand_total' => 1000,
+            'refunded_total' => 0,
+        ];
+    }
+
+    /** @return array{name:?string,address:?string,tax_id:?string} */
+    private function emptySeller(): array
+    {
+        return ['name' => null, 'address' => null, 'tax_id' => null];
     }
 
     private function invoiceController(): AdminOrderController

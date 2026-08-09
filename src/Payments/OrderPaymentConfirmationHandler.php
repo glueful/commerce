@@ -23,7 +23,7 @@ final class OrderPaymentConfirmationHandler implements PaymentConfirmationHandle
 
     public function supports(string $payableType): bool
     {
-        return $payableType === 'commerce_order';
+        return $payableType === OrderPayable::TYPE;
     }
 
     public function confirmed(

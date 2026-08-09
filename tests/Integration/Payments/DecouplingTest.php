@@ -21,6 +21,7 @@ use Glueful\Extensions\Commerce\Orders\CheckoutService;
 use Glueful\Extensions\Commerce\Orders\OrderPaymentService;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
 use Glueful\Extensions\Commerce\Payments\ManualPaymentCollector;
+use Glueful\Extensions\Commerce\Payments\OrderPayable;
 use Glueful\Extensions\Commerce\Payments\OrderPaymentConfirmationHandler;
 use Glueful\Extensions\Commerce\Pricing\PricingEngine;
 use Glueful\Extensions\Commerce\Pricing\ShippingQuote;
@@ -123,6 +124,26 @@ final class DecouplingTest extends CommerceTestCase
         self::assertTrue($this->handler()->supports('commerce_order'));
     }
 
+    public function testPlacedOrderInitiatesPaymentWithTheSharedOrderPayableType(): void
+    {
+        $spy = new class implements PaymentCollector {
+            public ?PayableReference $captured = null;
+
+            public function initiate(ApplicationContext $context, PayableReference $payable): PaymentInitiation
+            {
+                $this->captured = $payable;
+
+                return new PaymentInitiation('spy', 'ok', ['reference' => 'r1']);
+            }
+        };
+
+        $this->placeSimpleOrder($spy);
+
+        self::assertNotNull($spy->captured);
+        self::assertSame(OrderPayable::TYPE, $spy->captured->type);
+        self::assertSame('commerce_order', $spy->captured->type);
+    }
+
     private function handler(): OrderPaymentConfirmationHandler
     {
         return new OrderPaymentConfirmationHandler(
@@ -133,7 +154,7 @@ final class DecouplingTest extends CommerceTestCase
     }
 
     /** @return array{order: array<string,mixed>, guest_token: string, payment: array<string,mixed>} */
-    private function placeSimpleOrder(): array
+    private function placeSimpleOrder(?PaymentCollector $collector = null): array
     {
         $catalog = new CatalogService(
             new ProductRepository(),
@@ -158,7 +179,7 @@ final class DecouplingTest extends CommerceTestCase
         ['cart' => $cart, 'token' => $token] = $this->cart()->create($this->context);
         $this->cart()->addLine($this->context, $cart, $variantUuid, 1);
 
-        return $this->checkout()->placeOrder(
+        return $this->checkout($collector)->placeOrder(
             $this->context,
             $token,
             ['email' => 'buyer@example.com', 'user_uuid' => null],
@@ -180,7 +201,7 @@ final class DecouplingTest extends CommerceTestCase
         );
     }
 
-    private function checkout(): CheckoutService
+    private function checkout(?PaymentCollector $collector = null): CheckoutService
     {
         return new CheckoutService(
             $this->cart(),
@@ -193,7 +214,7 @@ final class DecouplingTest extends CommerceTestCase
             new \Glueful\Extensions\Commerce\Orders\OrderNumberGenerator(),
             new OrderRepository(),
             new DownloadRepository(),
-            new ManualPaymentCollector(),
+            $collector ?? new ManualPaymentCollector(),
             new SentinelTenantResolver()
         );
     }

@@ -6,6 +6,7 @@ namespace Glueful\Extensions\Commerce\Invoices;
 
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Cart\AddonSnapshot;
+use Glueful\Extensions\Commerce\Support\Money;
 
 /**
  * Pure assembly of the versioned invoice-data payload (spec §7). No I/O: the
@@ -17,6 +18,12 @@ use Glueful\Extensions\Commerce\Cart\AddonSnapshot;
  * `refunds` list applies the completed-only filter and key whitelist itself
  * (never `reason` or any other refund column) — callers may pass every refund
  * row from `RefundRepository::listForOrder()` regardless of status.
+ *
+ * `order.currency_exponent` (schema_version 2+) is derived from `order.currency`
+ * through {@see Money::exponentFor()} -- the one currency-exponent authority --
+ * never a second ISO map and never tenant settings. An order whose stored
+ * currency isn't a recognized ISO 4217 code is an invariant violation: this
+ * method throws rather than silently defaulting the exponent to 2.
  */
 final class InvoiceData
 {
@@ -36,8 +43,16 @@ final class InvoiceData
         array $refunds,
         array $seller
     ): array {
+        $currency = (string) ($order['currency'] ?? '');
+        $currencyExponent = Money::exponentFor($currency);
+        if ($currencyExponent === null) {
+            throw new \RuntimeException(
+                "InvoiceData::build() cannot derive a currency exponent for unrecognized currency '{$currency}'."
+            );
+        }
+
         return [
-            'schema_version' => 1,
+            'schema_version' => 2,
             'seller' => [
                 'name' => $seller['name'] ?? null,
                 'address' => $seller['address'] ?? null,
@@ -55,6 +70,7 @@ final class InvoiceData
                     'updated_at' => $order['updated_at'] ?? null,
                 ],
                 'currency' => $order['currency'] ?? null,
+                'currency_exponent' => $currencyExponent,
                 'status' => $order['status'] ?? null,
             ],
             'lines' => array_values(array_map(

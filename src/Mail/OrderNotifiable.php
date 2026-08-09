@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Glueful\Extensions\Commerce\Mail;
 
+use Glueful\Extensions\Commerce\Payments\OrderPayable;
 use Glueful\Notifications\Contracts\Notifiable;
 
 /**
@@ -36,7 +37,7 @@ final class OrderNotifiable implements Notifiable
 
     public function getNotifiableType(): string
     {
-        return 'commerce_order';
+        return OrderPayable::TYPE;
     }
 
     public function shouldReceiveNotification(string $notificationType, string $channel): bool
