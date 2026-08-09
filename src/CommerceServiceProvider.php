@@ -157,6 +157,7 @@ use Glueful\Extensions\Commerce\Orders\ExpiryService;
 use Glueful\Extensions\Commerce\Orders\OrderFulfillmentService;
 use Glueful\Extensions\Commerce\Orders\OrderPaymentService;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
+use Glueful\Extensions\Commerce\Orders\PurchasableLineResolver;
 use Glueful\Extensions\Commerce\Orders\Refunds\RefundRepository;
 use Glueful\Extensions\Commerce\Orders\Refunds\RefundService;
 use Glueful\Extensions\Commerce\Payments\ManualPaymentCollector;
@@ -327,6 +328,10 @@ final class CommerceServiceProvider extends ServiceProvider
             ],
             CartRepository::class => [
                 'class' => CartRepository::class,
+                'shared' => true,
+            ],
+            PurchasableLineResolver::class => [
+                'factory' => [self::class, 'makePurchasableLineResolver'],
                 'shared' => true,
             ],
             CartService::class => [
@@ -1063,7 +1068,19 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(PricingEngine::class),
             self::tenantResolver($container),
             $container->get(AddonRepository::class),
-            $container->get(ShippingClassRepository::class)
+            $container->get(ShippingClassRepository::class),
+            $container->get(PurchasableLineResolver::class)
+        );
+    }
+
+    public static function makePurchasableLineResolver(ContainerInterface $container): PurchasableLineResolver
+    {
+        return new PurchasableLineResolver(
+            $container->get(VariantRepository::class),
+            $container->get(ProductRepository::class),
+            $container->get(AddonRepository::class),
+            $container->get(ShippingClassRepository::class),
+            $container->get(MarketplaceMode::class)
         );
     }
 

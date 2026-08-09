@@ -11,6 +11,7 @@ use Glueful\Extensions\Commerce\Catalog\VariantRepository;
 use Glueful\Extensions\Commerce\Discounts\DiscountRepository;
 use Glueful\Extensions\Commerce\Discounts\DiscountService;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
+use Glueful\Extensions\Commerce\Orders\PurchasableLineResolver;
 use Glueful\Extensions\Commerce\Pricing\PricingEngine;
 use Glueful\Extensions\Commerce\Shipping\ShippingClassRepository;
 use Glueful\Extensions\Commerce\Support\CommerceSettings;
@@ -43,9 +44,16 @@ final class CartService
         private CurrentTenantResolver $tenants,
         private ?AddonRepository $addons = null,
         private ?ShippingClassRepository $shippingClasses = null,
+        private ?PurchasableLineResolver $lineResolver = null,
     ) {
         $this->addons ??= new AddonRepository();
         $this->shippingClasses ??= new ShippingClassRepository();
+        $this->lineResolver ??= new PurchasableLineResolver(
+            $this->variants,
+            $this->products,
+            $this->addons,
+            $this->shippingClasses
+        );
     }
 
     /** @return array{cart: array<string,mixed>, token: string} */
@@ -367,6 +375,18 @@ final class CartService
      * loudly here is a deliberate defensive backstop against a corrupted row
      * rather than something callers are expected to catch routinely.
      *
+     * Per-line resolution (variant lookup, buyer availability, unit-price
+     * math, variant-derived option values, shipping/tax attachment, digital/
+     * marketplace classification) is delegated to
+     * {@see \Glueful\Extensions\Commerce\Orders\PurchasableLineResolver::resolvePersistedSnapshot()} --
+     * this method's own job is purely cart-line bookkeeping: reading each
+     * persisted line, translating the resolver's generic `variant_uuid`
+     * errors back onto ITS OWN two established outcomes (a genuinely
+     * orphaned variant reference silently skipped, a buyer-unavailable
+     * product surfaced as a `lines.{n}` 422), and re-embedding the cart
+     * line's own uuid into a negative-unit-price backstop's message. The
+     * resolver call is BYTE-IDENTICAL to this method's pre-extraction body.
+     *
      * `line_uuid` (the cart line's own uuid, for deterministic discount-allocation
      * ties, {@see \Glueful\Extensions\Commerce\Tax\DiscountAllocation}), `shipping_class`
      * (the variant's resolved nullable shipping-class slug, for
@@ -375,11 +395,7 @@ final class CartService
      * tax class, `null` normalizing to `'standard'`, for
      * {@see \Glueful\Extensions\Commerce\Tax\DbTaxCalculator}'s per-line rate
      * selection) are ADDITIVE keys layered onto the existing shape -- nothing
-     * else changes, `addons`/`addons_hash` untouched. `tax_class` needs no
-     * extra query -- the product row is already fetched to build this line.
-     * The shipping-class slug resolution is ONE batched query per cart
-     * (mirrors {@see ShippingClassRepository::slugsByUuids()}'s batch
-     * pattern), never one lookup per line.
+     * else changes, `addons`/`addons_hash` untouched.
      *
      * A line whose variant no longer resolves live (design spec Layer 6 §2:
      * product soft delete) is NOT silently dropped -- unlike a genuinely
@@ -414,69 +430,59 @@ final class CartService
     public function pricedLines(ApplicationContext $context, array $cart): array
     {
         $tenant = $this->tenants->tenantUuid($context);
-        $rows = [];
+
+        $priced = [];
         foreach ($this->carts->lines($context, (string) $cart['uuid']) as $index => $line) {
-            $variant = $this->variants->findByUuid($context, $tenant, (string) $line['variant_uuid']);
-            if ($variant === null) {
-                continue;
-            }
-            $product = $this->products->findBuyerAvailableByUuid($context, $tenant, (string) $variant['product_uuid']);
-            if ($product === null) {
+            $snapshot = is_array($line['addons'] ?? null) ? $line['addons'] : [];
+
+            try {
+                $resolved = $this->lineResolver->resolvePersistedSnapshot(
+                    $context,
+                    $tenant,
+                    (string) $line['variant_uuid'],
+                    (int) $line['quantity'],
+                    $snapshot
+                );
+            } catch (AddonValidationException) {
+                throw new AddonValidationException(
+                    "Persisted add-on snapshot for cart line '" . (string) $line['uuid']
+                    . "' computes a negative unit price."
+                );
+            } catch (ValidationException $e) {
+                if ($e->firstError('variant_uuid') === 'Variant not found.') {
+                    // Variant rows are never soft-deleted -- reaching this means
+                    // genuine orphan data, silently skipped exactly as before.
+                    continue;
+                }
+
                 throw ValidationException::forField(
                     "lines.{$index}",
                     'This product is no longer available.'
                 );
             }
 
-            $rows[] = ['line' => $line, 'variant' => $variant, 'product' => $product];
-        }
-
-        $classUuids = array_values(array_unique(array_filter(array_map(
-            static fn (array $row): ?string => $row['variant']['shipping_class_uuid'] ?? null,
-            $rows
-        ))));
-        $slugsByUuid = $this->shippingClasses->slugsByUuids($context, $tenant, $classUuids);
-
-        $priced = [];
-        foreach ($rows as $row) {
-            $line = $row['line'];
-            $variant = $row['variant'];
-            $product = $row['product'];
-
-            $snapshot = is_array($line['addons'] ?? null) ? $line['addons'] : [];
-            $unitPrice = (int) $variant['price'] + AddonSnapshot::delta($snapshot);
-            if ($unitPrice < 0) {
-                throw new AddonValidationException(
-                    "Persisted add-on snapshot for cart line '" . (string) $line['uuid']
-                    . "' computes a negative unit price."
-                );
-            }
-
-            $classUuid = $variant['shipping_class_uuid'] ?? null;
-
             $priced[] = [
                 'line_uuid' => (string) $line['uuid'],
-                'product_uuid' => (string) $product['uuid'],
-                'variant_uuid' => (string) $variant['uuid'],
-                'unit_price' => $unitPrice,
-                'currency' => (string) $variant['currency'],
-                'quantity' => (int) $line['quantity'],
-                'sku' => (string) $variant['sku'],
-                'product_name' => (string) $product['name'],
-                'option_values' => $variant['option_values'] ?? [],
-                'type' => (string) ($product['type'] ?? 'physical'),
-                'addons' => $snapshot,
-                'shipping_class' => $classUuid !== null ? ($slugsByUuid[$classUuid] ?? null) : null,
-                'tax_class' => (string) ($product['tax_class'] ?? 'standard'),
+                'product_uuid' => $resolved->productUuid,
+                'variant_uuid' => $resolved->variantUuid,
+                'unit_price' => $resolved->unitPrice,
+                'currency' => $resolved->currency,
+                'quantity' => $resolved->quantity,
+                'sku' => $resolved->sku,
+                'product_name' => $resolved->productName,
+                'option_values' => $resolved->optionValues,
+                'type' => $resolved->type,
+                'addons' => $resolved->addons,
+                'shipping_class' => $resolved->shippingClass,
+                'tax_class' => $resolved->taxClass,
                 // Marketplace commission (MV3, design spec §2.4): the product's own
                 // commission-policy override level, riding the ALREADY-fetched product
                 // row above -- no new query. Null means "inherit the next precedence
                 // level"; a non-marketplace/non-partitioned checkout never resolves
                 // these keys at all, so they are harmless when carried but unused.
-                'commission_kind' => isset($product['commission_kind']) ? (string) $product['commission_kind'] : null,
-                'commission_bps' => isset($product['commission_bps']) ? (int) $product['commission_bps'] : null,
-                'commission_fixed' => isset($product['commission_fixed'])
-                    ? (int) $product['commission_fixed'] : null,
+                'commission_kind' => $resolved->commissionKind,
+                'commission_bps' => $resolved->commissionBps,
+                'commission_fixed' => $resolved->commissionFixed,
             ];
         }
 
