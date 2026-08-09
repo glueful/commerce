@@ -71,6 +71,7 @@ final class CommerceTenantPurgeTest extends CommerceTestCase
             'commerce_categories', 'commerce_tags', 'commerce_attributes',
             'commerce_shipping_zones', 'commerce_refunds',
             'commerce_wishlists', 'commerce_wishlist_items',
+            'commerce_order_draft_attempts',
         ];
         foreach ($this->existingTenantTables() as $table) {
             $expected = in_array($table, $seededTenantTables, true) ? 1 : 0;
@@ -284,6 +285,13 @@ final class CommerceTenantPurgeTest extends CommerceTestCase
             'amount' => 100,
             'currency' => 'USD',
             'method' => 'manual',
+        ]);
+        $this->connection->table('commerce_order_draft_attempts')->insert([
+            'tenant_uuid' => $tenant,
+            'idempotency_key' => 'draft-idem-' . $tenant,
+            'request_fingerprint' => md5('draft-' . $tenant),
+            'order_uuid' => $orderUuid,
+            'status' => 'pending',
         ]);
 
         // --- Children: no tenant_uuid of their own, reachable only via the parent above ---

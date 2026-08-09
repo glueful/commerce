@@ -53,6 +53,7 @@ final class StorefrontOrderProjectionTest extends CommerceTestCase
     private const TENANT_SENTINEL = 'TENANTLEAK01';
     private const METADATA_SENTINEL = 'ORDER_METADATA_LEAK_SENTINEL_DO_NOT_EXPOSE';
     private const GUEST_TOKEN_RAW = 'ord-proj-guest-token-raw-value';
+    private const CUSTOMER_NAME_SENTINEL = 'RATCHET_LEAK_SENTINEL_CUSTOMER_NAME';
 
     /**
      * Every `commerce_orders` column that legitimately reaches the storefront wire, in the
@@ -62,7 +63,10 @@ final class StorefrontOrderProjectionTest extends CommerceTestCase
      * production FIELDS constant, so widening that constant alone can't silently relax this.
      * Excluded on purpose: `id`, `tenant_uuid`, `guest_token_hash`, `marketplace_partitioned`,
      * `fulfillment_revision`, `refund_revision`, `metadata` (an app-internal channel, same
-     * treatment as the storefront PRODUCT projection's `metadata` exclusion).
+     * treatment as the storefront PRODUCT projection's `metadata` exclusion). Also excluded
+     * (admin-order-creation cycle 2, Task 6, design spec §2.6/§2.9): `customer_name`,
+     * `phone_normalized`, `phone_display`, `fulfillment_mode`, `origin`, `draft_revision` --
+     * walk-in/draft fields never leave the admin surface, let alone the public one.
      */
     private const BASE_ORDER_FIELDS = [
         'uuid',
@@ -96,6 +100,14 @@ final class StorefrontOrderProjectionTest extends CommerceTestCase
         'fulfillment_revision',
         'refund_revision',
         'metadata',
+        // Admin-order-creation cycle 2, Task 6 (design spec §2.6/§2.9): walk-in/draft
+        // columns added to `commerce_orders` -- closed off the storefront wire by default.
+        'customer_name',
+        'phone_normalized',
+        'phone_display',
+        'fulfillment_mode',
+        'origin',
+        'draft_revision',
     ];
 
     /**
@@ -135,6 +147,7 @@ final class StorefrontOrderProjectionTest extends CommerceTestCase
         self::assertStringNotContainsString(self::TENANT_SENTINEL, $raw);
         self::assertStringNotContainsString(self::METADATA_SENTINEL, $raw);
         self::assertStringNotContainsString($seeded['guest_token_hash'], $raw);
+        self::assertStringNotContainsString(self::CUSTOMER_NAME_SENTINEL, $raw);
     }
 
     /**
@@ -172,6 +185,7 @@ final class StorefrontOrderProjectionTest extends CommerceTestCase
         self::assertStringNotContainsString(self::TENANT_SENTINEL, $raw);
         self::assertStringNotContainsString(self::METADATA_SENTINEL, $raw);
         self::assertStringNotContainsString($seeded['guest_token_hash'], $raw);
+        self::assertStringNotContainsString(self::CUSTOMER_NAME_SENTINEL, $raw);
     }
 
     /** @return array{order_number: string, guest_token_hash: string} */
@@ -204,6 +218,12 @@ final class StorefrontOrderProjectionTest extends CommerceTestCase
             'shipping_method' => 'std',
             'addresses' => ['shipping' => ['country' => 'US'], 'billing' => ['country' => 'US']],
             'metadata' => ['note' => self::METADATA_SENTINEL],
+            'customer_name' => self::CUSTOMER_NAME_SENTINEL,
+            'phone_normalized' => '+15551234999',
+            'phone_display' => '+1 (555) 123-4999',
+            'origin' => 'admin',
+            'fulfillment_mode' => 'in_store',
+            'draft_revision' => 7,
             'placed_at' => '2026-01-01 00:00:00',
             'created_at' => '2026-01-01 00:00:00',
             'updated_at' => '2026-01-02 00:00:00',

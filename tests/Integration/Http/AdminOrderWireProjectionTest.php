@@ -48,6 +48,10 @@ final class AdminOrderWireProjectionTest extends CommerceTestCase
         'marketplace_partitioned',
         'fulfillment_revision',
         'refund_revision',
+        // Admin-order-creation cycle 2, Task 6 (design spec §2.6/§2.9): draft state
+        // stays off the ordinary (finalized-order) admin wire -- only the five
+        // finalized walk-in fields (asserted separately below) are added.
+        'draft_revision',
     ];
 
     // -----------------------------------------------------------------
@@ -73,6 +77,68 @@ final class AdminOrderWireProjectionTest extends CommerceTestCase
         self::assertSame('ordproj00001', $item['uuid']);
         self::assertSame(5000, (int) $item['grand_total']);
         self::assertSame('USD', $item['currency']);
+    }
+
+    /**
+     * Admin-order-creation cycle 2, Task 6: the five closed finalized walk-in fields
+     * are on the admin wire with their real values, while `draft_revision` -- seeded
+     * with a sentinel that would be impossible to miss if it ever leaked -- is not.
+     */
+    public function testIndexProjectsTheFiveWalkInFieldsButNeverDraftRevision(): void
+    {
+        $this->connection->table('commerce_orders')->insert([
+            'uuid' => 'ordproj0walk',
+            'tenant_uuid' => '',
+            'order_number' => 'ORD-ordproj0walk',
+            'status' => 'paid',
+            'fulfillment_status' => 'unfulfilled',
+            'marketplace_partitioned' => false,
+            'fulfillment_revision' => 1,
+            'refund_revision' => 0,
+            'draft_revision' => 999999,
+            'email' => null,
+            'user_uuid' => null,
+            'guest_token_hash' => null,
+            'phone_normalized' => '+15559998888',
+            'phone_display' => '+1 (555) 999-8888',
+            'customer_name' => 'Walk-in Customer',
+            'origin' => 'admin',
+            'fulfillment_mode' => 'in_store',
+            'currency' => 'USD',
+            'subtotal' => 5000,
+            'grand_total' => 5000,
+        ]);
+
+        $response = $this->orderController()->index(
+            new OrderListQuery(),
+            Request::create('/commerce/admin/orders', 'GET')
+        );
+        $body = $this->json($response);
+
+        self::assertSame(200, $response->getStatusCode());
+        $item = self::firstWhere($body['data'], 'uuid', 'ordproj0walk');
+        self::assertNotNull($item);
+
+        $this->assertNoInternalColumns($item);
+        self::assertSame('+15559998888', $item['phone_normalized']);
+        self::assertSame('+1 (555) 999-8888', $item['phone_display']);
+        self::assertSame('Walk-in Customer', $item['customer_name']);
+        self::assertSame('admin', $item['origin']);
+        self::assertSame('in_store', $item['fulfillment_mode']);
+        self::assertArrayNotHasKey('draft_revision', $item);
+        self::assertStringNotContainsString('999999', (string) $response->getContent());
+    }
+
+    /** @param list<array<string,mixed>> $rows @return array<string,mixed>|null */
+    private static function firstWhere(array $rows, string $key, string $value): ?array
+    {
+        foreach ($rows as $row) {
+            if (($row[$key] ?? null) === $value) {
+                return $row;
+            }
+        }
+
+        return null;
     }
 
     // -----------------------------------------------------------------

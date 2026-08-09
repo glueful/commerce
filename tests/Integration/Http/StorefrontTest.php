@@ -95,6 +95,38 @@ final class StorefrontTest extends CommerceTestCase
         self::assertSame($number, $this->json($res)['data']['order_number']);
     }
 
+    /**
+     * Admin-order-creation cycle 2, Task 6 (design spec §2.6): an admin-created order
+     * mints no guest-access credential, so `guest_token_hash` is NULL on that row.
+     * {@see OrderController::tokenMatches()}'s `isset($order['guest_token_hash'])`
+     * already returns false for a NULL array value with no code change required --
+     * this pins that a NULL row genuinely grants no guest access, for any header
+     * value including one that would otherwise coincidentally hash-match an empty
+     * credential.
+     */
+    public function testNullGuestTokenHashGrantsNoGuestAccess(): void
+    {
+        $this->connection->table('commerce_orders')->insert([
+            'uuid' => 'walkinnoacc1',
+            'tenant_uuid' => '',
+            'order_number' => 'ORD-WALKINNOACC',
+            'status' => 'paid',
+            'fulfillment_status' => 'unfulfilled',
+            'email' => null,
+            'user_uuid' => null,
+            'guest_token_hash' => null,
+            'currency' => 'USD',
+            'subtotal' => 1000,
+            'grand_total' => 1000,
+        ]);
+
+        $req = Request::create('/commerce/orders/ORD-WALKINNOACC', 'GET');
+        $req->headers->set('X-Order-Token', 'some-header-value');
+
+        $this->expectException(NotFoundException::class);
+        $this->orderController()->show($req, 'ORD-WALKINNOACC');
+    }
+
     public function testCheckoutShortStockReturnsConflictShape(): void
     {
         [$token, $variantUuid] = $this->seedCartWithLine('SKU-HTTP-SHORT', 1, 1, 1000);

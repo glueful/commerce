@@ -15,13 +15,22 @@ namespace Glueful\Extensions\Commerce\Http\Admin;
  * the `*_revision` counters back CAS) and event payloads carry the RAW row for
  * listeners/webhook fan-out. Only the HTTP response projects. Fail-closed: a
  * column added to the table stays off the admin wire until named here.
+ *
+ * Admin-order-creation cycle 2, Task 6 (design spec §2.6/§2.9): the five
+ * finalized walk-in fields (`customer_name`, `phone_normalized`,
+ * `phone_display`, `fulfillment_mode`, `origin`) are added here so a
+ * finalized walk-in order stays fully operable on the ordinary admin order
+ * surface. `draft_revision` and every `commerce_order_draft_attempts` field
+ * stay OFF this projection on purpose -- draft state belongs to the
+ * dedicated draft projection (a later task), not the finalized-order wire.
  */
 final class OrderProjection
 {
     /**
      * Every business-facing `commerce_orders` column, in table order. Excluded
      * internals: `id`, `tenant_uuid`, `guest_token_hash`,
-     * `marketplace_partitioned`, `fulfillment_revision`, `refund_revision`.
+     * `marketplace_partitioned`, `fulfillment_revision`, `refund_revision`,
+     * `draft_revision`.
      */
     public const FIELDS = [
         'uuid',
@@ -45,6 +54,11 @@ final class OrderProjection
         'placed_at',
         'created_at',
         'updated_at',
+        'customer_name',
+        'phone_normalized',
+        'phone_display',
+        'fulfillment_mode',
+        'origin',
     ];
 
     /**
