@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Glueful\Extensions\Commerce\Tests\Integration\Orders;
 
+use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Events\EventDispatcher;
 use Glueful\Events\EventService;
 use Glueful\Events\ListenerProvider;
@@ -51,6 +52,29 @@ final class DraftCleanupTest extends CommerceTestCase
 
         self::assertSame('draft', $this->statusOf('draftfresh01'));
         self::assertSame('canceled', $this->statusOf('draftstale01'));
+    }
+
+    /**
+     * The EXACT boundary (review fix): a draft aged precisely `draft_ttl_days`
+     * SURVIVES. The comparison is strict (`<`), so "exactly 30 days old" is not
+     * yet "older than 30 days" -- the boundary always resolves in the
+     * operator's favor, and the draft is swept on a later tick instead.
+     */
+    public function testADraftAgedExactlyTheTtlSurvives(): void
+    {
+        $this->seedDraft('draftexact01', $this->daysBeforeNow(30));
+
+        self::assertSame(0, $this->service()->cancelStale($this->context, $this->now()));
+        self::assertSame('draft', $this->statusOf('draftexact01'));
+        self::assertSame([], $this->eventTypesFor('draftexact01'));
+
+        // One second past the boundary IS stale -- proving the survival above
+        // is the strict comparison, not an off-by-a-day cutoff.
+        self::assertSame(
+            1,
+            $this->service()->cancelStale($this->context, $this->now()->modify('+1 second'))
+        );
+        self::assertSame('canceled', $this->statusOf('draftexact01'));
     }
 
     public function testTheTtlWindowIsRuntimeConfigurable(): void
@@ -245,6 +269,40 @@ final class DraftCleanupTest extends CommerceTestCase
         self::assertStringContainsString('Canceled 1 stale draft order(s).', $display);
         self::assertSame('canceled', $this->statusOf('draftcron001'));
         self::assertSame([DraftOrderEvents::EXPIRED], $this->eventTypesFor('draftcron001'));
+    }
+
+    /**
+     * Sweep ISOLATION (review fix): the two sweeps share a schedule and nothing
+     * else. A throwing order-expiry sweep must NOT suspend draft cleanup --
+     * otherwise an unrelated outage would let drafts accumulate unbounded for
+     * as long as it lasted. The failure is still surfaced (error line + FAILURE
+     * exit) so cron alerting fires; it just doesn't take the sibling with it.
+     */
+    public function testAThrowingExpirySweepStillLetsTheDraftSweepRun(): void
+    {
+        $ancient = gmdate('Y-m-d H:i:s', time() - (400 * 86400));
+        $this->seedDraft('draftcron002', $ancient);
+
+        // ExpiryService is final, so this is a duck-typed stand-in rather than a
+        // subclass -- the command resolves it through the container and only
+        // ever calls `expireStale()`.
+        $this->bind(ExpiryService::class, new class {
+            public function expireStale(ApplicationContext $context): int
+            {
+                throw new \RuntimeException('stock backend unavailable');
+            }
+        });
+        $this->bind(DraftCleanupService::class, $this->service());
+
+        $tester = new CommandTester(new OrdersExpireCommand($this->context->getContainer(), $this->context));
+        $exit = $tester->execute([]);
+
+        $display = (string) preg_replace('/\s+/', ' ', $tester->getDisplay());
+        self::assertSame(1, $exit, 'a failed sweep must still surface as a non-zero exit');
+        self::assertStringContainsString('Expire stale orders failed: stock backend unavailable', $display);
+        // The sibling sweep ran to completion regardless.
+        self::assertStringContainsString('Canceled 1 stale draft order(s).', $display);
+        self::assertSame('canceled', $this->statusOf('draftcron002'));
     }
 
     // -----------------------------------------------------------------

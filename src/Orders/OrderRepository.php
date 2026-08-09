@@ -267,15 +267,31 @@ SQL,
     }
 
     /**
-     * The generic lifecycle CAS. Reads drafts on purpose (`includeDrafts:
-     * true`) -- `draft -> canceled` is a perfectly ordinary transition that
-     * runs through here -- but REFUSES the one pair that must never be reached
-     * generically: `draft -> pending_payment`. That pair is legal in
-     * {@see OrderStateMachine} yet belongs exclusively to
-     * {@see self::finalizeDraftTransition()}, so finalization can only ever
-     * happen through the single audited path that owns it (Task 10's
-     * `DraftFinalizationService`). The rejection fires BEFORE any write, so a
-     * refused finalize leaves neither a status change nor an audit row.
+     * The generic lifecycle CAS for REAL orders. It reads drafts on purpose
+     * (`includeDrafts: true`) only so it can RECOGNIZE one and refuse it with a
+     * useful message, rather than report a misleading "Order not found."
+     *
+     * NO draft transition may run through here. Both of `draft`'s legal exits
+     * are dedicated-path-only, symmetrically:
+     *  - `draft -> pending_payment` belongs to
+     *    {@see self::finalizeDraftTransition()} (Task 10's
+     *    `DraftFinalizationService` is its sole caller);
+     *  - `draft -> canceled` belongs to
+     *    {@see DraftCleanupService::cancelDraft()}, shared by the TTL sweep and
+     *    Task 9's explicit admin cancel.
+     * Both are compare-and-set writes that never consult
+     * {@see OrderStateMachine} at all, so refusing every draft here closes the
+     * generic door completely without narrowing either sanctioned path.
+     * `draft -> canceled` was the subtler of the two leaks: it would have
+     * SUCCEEDED, but silently skipped the
+     * {@see \Glueful\Extensions\Commerce\Orders\Events\DraftOrderEvents} audit
+     * row that records why the draft died.
+     *
+     * The refusal fires BEFORE any write, so a rejected draft transition leaves
+     * neither a status change nor an audit row. It is ordered AFTER
+     * {@see OrderStateMachine::assertTransition()} so an outright illegal pair
+     * (`draft -> paid`) still reports as the invalid transition it is, rather
+     * than as a routing mistake.
      *
      * @param array<string,mixed> $changes
      */
@@ -294,9 +310,11 @@ SQL,
         $from = (string) $order['status'];
         OrderStateMachine::assertTransition($from, $to);
 
-        if ($from === OrderScope::DRAFT && $to === 'pending_payment') {
+        if ($from === OrderScope::DRAFT) {
             throw new \DomainException(
-                'Draft finalization must go through finalizeDraftTransition(), not transition().'
+                'Draft lifecycle changes must go through their dedicated paths '
+                . '(finalizeDraftTransition() to finalize, DraftCleanupService::cancelDraft() '
+                . 'to cancel), not transition().'
             );
         }
 
@@ -349,11 +367,12 @@ SQL,
      */
     public function finalizeDraftTransition(ApplicationContext $context, string $tenant, string $uuid): void
     {
+        $isDraft = OrderScope::isDraftSql();
         $affected = db($context)->table('commerce_orders')->executeModification(
-            <<<'SQL'
+            <<<SQL
 UPDATE commerce_orders
 SET status = 'pending_payment', updated_at = ?
-WHERE tenant_uuid = ? AND uuid = ? AND status = 'draft'
+WHERE tenant_uuid = ? AND uuid = ? AND {$isDraft}
 SQL,
             [db($context)->getDriver()->formatDateTime(), $tenant, $uuid]
         );

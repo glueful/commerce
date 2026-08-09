@@ -54,8 +54,23 @@ final class OrderScope
      */
     public static function excludeDraftsSql(string $qualifier = ''): string
     {
-        $column = $qualifier === '' ? 'status' : $qualifier . '.status';
+        return self::column($qualifier) . " <> '" . self::DRAFT . "'";
+    }
 
-        return $column . " <> '" . self::DRAFT . "'";
+    /**
+     * The POSITIVE form, for the two DEDICATED draft compare-and-set writes:
+     * {@see OrderRepository::finalizeDraftTransition()} and
+     * {@see DraftCleanupService::cancelDraft()}. Both are `WHERE ... AND
+     * status = 'draft'`; routing them through here keeps the literal `'draft'`
+     * written exactly once in production code, exactly like every reader.
+     */
+    public static function isDraftSql(string $qualifier = ''): string
+    {
+        return self::column($qualifier) . " = '" . self::DRAFT . "'";
+    }
+
+    private static function column(string $qualifier): string
+    {
+        return $qualifier === '' ? 'status' : $qualifier . '.status';
     }
 }

@@ -24,6 +24,7 @@ use Glueful\Extensions\Commerce\Http\DTOs\OrderListQuery;
 use Glueful\Extensions\Commerce\Http\Storefront\OrderController;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
 use Glueful\Extensions\Commerce\Invoices\ConfigSellerIdentityProvider;
+use Glueful\Extensions\Commerce\Marketplace\ReconciliationService;
 use Glueful\Extensions\Commerce\Orders\CheckoutService;
 use Glueful\Extensions\Commerce\Orders\ExpiryService;
 use Glueful\Extensions\Commerce\Orders\OrderNumberGenerator;
@@ -80,13 +81,48 @@ final class DraftIsolationTest extends CommerceTestCase
         self::assertSame([], $this->eventTypesFor('draftorder01'));
     }
 
-    public function testTransitionStillPerformsDraftToCanceled(): void
+    /**
+     * SYMMETRY with the finalize pair (review fix): `draft -> canceled` is
+     * legal in {@see \Glueful\Extensions\Commerce\Orders\OrderStateMachine} but
+     * is equally dedicated-path-only. Letting it through `transition()` would
+     * SUCCEED while silently skipping the
+     * {@see \Glueful\Extensions\Commerce\Orders\Events\DraftOrderEvents} audit
+     * row -- a canceled draft with no record of why it died. The sanctioned
+     * door is `DraftCleanupService::cancelDraft()`, which bypasses the state
+     * machine entirely and is therefore unaffected by this refusal.
+     */
+    public function testTransitionAlsoRejectsTheDraftToCanceledPair(): void
     {
         $this->seedOrder('draftorder02', 'draft');
 
-        (new OrderRepository())->transition($this->context, self::TENANT, 'draftorder02', 'canceled');
+        try {
+            (new OrderRepository())->transition($this->context, self::TENANT, 'draftorder02', 'canceled');
+            self::fail('transition() must refuse to cancel a draft.');
+        } catch (\DomainException $e) {
+            self::assertStringContainsString('DraftCleanupService::cancelDraft()', $e->getMessage());
+        }
 
-        self::assertSame('canceled', $this->statusOf('draftorder02'));
+        self::assertSame('draft', $this->statusOf('draftorder02'));
+        self::assertSame([], $this->eventTypesFor('draftorder02'));
+    }
+
+    /**
+     * An outright ILLEGAL draft pair must still report as the invalid
+     * transition it is, not as a routing mistake -- the dedicated-path refusal
+     * is ordered AFTER the state-machine assertion precisely so this holds.
+     */
+    public function testAnIllegalDraftPairStillReportsAsAnInvalidTransition(): void
+    {
+        $this->seedOrder('draftorder29', 'draft');
+
+        try {
+            (new OrderRepository())->transition($this->context, self::TENANT, 'draftorder29', 'paid');
+            self::fail('draft -> paid must be rejected.');
+        } catch (\DomainException $e) {
+            self::assertSame('Invalid order transition draft -> paid.', $e->getMessage());
+        }
+
+        self::assertSame('draft', $this->statusOf('draftorder29'));
     }
 
     public function testFinalizeDraftTransitionFlipsADraftToPendingPayment(): void
@@ -597,6 +633,39 @@ final class DraftIsolationTest extends CommerceTestCase
         self::assertSame('draft', OrderScope::DRAFT);
         self::assertSame("status <> 'draft'", OrderScope::excludeDraftsSql());
         self::assertSame("o.status <> 'draft'", OrderScope::excludeDraftsSql('o'));
+        // The positive form the two dedicated CAS writes interpolate, so the
+        // literal 'draft' is written exactly once in production code.
+        self::assertSame("status = 'draft'", OrderScope::isDraftSql());
+        self::assertSame("commerce_orders.status = 'draft'", OrderScope::isDraftSql('commerce_orders'));
+    }
+
+    /**
+     * Marketplace reconciliation (review fix, matrix completeness): a completed
+     * refund is joined through `commerce_orders`, so an (impossible today, but
+     * structurally reachable) draft-owned refund must not be scanned. The
+     * partitioned PAID control proves the scan itself is live -- without it,
+     * an empty report would be indistinguishable from a broken query.
+     */
+    public function testMarketplaceReconciliationNeverScansADraftOwnedRefund(): void
+    {
+        $this->seedOrder('draftorder30', 'draft', ['marketplace_partitioned' => true]);
+        $this->seedOrder('realorder016', 'paid', [
+            'order_number' => 'ORD-000116',
+            'marketplace_partitioned' => true,
+        ]);
+        $this->seedCompletedRefund('refunddraft1', 'draftorder30', 500);
+        $this->seedCompletedRefund('refundreal01', 'realorder016', 500);
+
+        $report = (new ReconciliationService())->scan($this->context, self::TENANT);
+
+        $flaggedOrders = array_values(array_unique(array_merge(
+            array_column($report['missing'], 'order_uuid'),
+            array_column($report['duplicate'], 'order_uuid'),
+            array_column($report['mismatched'], 'order_uuid')
+        )));
+
+        self::assertContains('realorder016', $flaggedOrders, 'the paid control must be scanned');
+        self::assertNotContains('draftorder30', $flaggedOrders);
     }
 
     // -----------------------------------------------------------------
@@ -643,6 +712,22 @@ final class DraftIsolationTest extends CommerceTestCase
         ]);
 
         return $variantUuid;
+    }
+
+    private function seedCompletedRefund(string $uuid, string $orderUuid, int $amount): void
+    {
+        $this->connection->table('commerce_refunds')->insert([
+            'uuid' => $uuid,
+            'tenant_uuid' => self::TENANT,
+            'order_uuid' => $orderUuid,
+            'idempotency_key' => 'idem-' . $uuid,
+            'request_fingerprint' => str_repeat('f', 64),
+            'amount' => $amount,
+            'currency' => 'USD',
+            'method' => 'manual',
+            'status' => 'completed',
+            'completed_at' => gmdate('Y-m-d H:i:s'),
+        ]);
     }
 
     private function seedLine(string $uuid, string $orderUuid, string $variantUuid, int $lineTotal): void

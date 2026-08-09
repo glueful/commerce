@@ -68,9 +68,15 @@ final class DraftCleanupService
      * The comparison is strict (`<`), so a draft aged EXACTLY the TTL survives
      * one more tick -- the boundary always resolves in the operator's favor.
      *
-     * `$now` is normalized to UTC because every stored timestamp in this
-     * schema is UTC; a caller handing over a local-zone instant would otherwise
-     * silently shift the cutoff.
+     * `$now` is normalized to UTC so the CUTOFF this method computes is
+     * timezone-stable regardless of what zone a caller hands over. Note the
+     * honest caveat: the stored `created_at`/`updated_at` stamps it compares
+     * against are written by the driver's own `formatDateTime()` (PHP-local),
+     * not guaranteed UTC, so cutoff and column are not strictly the same
+     * clock. At 30-day granularity a fixed hours-scale offset is immaterial to
+     * which drafts are swept, and correcting the storage convention is a
+     * schema-wide concern well outside this task -- documented rather than
+     * silently assumed.
      *
      * @return int the number of drafts this call actually canceled (never more
      *     than `$batchSize`; 0 once drained)
@@ -137,11 +143,12 @@ final class DraftCleanupService
         string $eventType,
         ?string $actorUuid = null
     ): bool {
+        $isDraft = OrderScope::isDraftSql();
         $affected = db($context)->table('commerce_orders')->executeModification(
-            <<<'SQL'
+            <<<SQL
 UPDATE commerce_orders
 SET status = 'canceled', updated_at = ?
-WHERE tenant_uuid = ? AND uuid = ? AND status = 'draft'
+WHERE tenant_uuid = ? AND uuid = ? AND {$isDraft}
 SQL,
             [db($context)->getDriver()->formatDateTime(), $tenant, $uuid]
         );
