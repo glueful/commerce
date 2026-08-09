@@ -6,30 +6,53 @@ namespace Glueful\Extensions\Commerce\Tests\Integration\Migrations;
 
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Database\Connection;
+use Glueful\Extensions\Commerce\Catalog\CatalogService;
+use Glueful\Extensions\Commerce\Catalog\ProductRepository;
+use Glueful\Extensions\Commerce\Catalog\VariantRepository;
 use Glueful\Extensions\Commerce\Database\Migrations\EnforceStockQuantityTrackedNotNull;
+use Glueful\Extensions\Commerce\Inventory\StockIntegrityException;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
+use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
 use Glueful\Extensions\Commerce\Tests\Support\CommerceTestCase;
 use Psr\Container\ContainerInterface;
 
 /**
  * Rider 2 (admin-order-creation cycle 2, Task 2): `commerce_stock.quantity`/`tracked`
  * NOT NULL hygiene. Migration 002 declared both columns nullable at the DB level
- * (neither call site chains `notNull()`/`notNullable()`) even though every
- * application write path treats a NULL the same as its intended default --
+ * (neither call site chains `notNull()`/`notNullable()`).
+ *
+ * Equivalence holds for exactly two read paths --
  * {@see StockRepository::isTracked()} folds a NULL `tracked` to `false` via
  * `(int) ($row['tracked'] ?? 0) === 1`, and {@see StockRepository::quantity()}
- * folds a NULL `quantity` to `0` via `(int) ($row['quantity'] ?? 0)`. This
- * migration backfills any existing NULL rows to those SAME runtime defaults
- * (0 / false) before constraining both columns NOT NULL, so the schema simply
- * codifies a behavior that already held -- no install can observe a change.
+ * folds a NULL `quantity` to `0` via `(int) ($row['quantity'] ?? 0)` -- so backfilling
+ * to those same values before constraining NOT NULL changes nothing THERE.
  *
- * Covers both the fresh-install shape (columns reject NULL from day one, via
- * the base {@see CommerceTestCase} connection which already runs every
- * migration including this one) and the upgrade path (a pre-existing install
- * with NULL rows converges to the backfilled, NOT-NULL-enforced shape), on
- * both SQLite and -- gated behind `COMMERCE_TEST_DB_DRIVER=pgsql`, matching
- * this codebase's established convention (see
- * {@see \Glueful\Extensions\Commerce\Tests\Integration\Customers\CustomerAggregationPgsqlTest}) --
+ * It is deliberately NOT equivalence-preserving everywhere else, and that divergence
+ * is the point of this rider, not an accident (see the migration's own docblock for
+ * the full accounting):
+ *  - {@see StockRepository::stockProjectionsForProduct()}/`stockProjectionsForProducts()`
+ *    select `tracked`/`quantity` raw, so a NULL-valued row is today indistinguishable
+ *    from a MISSING one -- {@see \Glueful\Extensions\Commerce\Catalog\CatalogService::stockForProduct()}
+ *    throws {@see StockIntegrityException} on it. This migration deliberately HEALS
+ *    such a row into a genuine untracked/zero-quantity variant -- the exception stops
+ *    firing. Pinned below by
+ *    `testIntegritySignalHealsFromExceptionToHealthyZeroStockAfterMigration()` (and,
+ *    one level lower, directly against the projection itself, by
+ *    `testStockProjectionSurfacesNullBeforeAndRealValuesAfterMigration()`).
+ *  - {@see StockRepository::increment()}/`incrementChecked()` do a raw
+ *    `quantity = quantity + ?`; SQL NULL propagates through `+`, so a NULL `quantity`
+ *    silently never accumulates no matter how many times either is called, even
+ *    though the UPDATE itself "succeeds". This migration's backfilled `0` lets that
+ *    SAME arithmetic actually work afterward. Pinned below by
+ *    `testIncrementSilentlyStaysNullBeforeMigrationThenAccumulatesFromZeroAfter()` and
+ *    `testIncrementCheckedSilentlyStaysNullBeforeMigrationThenAccumulatesFromZeroAfter()`.
+ *
+ * Also covers the fresh-install shape (columns reject NULL from day one, via the base
+ * {@see CommerceTestCase} connection which already runs every migration including this
+ * one) and the upgrade path (a pre-existing install with NULL rows converges to the
+ * backfilled, NOT-NULL-enforced shape), on both SQLite and -- gated behind
+ * `COMMERCE_TEST_DB_DRIVER=pgsql`, matching this codebase's established convention
+ * (see {@see \Glueful\Extensions\Commerce\Tests\Integration\Customers\CustomerAggregationPgsqlTest}) --
  * real PostgreSQL.
  */
 final class StockNotNullBackfillTest extends CommerceTestCase
@@ -174,6 +197,168 @@ final class StockNotNullBackfillTest extends CommerceTestCase
         self::assertNotNull($row);
         self::assertSame(42, (int) $row['quantity']);
         self::assertSame(1, (int) $row['tracked']);
+    }
+
+    // =====================================================================
+    // Deliberate divergence (SQLite): the backfill does NOT merely preserve
+    // pre-existing behavior everywhere -- it HEALS two specific integrity
+    // signals that a NULL-valued (as opposed to missing) commerce_stock row
+    // used to trip. This is disclosed as the rider's intended outcome, not
+    // claimed away as a no-op. See the class docblock above and the
+    // migration's own docblock for the full accounting.
+    // =====================================================================
+
+    /**
+     * {@see StockRepository::stockProjectionsForProduct()} selects `commerce_stock
+     * .tracked`/`.quantity` RAW (no `?? 0` coalescing) -- a stock row that EXISTS but
+     * carries a NULL value is, to that projection, indistinguishable from a MISSING
+     * row. Pins the projection's own output directly, one level below the
+     * exception-throwing {@see CatalogService::stockForProduct()} pinned separately
+     * below.
+     */
+    public function testStockProjectionSurfacesNullBeforeAndRealValuesAfterMigration(): void
+    {
+        $connection = $this->preMigrationConnection(['engine' => 'sqlite', 'sqlite' => ['primary' => ':memory:']]);
+
+        $connection->table('commerce_variants')->insert([
+            'uuid' => 'varproj00001',
+            'tenant_uuid' => '',
+            'product_uuid' => 'prodproj0001',
+            'sku' => 'PROJ-1',
+            'option_values' => '{}',
+            'price' => 1000,
+            'currency' => 'USD',
+            'position' => 0,
+        ]);
+        $connection->getPDO()->exec(
+            "INSERT INTO commerce_stock (uuid, tenant_uuid, variant_uuid, quantity, tracked) "
+            . "VALUES ('stockproj0001', '', 'varproj00001', NULL, NULL)"
+        );
+
+        $repo = new StockRepository();
+        $context = $this->contextFor($connection);
+
+        $before = $repo->stockProjectionsForProduct($context, '', 'prodproj0001');
+        self::assertSame(['variant_uuid' => 'varproj00001', 'tracked' => null, 'quantity' => null], $before[0]);
+
+        (new EnforceStockQuantityTrackedNotNull())->up($connection->getSchemaBuilder());
+
+        $after = $repo->stockProjectionsForProduct($context, '', 'prodproj0001');
+        self::assertSame(['variant_uuid' => 'varproj00001', 'tracked' => false, 'quantity' => 0], $after[0]);
+    }
+
+    /**
+     * End-to-end through the actual consumer: {@see CatalogService::stockForProduct()}
+     * throws {@see StockIntegrityException} on a NULL-valued row before the migration
+     * (Global Constraints: "the read fails loudly"), and reads it as a healthy
+     * untracked/zero-quantity variant after -- with NO exception. This is the
+     * migration doing exactly what it is for.
+     */
+    public function testIntegritySignalHealsFromExceptionToHealthyZeroStockAfterMigration(): void
+    {
+        $connection = $this->preMigrationConnection(['engine' => 'sqlite', 'sqlite' => ['primary' => ':memory:']]);
+        $context = $this->contextFor($connection);
+        $catalog = new CatalogService(new ProductRepository(), new VariantRepository(), new SentinelTenantResolver());
+
+        $product = $catalog->createProduct($context, [
+            'slug' => 'integrity-widget',
+            'name' => 'Integrity Widget',
+            'type' => 'physical',
+            'status' => 'active',
+            'variants' => [
+                ['sku' => 'INTEGRITY-1', 'price' => 1000, 'currency' => 'USD'],
+            ],
+        ]);
+        $variantUuid = $product['variants'][0]['uuid'];
+
+        // Corrupt the stock row `ensureRow()` just wrote -- exactly the pre-021 state a
+        // real install could reach (row present, values NULL) that this migration
+        // backfills. No application code writes a NULL today; this simulates the
+        // pre-existing data the migration exists to clean up.
+        $connection->getPDO()->exec(
+            "UPDATE commerce_stock SET quantity = NULL, tracked = NULL WHERE variant_uuid = "
+            . $connection->getPDO()->quote($variantUuid)
+        );
+
+        try {
+            $catalog->stockForProduct($context, $product['uuid']);
+            self::fail('a NULL-valued stock row must surface as StockIntegrityException before the migration');
+        } catch (StockIntegrityException) {
+            $this->addToAssertionCount(1);
+        }
+
+        (new EnforceStockQuantityTrackedNotNull())->up($connection->getSchemaBuilder());
+
+        $result = $catalog->stockForProduct($context, $product['uuid']);
+        self::assertSame(
+            ['variant_uuid' => $variantUuid, 'tracked' => false, 'quantity' => 0],
+            $result['items'][0]
+        );
+    }
+
+    /**
+     * {@see StockRepository::increment()} does a raw `quantity = quantity + ?` with no
+     * `tracked` predicate. SQL NULL propagates through `+`, so against a NULL
+     * `quantity` the stored value silently stays NULL forever, no matter how many
+     * times increment() is called -- even though the UPDATE itself matches the row
+     * (no exception, no false return; `increment()` is `void`).
+     */
+    public function testIncrementSilentlyStaysNullBeforeMigrationThenAccumulatesFromZeroAfter(): void
+    {
+        $connection = $this->preMigrationConnection(['engine' => 'sqlite', 'sqlite' => ['primary' => ':memory:']]);
+        $context = $this->contextFor($connection);
+        $repo = new StockRepository();
+
+        $connection->getPDO()->exec(
+            "INSERT INTO commerce_stock (uuid, tenant_uuid, variant_uuid, quantity, tracked) "
+            . "VALUES ('stockincnull1', 'tinc1', 'varinc00001', NULL, 1)"
+        );
+
+        $repo->increment($context, 'tinc1', 'varinc00001', 5);
+        $row = $connection->table('commerce_stock')->where('uuid', '=', 'stockincnull1')->first();
+        self::assertNotNull($row);
+        self::assertNull($row['quantity'], 'NULL + 5 must still be NULL before the migration backfills it');
+
+        (new EnforceStockQuantityTrackedNotNull())->up($connection->getSchemaBuilder());
+
+        $repo->increment($context, 'tinc1', 'varinc00001', 5);
+        $row = $connection->table('commerce_stock')->where('uuid', '=', 'stockincnull1')->first();
+        self::assertNotNull($row);
+        self::assertSame(5, (int) $row['quantity']);
+    }
+
+    /**
+     * Same underlying `quantity = quantity + ?` NULL-propagation bug as increment()
+     * above, but through {@see StockRepository::incrementChecked()} -- which ALSO
+     * requires `tracked = true` in its WHERE clause, so the fixture's row is seeded
+     * `tracked = 1` explicitly (not NULL) to isolate the quantity-NULL behavior alone.
+     * `incrementChecked()` still returns `true` (the row matched and was "updated")
+     * even though the stored value never actually changed.
+     */
+    public function testIncrementCheckedSilentlyStaysNullBeforeMigrationThenAccumulatesFromZeroAfter(): void
+    {
+        $connection = $this->preMigrationConnection(['engine' => 'sqlite', 'sqlite' => ['primary' => ':memory:']]);
+        $context = $this->contextFor($connection);
+        $repo = new StockRepository();
+
+        $connection->getPDO()->exec(
+            "INSERT INTO commerce_stock (uuid, tenant_uuid, variant_uuid, quantity, tracked) "
+            . "VALUES ('stockincnull2', 'tinc2', 'varinc00002', NULL, 1)"
+        );
+
+        $ok = $repo->incrementChecked($context, 'tinc2', 'varinc00002', 5);
+        self::assertTrue($ok, 'the row matches tracked = true, so incrementChecked() reports success');
+        $row = $connection->table('commerce_stock')->where('uuid', '=', 'stockincnull2')->first();
+        self::assertNotNull($row);
+        self::assertNull($row['quantity'], 'NULL + 5 must still be NULL before the migration backfills it');
+
+        (new EnforceStockQuantityTrackedNotNull())->up($connection->getSchemaBuilder());
+
+        $ok = $repo->incrementChecked($context, 'tinc2', 'varinc00002', 5);
+        self::assertTrue($ok);
+        $row = $connection->table('commerce_stock')->where('uuid', '=', 'stockincnull2')->first();
+        self::assertNotNull($row);
+        self::assertSame(5, (int) $row['quantity']);
     }
 
     // =====================================================================

@@ -10,14 +10,39 @@ use Glueful\Database\Schema\Interfaces\SchemaBuilderInterface;
 /**
  * Rider 2 (admin-order-creation cycle 2, Task 2) hygiene fix: migration 002 declared
  * `commerce_stock.quantity` and `commerce_stock.tracked` nullable at the DB level even
- * though neither has ever had a legitimate NULL meaning -- every application read
- * already treats a NULL the same as the column's own intended default:
+ * though neither has ever had a legitimate NULL meaning. Backfilling any existing NULL
+ * rows to their intended defaults (0 / false) before constraining NOT NULL is
+ * EQUIVALENT, for two specific read paths, to what already held at runtime:
  * {@see \Glueful\Extensions\Commerce\Inventory\StockRepository::isTracked()} folds a
  * NULL `tracked` to `false` (`(int) ($row['tracked'] ?? 0) === 1`), and
  * {@see \Glueful\Extensions\Commerce\Inventory\StockRepository::quantity()} folds a
- * NULL `quantity` to `0` (`(int) ($row['quantity'] ?? 0)`). Backfilling any existing
- * NULL rows to those SAME values before constraining NOT NULL therefore changes
- * nothing observable at runtime -- it only makes the schema say what already held.
+ * NULL `quantity` to `0` (`(int) ($row['quantity'] ?? 0)`) -- for those two methods
+ * alone, this migration changes nothing observable.
+ *
+ * It is NOT equivalence-preserving everywhere, and that divergence is deliberate, not
+ * an oversight -- eliminating exactly these NULL states is what this rider is for:
+ *  - {@see \Glueful\Extensions\Commerce\Inventory\StockRepository::stockProjectionsForProduct()}/
+ *    `stockProjectionsForProducts()` select `commerce_stock.tracked`/`.quantity` RAW
+ *    (not coalesced), so a stock row that EXISTS but carries a NULL value is today
+ *    indistinguishable, to that projection, from a MISSING row.
+ *    {@see \Glueful\Extensions\Commerce\Catalog\CatalogService::stockForProduct()}
+ *    treats that as an integrity failure and throws
+ *    {@see \Glueful\Extensions\Commerce\Inventory\StockIntegrityException} (bubbling to
+ *    a 500); {@see \Glueful\Extensions\Commerce\Http\Admin\AdminProductController}'s
+ *    list summary reports `stock_quantity: null` ("unknown"). After this migration,
+ *    the SAME row reads as a legitimate, healthy untracked/zero-quantity variant --
+ *    the exception stops firing and the summary reports a real number. That is the
+ *    healing working as intended: a corrupt-looking row becomes a genuinely healthy
+ *    one, on purpose.
+ *  - {@see \Glueful\Extensions\Commerce\Inventory\StockRepository::increment()}/
+ *    `incrementChecked()` do a raw `quantity = quantity + ?` UPDATE. SQL NULL
+ *    propagates through `+`, so against a NULL `quantity` the value silently stays
+ *    NULL no matter how many times either method is called, even though the UPDATE
+ *    itself reports success (matches the row, `incrementChecked()` still returns
+ *    `true` when `tracked` matches). After this migration the backfilled `0` lets the
+ *    SAME arithmetic actually accumulate.
+ *
+ * Both divergences are pinned by `tests/Integration/Migrations/StockNotNullBackfillTest.php`.
  *
  * Backfill-then-constrain, mirroring the discipline documented on
  * `Subscriptions\Database\Migrations\SubjectModel`: the backfill UPDATEs run before the
