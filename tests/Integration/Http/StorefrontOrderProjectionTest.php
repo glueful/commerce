@@ -16,7 +16,9 @@ use Glueful\Extensions\Commerce\Contracts\TaxCalculator;
 use Glueful\Extensions\Commerce\Discounts\DiscountRepository;
 use Glueful\Extensions\Commerce\Discounts\DiscountService;
 use Glueful\Extensions\Commerce\Http\Admin\AdminOrderController;
+use Glueful\Extensions\Commerce\Http\DTOs\CheckoutPlaceData;
 use Glueful\Extensions\Commerce\Http\DTOs\OrderListQuery;
+use Glueful\Extensions\Commerce\Http\Storefront\CheckoutController;
 use Glueful\Extensions\Commerce\Http\Storefront\OrderController;
 use Glueful\Extensions\Commerce\Invoices\ConfigSellerIdentityProvider;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
@@ -210,23 +212,149 @@ final class StorefrontOrderProjectionTest extends CommerceTestCase
         return ['order_number' => $orderNumber, 'guest_token_hash' => $guestTokenHash];
     }
 
+    /**
+     * `place()` receives the CHECKOUT SERVICE's raw `order` (payment initiation and
+     * other internal consumers of `CheckoutService::placeOrder()` need the internal
+     * fields) -- only `CheckoutController::place()`'s HTTP response boundary
+     * projects it, exactly like `show()`/`mine()` above. Placed through a REAL
+     * cart+checkout run (unlike `show()`/`mine()`'s direct row seeding) because
+     * `placeOrder()` builds the order itself; the tenant sentinel is threaded
+     * through catalog/cart/checkout so the order actually lands under it, and the
+     * guest-token-hash sentinel is derived from the RAW token the response hands
+     * back (the real hash `TokenHasher::hash()` would have written to the row).
+     * `metadata` is asserted absent by key only -- `placeOrderAttempt()` never
+     * writes an order `metadata` value, so there is no live value to seed a
+     * leak-sentinel into.
+     */
+    public function testStorefrontCheckoutPlaceProjectsOrderThroughTheSameAllowlist(): void
+    {
+        $tenants = $this->tenantResolver(self::TENANT_SENTINEL);
+        $variantUuid = $this->seedVariantForTenant(self::TENANT_SENTINEL, 'SKU-PLACE-PROJ', 5, 1000);
+
+        ['cart' => $cart, 'token' => $cartToken] = $this->cartForTenant($tenants)->create($this->context);
+        $this->cartForTenant($tenants)->addLine($this->context, $cart, $variantUuid, 1);
+
+        $request = Request::create('/commerce/checkout', 'POST');
+        $request->headers->set('X-Cart-Token', $cartToken);
+
+        $response = $this->checkoutControllerForTenant($tenants)->place(
+            new CheckoutPlaceData(
+                buyer: ['email' => 'buyer@example.com'],
+                addresses: ['shipping' => ['country' => 'US'], 'billing' => ['country' => 'US']],
+                shipping_method: 'std'
+            ),
+            $request
+        );
+        $raw = (string) $response->getContent();
+        $body = $this->json($response);
+
+        self::assertSame(201, $response->getStatusCode());
+        $order = $body['data']['order'];
+
+        self::assertEqualsCanonicalizing(self::BASE_ORDER_FIELDS, array_keys($order));
+        foreach (self::INTERNAL_ORDER_COLUMNS as $column) {
+            self::assertArrayNotHasKey(
+                $column,
+                $order,
+                "internal column `{$column}` leaked onto the checkout `place` wire"
+            );
+        }
+
+        $guestTokenHash = TokenHasher::hash((string) $body['data']['guest_token']);
+        self::assertStringNotContainsString(self::TENANT_SENTINEL, $raw);
+        self::assertStringNotContainsString($guestTokenHash, $raw);
+    }
+
     private function orderControllerForTenant(string $tenant): OrderController
     {
         return new OrderController(
             $this->context,
             new OrderRepository(),
             $this->checkout(),
-            new class ($tenant) implements CurrentTenantResolver {
-                public function __construct(private string $tenant)
-                {
-                }
-
-                public function tenantUuid(ApplicationContext $context): string
-                {
-                    return $this->tenant;
-                }
-            },
+            $this->tenantResolver($tenant),
             new RefundRepository()
+        );
+    }
+
+    private function tenantResolver(string $tenant): CurrentTenantResolver
+    {
+        return new class ($tenant) implements CurrentTenantResolver {
+            public function __construct(private string $tenant)
+            {
+            }
+
+            public function tenantUuid(ApplicationContext $context): string
+            {
+                return $this->tenant;
+            }
+        };
+    }
+
+    private function seedVariantForTenant(string $tenant, string $sku, int $stock, int $price): string
+    {
+        $catalog = new CatalogService(
+            new ProductRepository(),
+            new VariantRepository(),
+            $this->tenantResolver($tenant),
+            new StockRepository()
+        );
+        $product = $catalog->createProduct($this->context, [
+            'slug' => strtolower($sku),
+            'name' => $sku,
+            'type' => 'physical',
+            'status' => 'active',
+            'variants' => [[
+                'sku' => $sku,
+                'option_values' => [],
+                'price' => $price,
+                'currency' => 'USD',
+            ]],
+        ]);
+        $variantUuid = (string) $product['variants'][0]['uuid'];
+        (new StockRepository())->increment($this->context, $tenant, $variantUuid, $stock);
+
+        return $variantUuid;
+    }
+
+    private function cartForTenant(CurrentTenantResolver $tenants): CartService
+    {
+        return new CartService(
+            new CartRepository(),
+            new VariantRepository(),
+            new ProductRepository(),
+            new StockRepository(),
+            new DiscountRepository(),
+            new PricingEngine(),
+            $tenants
+        );
+    }
+
+    private function checkoutForTenant(CurrentTenantResolver $tenants): CheckoutService
+    {
+        return new CheckoutService(
+            $this->cartForTenant($tenants),
+            new DiscountRepository(),
+            new DiscountService(new DiscountRepository(), $tenants),
+            new StockRepository(),
+            new PricingEngine(),
+            $this->shipping(),
+            $this->tax(),
+            new OrderNumberGenerator(),
+            new OrderRepository(),
+            new DownloadRepository(),
+            new ManualPaymentCollector(),
+            $tenants
+        );
+    }
+
+    private function checkoutControllerForTenant(CurrentTenantResolver $tenants): CheckoutController
+    {
+        return new CheckoutController(
+            $this->context,
+            $this->cartForTenant($tenants),
+            $this->checkoutForTenant($tenants),
+            null,
+            $tenants
         );
     }
 

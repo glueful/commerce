@@ -84,6 +84,11 @@ final class CheckoutController
                 $input->shipping_method
             );
 
+            // Wire discipline (same as OrderController::show()/mine()): the service's
+            // internal return keeps the RAW order (payment initiation and other
+            // internal consumers need it) -- only the HTTP response boundary projects.
+            $placed['order'] = StorefrontOrderProjection::forStorefront($placed['order']);
+
             return Response::created($placed, 'Order placed');
         } catch (InsufficientStockException $e) {
             return Response::error('Insufficient stock', 409, [
