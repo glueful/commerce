@@ -78,6 +78,36 @@ final class TenantAdopterTest extends CommerceTestCase
         }
     }
 
+    /**
+     * Admin-order-creation cycle 2, Task 6 (design spec §2.6): the finalize
+     * idempotency ledger carries its own `tenant_uuid` directly, so it is swept
+     * by the ordinary `tenantTables()` inventory with no special-cased handling.
+     */
+    public function testAdoptRekeysDraftAttemptsTable(): void
+    {
+        $this->connection->table('commerce_order_draft_attempts')->insert([
+            'tenant_uuid' => '',
+            'idempotency_key' => 'idem-adopt-001',
+            'request_fingerprint' => md5('adopt-001'),
+            'order_uuid' => 'orderadopt01',
+            'status' => 'pending',
+        ]);
+
+        $result = (new TenantAdopter())->adopt($this->context, 'tenantDFT0001');
+
+        self::assertSame(1, $result['tables']['commerce_order_draft_attempts']);
+        self::assertSame(
+            0,
+            $this->connection->table('commerce_order_draft_attempts')->where('tenant_uuid', '=', '')->count()
+        );
+        self::assertSame(
+            1,
+            $this->connection->table('commerce_order_draft_attempts')
+                ->where('tenant_uuid', '=', 'tenantDFT0001')
+                ->count()
+        );
+    }
+
     public function testAdoptRekeysMarketplaceTablesEvenWhenTheMasterSwitchIsOff(): void
     {
         self::assertFalse(

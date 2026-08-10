@@ -7,7 +7,6 @@ namespace Glueful\Extensions\Commerce\Http\Admin;
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Events\EventService;
 use Glueful\Extensions\Commerce\Cart\AddonSnapshot;
-use Glueful\Extensions\Commerce\Events\OrderFulfilled;
 use Glueful\Extensions\Commerce\Events\OrderNoteAdded;
 use Glueful\Extensions\Commerce\Http\DTOs\CreateOrderNoteData;
 use Glueful\Extensions\Commerce\Http\DTOs\FulfillOrderData;
@@ -21,6 +20,7 @@ use Glueful\Extensions\Commerce\Inventory\StockRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerOrderFulfillmentService;
 use Glueful\Extensions\Commerce\Marketplace\SellerOrderRepository;
 use Glueful\Extensions\Commerce\Marketplace\SellerWebhookOutboxPublisher;
+use Glueful\Extensions\Commerce\Orders\OrderFulfillmentService;
 use Glueful\Extensions\Commerce\Orders\OrderPaymentService;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
 use Glueful\Extensions\Commerce\Orders\OrderStateMachine;
@@ -49,6 +49,7 @@ final class AdminOrderController
         private ?SellerOrderFulfillmentService $fulfillment = null,
         private ?SellerWebhookOutboxPublisher $webhooks = null,
         private ?ProductRepository $products = null,
+        private ?OrderFulfillmentService $orderFulfillment = null,
     ) {
         $this->orders ??= app($context, OrderRepository::class);
         $this->stock ??= app($context, StockRepository::class);
@@ -74,6 +75,11 @@ final class AdminOrderController
         // Appended like $sellerOrders above: zero-collaborator construction keeps every
         // pre-existing positional-arg test call site working unchanged.
         $this->products ??= new ProductRepository();
+        // Same reasoning again (admin-order-creation cycle 2, Task 5): reuses the
+        // already-resolved $this->orders collaborator rather than `app()`, so this
+        // appended 11th constructor argument never breaks a pre-existing
+        // positional-arg test call site either.
+        $this->orderFulfillment ??= new OrderFulfillmentService($this->orders);
     }
 
     #[ApiOperation(summary: 'List orders', tags: ['Commerce Admin'])]
@@ -239,20 +245,11 @@ final class AdminOrderController
                 return Response::success(OrderProjection::forAdmin($this->order($uuid)), 'Order fulfilled');
             }
 
-            db($this->context)->transaction(function () use ($tenant, $uuid, $input): void {
-                // Same unknown/cross-tenant 404 pre-check as cancel(): without it,
-                // transition()'s missing-order RuntimeException surfaces as a 500.
-                $this->order($uuid);
-                $this->orders->transition($this->context, $tenant, $uuid, 'fulfilled', [
-                    'fulfillment_status' => 'fulfilled',
-                    'tracking_ref' => $input->tracking_ref,
-                ]);
-            });
-
-            // The event gets the RAW row (listeners/webhook fan-out read internal
-            // columns); only the HTTP response projects.
-            $fulfilled = $this->order($uuid);
-            $this->dispatch(new OrderFulfilled($fulfilled));
+            // Non-partitioned path: extracted to OrderFulfillmentService (admin-order-creation
+            // cycle 2, Task 5) -- it owns the transaction, the tenant-safe precheck, the CAS
+            // paid -> fulfilled transition, the raw-row reload, and the exactly-once
+            // OrderFulfilled dispatch. This controller never dispatches that event itself.
+            $fulfilled = $this->orderFulfillment->fulfill($this->context, $tenant, $uuid, $input->tracking_ref);
 
             return Response::success(OrderProjection::forAdmin($fulfilled), 'Order fulfilled');
         } catch (\DomainException $e) {

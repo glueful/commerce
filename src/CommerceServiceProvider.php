@@ -60,6 +60,7 @@ use Glueful\Extensions\Commerce\Http\Admin\AdminGrantController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminMarketplaceFinancialController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminMediaController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminOrderController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminOrderDraftController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminPayoutController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminProductController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminRefundController;
@@ -153,9 +154,15 @@ use Glueful\Extensions\Commerce\Orders\Downloads\DownloadAccessService;
 use Glueful\Extensions\Commerce\Orders\Downloads\DownloadGrantRepository;
 use Glueful\Extensions\Commerce\Orders\Downloads\DownloadGrantService;
 use Glueful\Extensions\Commerce\Orders\Downloads\DownloadUrlSigner;
+use Glueful\Extensions\Commerce\Orders\DraftAttemptRepository;
+use Glueful\Extensions\Commerce\Orders\DraftCleanupService;
+use Glueful\Extensions\Commerce\Orders\DraftFinalizationService;
+use Glueful\Extensions\Commerce\Orders\DraftOrderService;
 use Glueful\Extensions\Commerce\Orders\ExpiryService;
+use Glueful\Extensions\Commerce\Orders\OrderFulfillmentService;
 use Glueful\Extensions\Commerce\Orders\OrderPaymentService;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
+use Glueful\Extensions\Commerce\Orders\PurchasableLineResolver;
 use Glueful\Extensions\Commerce\Orders\Refunds\RefundRepository;
 use Glueful\Extensions\Commerce\Orders\Refunds\RefundService;
 use Glueful\Extensions\Commerce\Payments\ManualPaymentCollector;
@@ -328,6 +335,10 @@ final class CommerceServiceProvider extends ServiceProvider
                 'class' => CartRepository::class,
                 'shared' => true,
             ],
+            PurchasableLineResolver::class => [
+                'factory' => [self::class, 'makePurchasableLineResolver'],
+                'shared' => true,
+            ],
             CartService::class => [
                 'factory' => [self::class, 'makeCartService'],
                 'shared' => true,
@@ -358,6 +369,11 @@ final class CommerceServiceProvider extends ServiceProvider
             ],
             OrderPaymentService::class => [
                 'class' => OrderPaymentService::class,
+                'shared' => true,
+                'autowire' => true,
+            ],
+            OrderFulfillmentService::class => [
+                'class' => OrderFulfillmentService::class,
                 'shared' => true,
                 'autowire' => true,
             ],
@@ -664,6 +680,22 @@ final class CommerceServiceProvider extends ServiceProvider
                 'factory' => [self::class, 'makeExpiryService'],
                 'shared' => true,
             ],
+            DraftOrderService::class => [
+                'factory' => [self::class, 'makeDraftOrderService'],
+                'shared' => true,
+            ],
+            DraftCleanupService::class => [
+                'factory' => [self::class, 'makeDraftCleanupService'],
+                'shared' => true,
+            ],
+            DraftAttemptRepository::class => [
+                'class' => DraftAttemptRepository::class,
+                'shared' => true,
+            ],
+            DraftFinalizationService::class => [
+                'factory' => [self::class, 'makeDraftFinalizationService'],
+                'shared' => true,
+            ],
             OrderPaymentConfirmationHandler::class => [
                 'factory' => [self::class, 'makeOrderPaymentConfirmationHandler'],
                 'shared' => true,
@@ -711,6 +743,10 @@ final class CommerceServiceProvider extends ServiceProvider
             ],
             AdminOrderController::class => [
                 'factory' => [self::class, 'makeAdminOrderController'],
+                'shared' => true,
+            ],
+            AdminOrderDraftController::class => [
+                'factory' => [self::class, 'makeAdminOrderDraftController'],
                 'shared' => true,
             ],
             AdminRefundController::class => [
@@ -1057,6 +1093,17 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(PricingEngine::class),
             self::tenantResolver($container),
             $container->get(AddonRepository::class),
+            $container->get(ShippingClassRepository::class),
+            $container->get(PurchasableLineResolver::class)
+        );
+    }
+
+    public static function makePurchasableLineResolver(ContainerInterface $container): PurchasableLineResolver
+    {
+        return new PurchasableLineResolver(
+            $container->get(VariantRepository::class),
+            $container->get(ProductRepository::class),
+            $container->get(AddonRepository::class),
             $container->get(ShippingClassRepository::class)
         );
     }
@@ -1342,6 +1389,85 @@ final class CommerceServiceProvider extends ServiceProvider
         );
     }
 
+    /**
+     * Admin-order-creation cycle 2, Task 9. `MarketplaceMode` is injected (not
+     * constructed inline) so the ORDER-level partitioning decision behind the
+     * `marketplace` eligibility reason reads the SAME shared instance every other
+     * marketplace consumer does; the user provider is SOFT-resolved exactly as
+     * {@see self::makeAdminCustomerController()} does -- absent, user attachment
+     * fails closed on its own neutral 422 rather than silently linking.
+     */
+    public static function makeDraftOrderService(ContainerInterface $container): DraftOrderService
+    {
+        return new DraftOrderService(
+            $container->get(OrderRepository::class),
+            $container->get(PurchasableLineResolver::class),
+            $container->get(PricingEngine::class),
+            $container->get(ShippingRateProvider::class),
+            $container->get(TaxCalculator::class),
+            $container->get(DiscountRepository::class),
+            $container->get(DiscountService::class),
+            $container->get(DraftCleanupService::class),
+            self::tenantResolver($container),
+            $container->get(MarketplaceMode::class),
+            self::makeUserProvider($container)
+        );
+    }
+
+    /**
+     * Admin-order-creation cycle 2, Task 10 (design spec §2.5). Takes the SAME
+     * shared collaborators the draft mutation surface and storefront checkout
+     * take -- one shipping provider, one tax calculator, one pricing engine, one
+     * resolver -- so a finalize can never price an order differently from the
+     * draft the operator was just looking at for want of a differently-configured
+     * dependency. `MarketplaceMode` is injected for the same reason
+     * {@see self::makeDraftOrderService()} injects it: the order-level
+     * partitioning decision behind the `marketplace` line rejection must read the
+     * shared instance every other marketplace consumer reads.
+     */
+    public static function makeDraftFinalizationService(
+        ContainerInterface $container
+    ): DraftFinalizationService {
+        return new DraftFinalizationService(
+            $container->get(OrderRepository::class),
+            $container->get(DraftAttemptRepository::class),
+            $container->get(PurchasableLineResolver::class),
+            $container->get(PricingEngine::class),
+            $container->get(ShippingRateProvider::class),
+            $container->get(TaxCalculator::class),
+            $container->get(DiscountRepository::class),
+            $container->get(DiscountService::class),
+            $container->get(StockRepository::class),
+            $container->get(OrderNumberGenerator::class),
+            self::tenantResolver($container),
+            $container->get(MarketplaceMode::class)
+        );
+    }
+
+    public static function makeAdminOrderDraftController(ContainerInterface $container): AdminOrderDraftController
+    {
+        return new AdminOrderDraftController(
+            $container->get(ApplicationContext::class),
+            $container->get(DraftOrderService::class),
+            $container->get(DraftFinalizationService::class)
+        );
+    }
+
+    /**
+     * Admin-order-creation cycle 2, Task 8: the draft TTL sweep, driven by the
+     * same `commerce:orders:expire` cron command as {@see ExpiryService} but
+     * deliberately a separate service -- a draft cancellation releases no
+     * stock, dispatches no lifecycle event, and captures no seller webhook, so
+     * it takes none of the expiry service's marketplace collaborators.
+     */
+    public static function makeDraftCleanupService(ContainerInterface $container): DraftCleanupService
+    {
+        return new DraftCleanupService(
+            $container->get(OrderRepository::class),
+            self::tenantResolver($container)
+        );
+    }
+
     public static function makeOrderPaymentConfirmationHandler(
         ContainerInterface $container
     ): OrderPaymentConfirmationHandler {
@@ -1433,7 +1559,11 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(ProductRepository::class),
             $container->get(VariantRepository::class),
             self::tenantResolver($container),
-            $container->get(ShippingClassRepository::class)
+            $container->get(ShippingClassRepository::class),
+            // Left null so the pre-existing direct-construction fallback stands; the
+            // appended MarketplaceMode below is what Task 9's eligibility projection needs.
+            null,
+            $container->get(MarketplaceMode::class)
         );
     }
 

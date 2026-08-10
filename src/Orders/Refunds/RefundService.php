@@ -597,6 +597,10 @@ final class RefundService
         $grandTotal = (int) $order['grand_total'];
         $newTotal = $refundedTotal + $amount;
 
+        // Draft isolation (admin-order-creation cycle 2, Task 8): CALLER-GATED.
+        // Every path into this write already passed
+        // `OrderRepository::claimOrderFinancialMutation()`, which refuses drafts
+        // outright, so this CAS never needs its own status predicate.
         $affected = db($c)->table('commerce_orders')->executeModification(
             <<<'SQL'
 UPDATE commerce_orders

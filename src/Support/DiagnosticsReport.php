@@ -186,10 +186,20 @@ final class DiagnosticsReport
             'commerce_stock_movements',
             'commerce_carts',
             'commerce_cart_lines',
+            // Draft isolation (admin-order-creation cycle 2, Task 8): this is a
+            // SCHEMA/health probe over raw table presence and row counts, not a
+            // business reader -- drafts are counted like every other row on
+            // purpose, so no OrderScope predicate belongs here.
             'commerce_orders',
             'commerce_order_lines',
             'commerce_refunds',
             'commerce_order_events',
+            // Admin-order-creation cycle 2, Task 6 (design spec §2.6): finalize
+            // idempotency ledger for admin-created ("walk-in") orders. Carries its
+            // own `tenant_uuid` directly (not a join-child of `commerce_orders`),
+            // so it is swept by `tenantTables()` below by omission from its
+            // exclusion list -- no addition to that list needed.
+            'commerce_order_draft_attempts',
             'commerce_sequences',
             'commerce_discounts',
             'commerce_discount_redemptions',

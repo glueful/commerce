@@ -35,6 +35,13 @@ final class ExpiryService
     {
         $tenant = $this->tenants->tenantUuid($context);
         $cutoff = gmdate('Y-m-d H:i:s', time() - (CommerceSettings::orderExpiryMinutes($context) * 60));
+        // Draft isolation (admin-order-creation cycle 2, Task 8): this sweep is
+        // pinned to `pending_payment` -- an exact-match ALLOWLIST that is
+        // strictly stronger than OrderScope's exclusion, so a draft can never
+        // be released/canceled here no matter how old it is. Stale DRAFTS are
+        // the separate, draft-specific concern of
+        // {@see DraftCleanupService::cancelStale()} (audit rows only, no stock
+        // release, no marketplace capture). Keep this an exact match.
         $orders = db($context)->table('commerce_orders')
             ->where('tenant_uuid', '=', $tenant)
             ->where('status', '=', 'pending_payment')

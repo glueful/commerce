@@ -43,6 +43,14 @@ return [
         'expiry_minutes' => (int) env('COMMERCE_ORDER_EXPIRY_MINUTES', 60),
         // {seq} placeholder, zero-padded to 6.
         'number_format' => env('COMMERCE_ORDER_NUMBER_FORMAT', 'ORD-{seq}'),
+        // Admin-order-creation cycle 2, Task 8: how long an untouched admin
+        // ("walk-in") DRAFT order survives before the expiry cron cancels it.
+        // Measured from the draft's LAST TOUCH (`updated_at`, falling back to
+        // `created_at`), so an actively edited draft never expires under an
+        // operator. Deliberately generous and independent of `expiry_minutes`:
+        // that governs unpaid REAL orders holding reserved stock, this governs
+        // an operator's unfinished paperwork, which holds nothing.
+        'draft_ttl_days' => (int) env('COMMERCE_ORDER_DRAFT_TTL_DAYS', 30),
     ],
 
     'tenancy' => [
@@ -192,6 +200,18 @@ return [
         'address' => env('COMMERCE_SELLER_ADDRESS'),
         'tax_id' => env('COMMERCE_SELLER_TAX_ID'),
     ],
+
+    // Admin-origin order-confirmation toggle (admin-order-creation cycle 2,
+    // Task 10; design spec §2.5.9). Governs the "we received your order" mail for
+    // orders whose `origin` is `admin` — a walk-in sale is handed over at the
+    // counter, so a merchant may want no placement mail for those while keeping
+    // every payment/fulfilment mail. ON by default (no behavior change for anyone
+    // who never sets it) and consulted ONLY for admin-origin orders: storefront
+    // OrderPlaced handling is byte-identical either way. Keyed at the config root
+    // because settings keys EQUAL config keys (store-settings spec §3.2) and this
+    // is the runtime-editable `commerce.order_confirmation` toggle a host's
+    // settings screen exposes.
+    'order_confirmation' => (bool) env('COMMERCE_ORDER_CONFIRMATION', true),
 
     'email' => [
         // Master switch: OFF by default. Operators opt in after configuring an email

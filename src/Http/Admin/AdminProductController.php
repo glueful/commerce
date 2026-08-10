@@ -20,6 +20,8 @@ use Glueful\Extensions\Commerce\Http\DTOs\UpdateProductData;
 use Glueful\Extensions\Commerce\Http\DTOs\UpdateVariantData;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
 use Glueful\Extensions\Commerce\Marketplace\CommissionPolicyException;
+use Glueful\Extensions\Commerce\Marketplace\MarketplaceMode;
+use Glueful\Extensions\Commerce\Orders\DraftLineEligibility;
 use Glueful\Extensions\Commerce\Shipping\ShippingClassRepository;
 use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
@@ -45,6 +47,9 @@ final class AdminProductController
         private ?ShippingClassRepository $shippingClasses = null,
         // Appended (1.6.0): only the list summary reads stock from this controller.
         private ?StockRepository $stockRepository = null,
+        // Appended (admin-order-creation cycle 2, Task 9): the ORDER-level marketplace
+        // decision behind `admin_draft_ineligible_reason`'s `marketplace` case.
+        private ?MarketplaceMode $marketplace = null,
     ) {
         $this->catalog ??= app($context, CatalogService::class);
         $this->products ??= app($context, ProductRepository::class);
@@ -57,6 +62,10 @@ final class AdminProductController
         // plain reader here and container-resolving it would make every caller that constructs
         // this controller without a bound StockRepository fail at construction time.
         $this->stockRepository ??= new StockRepository();
+        // Same reasoning as $stockRepository above: zero-collaborator direct construction
+        // keeps every pre-existing positional-arg call site working unchanged, and
+        // `installEnabled()` is config-only so a non-marketplace install pays nothing.
+        $this->marketplace ??= new MarketplaceMode();
     }
 
     #[ApiOperation(summary: 'List products', tags: ['Commerce Admin'])]
@@ -78,13 +87,78 @@ final class AdminProductController
         );
 
         return Response::paginated(
-            $this->withListSummary($tenant, $result['items']),
+            $this->withDraftEligibility($tenant, $this->withListSummary($tenant, $result['items'])),
             $result['total'],
             $page,
             $perPage,
             null,
             'Products retrieved'
         );
+    }
+
+    /**
+     * The AUTHORITATIVE draft-eligibility surface (admin-order-creation cycle 2,
+     * Task 9, design spec §2.3): two additive keys per row,
+     * `admin_draft_eligible: bool` and the nullable closed
+     * `admin_draft_ineligible_reason` (`digital | marketplace | unavailable`).
+     *
+     * ONE PATH, not two agreeing implementations: both this projection and the
+     * draft line endpoint's own rejection call {@see DraftLineEligibility}, so the
+     * SPA can disable an ineligible search result before any mutation and the
+     * write authority independently rechecks with the identical vocabulary. There
+     * is no client-side reconstruction and no "try the line endpoint and see"
+     * discovery fallback.
+     *
+     * TWO reads for a WHOLE page, never one per row:
+     *  - the ORDER-level marketplace decision (`installEnabled() && activeFor()`)
+     *    is composed ONCE for the page, exactly as `CheckoutService::placeOrder()`
+     *    composes it, with the config-only master switch short-circuiting it
+     *    entirely on a non-marketplace install;
+     *  - buyer availability is answered by the SHARED authority,
+     *    {@see ProductRepository::buyerAvailableUuids()} -- the batched form of the
+     *    very `findBuyerAvailableByUuid()` predicate the draft line endpoint's
+     *    resolver applies. The predicate is never restated here, so this
+     *    projection cannot desync from the write authority it is advertising.
+     *
+     * The one short-circuit: with the marketplace master switch OFF,
+     * `ProductRepository::applyBuyerAvailability()` is itself a documented no-op
+     * and `paginatedForAdmin()` has already excluded tombstoned rows, so every row
+     * on the page is buyer-available by construction and the batched read is
+     * skipped. That is the same master-off fast path the repository documents, not
+     * an independent judgement about availability.
+     *
+     * (Product `status` is deliberately NOT part of buyer availability -- see
+     * `ProductRepository::findBuyerAvailableByUuid()` -- so a `draft`-status
+     * product stays addable here exactly as it is addable to a cart.)
+     *
+     * @param list<array<string,mixed>> $items
+     * @return list<array<string,mixed>>
+     */
+    private function withDraftEligibility(string $tenant, array $items): array
+    {
+        if ($items === []) {
+            return [];
+        }
+
+        $installed = $this->marketplace->installEnabled($this->context);
+        $partitioning = $installed && $this->marketplace->activeFor($this->context, $tenant);
+        $available = $installed
+            ? $this->products->buyerAvailableUuids(
+                $this->context,
+                $tenant,
+                array_map(static fn (array $row): string => (string) $row['uuid'], $items)
+            )
+            : null;
+
+        return array_map(static function (array $row) use ($available, $partitioning): array {
+            $buyerAvailable = $available === null || isset($available[(string) $row['uuid']]);
+            $reason = DraftLineEligibility::forProductRow($row, $buyerAvailable, $partitioning);
+
+            return $row + [
+                'admin_draft_eligible' => $reason === null,
+                'admin_draft_ineligible_reason' => $reason,
+            ];
+        }, $items);
     }
 
     /**

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Commerce\Customers;
 
 use Glueful\Bootstrap\ApplicationContext;
+use Glueful\Extensions\Commerce\Orders\OrderScope;
 use Glueful\Extensions\Commerce\Support\EmailNormalizer;
 
 /**
@@ -139,7 +140,7 @@ final class CustomerAggregationRepository
     public function findByUser(ApplicationContext $context, string $tenant, string $userUuid): ?array
     {
         $row = db($context)->table(self::TABLE)->executeRawFirst(
-            $this->detailSql() . ' WHERE tenant_uuid = ? AND user_uuid = ?',
+            $this->detailSql() . ' WHERE ' . OrderScope::excludeDraftsSql() . ' AND tenant_uuid = ? AND user_uuid = ?',
             [$tenant, $userUuid]
         );
 
@@ -151,7 +152,9 @@ final class CustomerAggregationRepository
     {
         $normalized = EmailNormalizer::normalize($email);
         $row = db($context)->table(self::TABLE)->executeRawFirst(
-            $this->detailSql() . ' WHERE tenant_uuid = ? AND user_uuid IS NULL AND LOWER(TRIM(email)) = ?',
+            $this->detailSql()
+                . ' WHERE ' . OrderScope::excludeDraftsSql()
+                . ' AND tenant_uuid = ? AND user_uuid IS NULL AND LOWER(TRIM(email)) = ?',
             [$tenant, $normalized]
         );
 
@@ -218,7 +221,12 @@ final class CustomerAggregationRepository
      */
     private function buildWhere(string $tenant, array $filters): array
     {
-        $sql = 'WHERE tenant_uuid = ?';
+        // Draft isolation (admin-order-creation cycle 2, Task 8): a draft has
+        // no customer identity yet (its `email`/`user_uuid` may both be NULL,
+        // and its totals are provisional), so it must never contribute a
+        // customer row, an order count, or a spend figure. Applied FIRST, in
+        // the one place every aggregate query's WHERE is built.
+        $sql = 'WHERE ' . OrderScope::excludeDraftsSql() . ' AND tenant_uuid = ?';
         $bindings = [$tenant];
 
         $emailFilter = isset($filters['email']) ? trim($filters['email']) : '';

@@ -76,7 +76,10 @@ final class OrderController
     #[ApiResponse(404, description: 'Order not found')]
     public function show(Request $request, string $number): Response
     {
-        return Response::success($this->authorizedOrder($request, $number), 'Order retrieved');
+        return Response::success(
+            StorefrontOrderProjection::forStorefront($this->authorizedOrder($request, $number)),
+            'Order retrieved'
+        );
     }
 
     #[ApiOperation(summary: 'Retry payment for an order', tags: ['Commerce Storefront'])]
@@ -118,7 +121,12 @@ final class OrderController
             $perPage
         );
 
-        return Response::paginated($result['items'], $result['total'], $page, $perPage, null, 'Orders retrieved');
+        $items = array_map(
+            [StorefrontOrderProjection::class, 'forStorefront'],
+            $result['items']
+        );
+
+        return Response::paginated($items, $result['total'], $page, $perPage, null, 'Orders retrieved');
     }
 
     #[ApiOperation(summary: 'List digital-download grants for an order', tags: ['Commerce Storefront'])]

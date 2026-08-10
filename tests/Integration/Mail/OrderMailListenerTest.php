@@ -30,6 +30,7 @@ use Glueful\Extensions\Commerce\Mail\OrderMailListener;
 use Glueful\Extensions\Commerce\Orders\CheckoutService;
 use Glueful\Extensions\Commerce\Orders\Downloads\DownloadGrantRepository;
 use Glueful\Extensions\Commerce\Orders\Downloads\DownloadGrantService;
+use Glueful\Extensions\Commerce\Orders\OrderFulfillmentService;
 use Glueful\Extensions\Commerce\Orders\OrderNumberGenerator;
 use Glueful\Extensions\Commerce\Orders\OrderPaymentService;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
@@ -319,6 +320,204 @@ final class OrderMailListenerTest extends CommerceTestCase
 
         // Reaching this line without an uncaught exception is the assertion.
         self::assertTrue(true);
+    }
+
+    // =====================================================================
+    // Nullable order email + the admin-origin confirmation toggle
+    // (admin-order-creation cycle 2, Task 10; design Ruling 4/7, spec §2.5.9).
+    // =====================================================================
+
+    /** @return list<array{0:mixed}> */
+    public static function unusableEmailProvider(): array
+    {
+        return [
+            'null' => [null],
+            'empty string' => [''],
+            'whitespace only' => ["  \t "],
+        ];
+    }
+
+    /**
+     * Ruling 7, verbatim: "no email means no notification attempt". The guard is
+     * ONE shared check inside `safeSend()`, so this is asserted across EVERY
+     * lifecycle template at once rather than template by template -- a new
+     * template added tomorrow inherits it by construction.
+     *
+     * @dataProvider unusableEmailProvider
+     */
+    public function testAnOrderWithNoUsableEmailEmitsZeroMailerCallsForEveryTemplate(mixed $email): void
+    {
+        $mailer = new RecordingCommerceMailer();
+        $this->bindListener($mailer);
+
+        // A COMPLETE raw row shape: every listener downstream of `safeSend()` --
+        // notably the digital-grant issuance `onOrderPaid()` runs first -- reads
+        // real order columns, so a half-built fixture would prove the guard only
+        // by accident.
+        $order = [
+            'uuid' => 'ord000000001',
+            'tenant_uuid' => '',
+            'order_number' => 'ORD-1',
+            'status' => 'paid',
+            'email' => $email,
+            'origin' => 'admin',
+            'currency' => 'USD',
+            'grand_total' => 1000,
+        ];
+
+        $this->eventService()->dispatch(new OrderPlaced($order));
+        $this->eventService()->dispatch(new OrderPaid($order));
+        $this->eventService()->dispatch(new OrderFulfilled($order));
+        $this->eventService()->dispatch(new RefundCompleted($order, ['amount' => 500, 'reason' => 'operator']));
+        $this->eventService()->dispatch(new OrderNoteAdded($order, [
+            'body' => 'Ready for collection.',
+            'visibility' => 'customer',
+            'notify' => true,
+        ]));
+
+        self::assertSame([], $mailer->calls, 'an order with no usable email must never reach the mailer');
+    }
+
+    /**
+     * The Complete Sale chain (design spec §2.8) simulated at the ENGINE level:
+     * the two services Thallo's pack endpoint chains, invoked directly and in
+     * order against a real anonymous walk-in order. Neither step may email
+     * anybody, and both must still complete their own persisted transition --
+     * proving the guard short-circuits the MAIL, never the sale.
+     */
+    public function testTheCompleteSaleChainOnAnAnonymousWalkInOrderEmitsZeroMailAndStillCompletes(): void
+    {
+        $mailer = new RecordingCommerceMailer();
+        $this->bindListener($mailer);
+
+        $orderUuid = $this->seedAdminOrder(null);
+
+        (new OrderPaymentService(new OrderRepository()))->markPaid($this->context, '', $orderUuid);
+        (new OrderFulfillmentService(new OrderRepository()))->fulfill($this->context, '', $orderUuid, null);
+
+        self::assertSame([], $mailer->calls, 'Complete Sale on a null-email order must emit no mail at all');
+
+        $row = $this->connection->table('commerce_orders')->where('uuid', '=', $orderUuid)->first();
+        self::assertNotNull($row);
+        self::assertSame('fulfilled', (string) $row['status']);
+    }
+
+    /**
+     * The same chain on a walk-in order that DOES carry an email behaves exactly
+     * as a storefront order does -- the guard is about the address, never about
+     * the origin.
+     */
+    public function testTheCompleteSaleChainOnAWalkInOrderWithAnEmailSendsPaidAndFulfilled(): void
+    {
+        $mailer = new RecordingCommerceMailer();
+        $this->bindListener($mailer);
+
+        $orderUuid = $this->seedAdminOrder('walkin@example.com');
+
+        (new OrderPaymentService(new OrderRepository()))->markPaid($this->context, '', $orderUuid);
+        (new OrderFulfillmentService(new OrderRepository()))->fulfill($this->context, '', $orderUuid, null);
+
+        self::assertSame(
+            ['order_paid', 'order_fulfilled'],
+            array_map(static fn (array $call): string => $call['template'], $mailer->calls)
+        );
+    }
+
+    public function testTheAdminOriginConfirmationToggleGatesOrderPlacedAndNothingElse(): void
+    {
+        $mailer = new RecordingCommerceMailer();
+        $this->bindListener($mailer);
+        $this->context->overrideConfig('commerce.order_confirmation', false);
+
+        $order = [
+            'uuid' => 'ord000000001',
+            'tenant_uuid' => '',
+            'order_number' => 'ORD-1',
+            'status' => 'paid',
+            'email' => 'walkin@example.com',
+            'origin' => 'admin',
+            'currency' => 'USD',
+            'grand_total' => 1000,
+        ];
+
+        $this->eventService()->dispatch(new OrderPlaced($order));
+        self::assertSame([], $mailer->calls, 'the toggle off must suppress the admin-origin placement mail');
+
+        // Every OTHER template is untouched by this toggle.
+        $this->eventService()->dispatch(new OrderPaid($order));
+        $this->eventService()->dispatch(new OrderFulfilled($order));
+        self::assertSame(
+            ['order_paid', 'order_fulfilled'],
+            array_map(static fn (array $call): string => $call['template'], $mailer->calls)
+        );
+    }
+
+    public function testTheAdminOriginConfirmationToggleDefaultsOnAndSendsThePlacementMail(): void
+    {
+        $mailer = new RecordingCommerceMailer();
+        $this->bindListener($mailer);
+        // No override at all -- the config default is what an existing install has.
+
+        $this->eventService()->dispatch(new OrderPlaced([
+            'uuid' => 'ord000000001',
+            'order_number' => 'ORD-1',
+            'email' => 'walkin@example.com',
+            'origin' => 'admin',
+        ]));
+
+        self::assertCount(1, $mailer->calls);
+        self::assertSame('order_placed', $mailer->calls[0]['template']);
+    }
+
+    public function testTheConfirmationToggleNeverGatesAStorefrontOrder(): void
+    {
+        $mailer = new RecordingCommerceMailer();
+        $this->bindListener($mailer);
+        $this->context->overrideConfig('commerce.order_confirmation', false);
+
+        // Explicit storefront origin, and a legacy row carrying no origin at all
+        // (which migration 022 backfilled to `storefront`) -- both must still send.
+        $this->eventService()->dispatch(new OrderPlaced([
+            'uuid' => 'ord000000001',
+            'order_number' => 'ORD-1',
+            'email' => 'buyer@example.com',
+            'origin' => 'storefront',
+        ]));
+        $this->eventService()->dispatch(new OrderPlaced([
+            'uuid' => 'ord000000002',
+            'order_number' => 'ORD-2',
+            'email' => 'buyer@example.com',
+        ]));
+
+        self::assertCount(2, $mailer->calls);
+        self::assertSame(['order_placed', 'order_placed'], array_column($mailer->calls, 'template'));
+    }
+
+    /**
+     * An anonymous walk-in order, finalized and awaiting payment -- the shape
+     * `DraftFinalizationService` leaves behind. Inserted directly rather than
+     * driven through finalize: this file's subject is the LISTENER, and the
+     * finalize path has its own suite.
+     */
+    private function seedAdminOrder(?string $email): string
+    {
+        $uuid = 'walkinord' . substr(md5((string) $email . microtime()), 0, 3);
+        $this->connection->table('commerce_orders')->insert([
+            'uuid' => $uuid,
+            'tenant_uuid' => '',
+            'order_number' => 'ORD-WALKIN',
+            'status' => 'pending_payment',
+            'email' => $email,
+            'guest_token_hash' => null,
+            'currency' => 'USD',
+            'subtotal' => 1000,
+            'grand_total' => 1000,
+            'origin' => 'admin',
+            'fulfillment_mode' => 'in_store',
+            'placed_at' => gmdate('Y-m-d H:i:s'),
+        ]);
+
+        return $uuid;
     }
 
     public function testMasterSwitchOffSendsNothingEvenWithAnActiveEmailChannelPresent(): void

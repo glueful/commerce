@@ -7,6 +7,7 @@ namespace Glueful\Extensions\Commerce\Console;
 use Glueful\Auth\Contracts\UserProviderInterface;
 use Glueful\Console\BaseCommand;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
+use Glueful\Extensions\Commerce\Orders\OrderScope;
 use Glueful\Extensions\Commerce\Support\EmailNormalizer;
 use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Input\InputInterface;
@@ -63,8 +64,13 @@ final class CustomersLinkGuestsCommand extends BaseCommand
         $emailOption = $input->getOption('email');
         $dryRun = (bool) $input->getOption('dry-run');
 
-        $query = db($context)->table('commerce_orders')
-            ->whereNull('user_uuid')
+        // Draft isolation (admin-order-creation cycle 2, Task 8): an admin draft
+        // also has a NULL `user_uuid` (and usually a NULL `email`), so without
+        // the shared predicate this sweep would scan and report drafts as
+        // "unresolved guest orders". A draft is not a guest order.
+        $query = OrderScope::excludeDrafts(
+            db($context)->table('commerce_orders')->whereNull('user_uuid')
+        )
             ->orderBy('id', 'ASC');
         if (is_string($tenantOption) && trim($tenantOption) !== '') {
             $query->where('tenant_uuid', '=', trim($tenantOption));

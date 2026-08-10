@@ -2,6 +2,64 @@
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-08-10 — Admin Draft Orders & Walk-In Finalization
+
+**Theme: an admin-born order that acquires its invariants at finalize.** Admins can now build
+draft orders (walk-in-first: every identity field optional, no placeholder emails, no guest
+credential) and finalize them through a single authority that re-resolves the catalog, recalculates
+every total, claims stock atomically, allocates the order number, and transitions to
+`pending_payment` under durable idempotency — while drafts remain structurally invisible to every
+pre-existing storefront, admin, report, mail, webhook, and reconciliation surface.
+
+### Added
+- **`draft` order status** — `draft → [pending_payment, canceled]` in the state machine; BOTH pairs
+  are dedicated-path-only: `OrderRepository::transition()` refuses every draft transition;
+  finalization goes through the new CAS `finalizeDraftTransition()`, cancellation through
+  `DraftCleanupService::cancelDraft()` (draft-specific audit rows — `draft_created`,
+  `draft_canceled`, `draft_expired` — never lifecycle events).
+- **Admin draft API** (`orders.drafts.*` catalog entries, manage mode): create / list / show /
+  update (customer block, fulfillment mode, addresses, live-quoted shipping method, discount code) /
+  line add-update-remove / recalculate (the explicit drift-acceptance operation) / cancel /
+  finalize. Every mutation CAS-increments `draft_revision`; stale writes are typed conflicts.
+- **`DraftFinalizationService`** — tenant-safe preflight (non-revealing 404, zero attempt-ledger
+  writes), then one transaction: idempotency claim (`commerce_order_draft_attempts`,
+  `X-Idempotency-Key` + SHA-256 request fingerprint; replay returns the finalized order, mismatch
+  409, concurrent keys one winner), status/revision/currency conflicts, per-line re-resolution
+  (price/addon drift, availability, digital, marketplace, per-line variant-currency guard, delivery
+  address requirement), server-side recalculation, atomic stock claim + movements, savepoint-safe
+  order-number allocation, snapshot replacement on stable line uuids, discount consumption
+  (anonymous identity rules), CAS transition, attempt completion — `OrderPlaced` dispatches only
+  after commit, carrying the new `origin` field.
+- **Walk-in order schema** — nullable `order_number`/`email`/`guest_token_hash`; new
+  `phone_normalized` (strict E.164) + `phone_display`, `customer_name`, `origin`
+  (`storefront|admin`, backfilled `storefront`), `fulfillment_mode` (`in_store|delivery`,
+  backfilled `delivery` as conservative compatibility), `draft_revision`; new
+  `commerce_order_draft_attempts` ledger (tenant purge/adoption registered).
+- **`PurchasableLineResolver`** — the shared variant/availability/addon pricing authority behind
+  both storefront checkout and draft mutations, with explicit persisted-snapshot vs
+  current-selections addon policies and per-line `sellerUuid` exposure.
+- **`OrderFulfillmentService`** — non-partitioned fulfillment extracted from the admin controller
+  (owns the transaction and exactly-once `OrderFulfilled` dispatch) as a peer of
+  `OrderPaymentService::markPaid()`.
+- **Admin product search eligibility** — `admin_draft_eligible` + closed
+  `admin_draft_ineligible_reason` (`digital|marketplace|unavailable`), one reason authority shared
+  with the draft line endpoints.
+- **Bounded draft cleanup** — `commerce.orders.draft_ttl_days` (default 30), batched idempotent CAS
+  cancellation on the orders-expire cron, isolated from the payment-expiry sweep.
+- **`commerce.order_confirmation`** toggle governing admin-origin order-placed mail; the mail
+  listener now refuses null/blank recipient emails across every lifecycle template.
+
+### Fixed
+- **Storefront wire-projection leak** — `show`/`mine` and the checkout placement response now pass
+  through a closed `StorefrontOrderProjection` allowlist (`guest_token_hash`, `tenant_uuid`,
+  revision counters and friends can no longer serialize), pinned by sentinel-seeding ratchet tests.
+- **`OrderNumberGenerator`** — the competing-insert retry is savepoint-isolated so a caught unique
+  violation can no longer poison the enclosing PostgreSQL transaction.
+- **`commerce_stock.quantity`/`tracked`** — backfilled (`0`/`false`, behavior-preserving for the
+  tracked/quantity read paths; NULL integrity-signal rows are deliberately healed) and now NOT NULL.
+- **Customer aggregation and guest linking** no longer read draft rows (the one genuine
+  pre-existing cross-status leak).
+
 ## [1.9.1] - 2026-08-09 — Order Payable Constant & Invoice Currency Exponent
 
 Additive: one new shared constant, one new invoice-data field, one schema-version bump. No changes

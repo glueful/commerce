@@ -211,7 +211,8 @@ final class MarketplaceRegressionTest extends CommerceTestCase
     // =====================================================================
 
     /**
-     * Pinned pre-MV1 manifest (129 routes; grown additively at 1.5.0/1.6.0), captured from `routes.php` at
+     * Pinned pre-MV1 manifest (129 routes; grown additively at 1.5.0/1.6.0 and again in
+     * admin-order-creation cycle 2), captured from `routes.php` at
      * the commit immediately before the marketplace groups were added
      * (`git diff` from that commit confirms every marketplace/seller route
      * addition is purely inside a `if ($marketplaceEnabled)` block -- never
@@ -221,7 +222,12 @@ final class MarketplaceRegressionTest extends CommerceTestCase
      * (1.5.0): +6 `GET .../products/{uuid}/{categories,tags,attributes,
      * media,children,stock}` per-product read endpoints -- purely additive
      * to the non-marketplace surface, unrelated to the marketplace flag this
-     * test guards.
+     * test guards. Updated again for admin-order-creation cycle 2, Task 9:
+     * +9 `/commerce/admin/orders/drafts...` endpoints, likewise purely
+     * additive to the non-marketplace surface and mounted through the SAME
+     * `AdminRouteCatalog` (never inside a marketplace-gated group), so the
+     * property this test actually guards -- master switch off means zero
+     * marketplace/seller routes -- is untouched.
      *
      * @var list<string>
      */
@@ -236,6 +242,7 @@ final class MarketplaceRegressionTest extends CommerceTestCase
         'DELETE /commerce/admin/downloads/{uuid}',
         'DELETE /commerce/admin/grants/{uuid}/refund-access-override',
         'DELETE /commerce/admin/media/{uuid}',
+        'DELETE /commerce/admin/orders/drafts/{uuid}/lines/{lineUuid}',
         'DELETE /commerce/admin/products/{uuid}',
         'DELETE /commerce/admin/reviews/{uuid}',
         'DELETE /commerce/admin/shipping/classes/{uuid}',
@@ -256,6 +263,8 @@ final class MarketplaceRegressionTest extends CommerceTestCase
         'GET /commerce/admin/discounts',
         'GET /commerce/admin/discounts/{uuid}',
         'GET /commerce/admin/orders',
+        'GET /commerce/admin/orders/drafts',
+        'GET /commerce/admin/orders/drafts/{uuid}',
         'GET /commerce/admin/orders/{uuid}',
         'GET /commerce/admin/orders/{uuid}/invoice-data',
         'GET /commerce/admin/orders/{uuid}/notes',
@@ -306,6 +315,8 @@ final class MarketplaceRegressionTest extends CommerceTestCase
         'PATCH /commerce/admin/discounts/{uuid}',
         'PATCH /commerce/admin/downloads/{uuid}',
         'PATCH /commerce/admin/media/{uuid}',
+        'PATCH /commerce/admin/orders/drafts/{uuid}',
+        'PATCH /commerce/admin/orders/drafts/{uuid}/lines/{lineUuid}',
         'PATCH /commerce/admin/products/{uuid}',
         'PATCH /commerce/admin/shipping/classes/{uuid}',
         'PATCH /commerce/admin/shipping/methods/{uuid}',
@@ -322,6 +333,11 @@ final class MarketplaceRegressionTest extends CommerceTestCase
         'POST /commerce/admin/categories',
         'POST /commerce/admin/discounts',
         'POST /commerce/admin/grants/{uuid}/revoke',
+        'POST /commerce/admin/orders/drafts',
+        'POST /commerce/admin/orders/drafts/{uuid}/cancel',
+        'POST /commerce/admin/orders/drafts/{uuid}/finalize',
+        'POST /commerce/admin/orders/drafts/{uuid}/lines',
+        'POST /commerce/admin/orders/drafts/{uuid}/recalculate',
         'POST /commerce/admin/orders/{uuid}/cancel',
         'POST /commerce/admin/orders/{uuid}/fulfill',
         'POST /commerce/admin/orders/{uuid}/mark-paid',
@@ -376,7 +392,7 @@ final class MarketplaceRegressionTest extends CommerceTestCase
         sort($manifest);
 
         self::assertSame(self::PRE_MV1_ROUTE_MANIFEST, $manifest);
-        self::assertCount(133, $manifest);
+        self::assertCount(143, $manifest);
 
         foreach ($manifest as $route) {
             self::assertDoesNotMatchRegularExpression('#^\S+ /commerce/admin/marketplace#', $route);

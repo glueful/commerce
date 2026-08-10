@@ -14,11 +14,24 @@ final class OrderNumberGenerator
         $updated = $this->incrementExisting($context, $tenant);
         if ($updated === 0) {
             try {
-                db($context)->table('commerce_sequences')->insert([
-                    'tenant_uuid' => $tenant,
-                    'name' => 'order',
-                    'value' => 1,
-                ]);
+                // Run the allocation attempt inside its own savepoint (via the
+                // framework's transaction manager -- Connection::transaction()
+                // nests as a savepoint when a transaction is already active,
+                // or opens a plain outermost transaction otherwise). Without
+                // this, a caught unique-violation on PostgreSQL leaves an
+                // already-open enclosing transaction (e.g. an order-creation
+                // flow) aborted: every later statement -- including the
+                // fallback incrementExisting() call below -- fails with
+                // "current transaction is aborted". Rolling back to the
+                // savepoint instead discards only this failed attempt and
+                // keeps the enclosing transaction usable.
+                db($context)->transaction(function () use ($context, $tenant): void {
+                    db($context)->table('commerce_sequences')->insert([
+                        'tenant_uuid' => $tenant,
+                        'name' => 'order',
+                        'value' => 1,
+                    ]);
+                });
             } catch (\Throwable) {
                 $this->incrementExisting($context, $tenant);
             }

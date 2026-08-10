@@ -1,0 +1,112 @@
+[
+    {
+        "method": "GET",
+        "path": "/commerce/admin/orders/drafts",
+        "controller": "Glueful\\Extensions\\Commerce\\Http\\Admin\\AdminOrderDraftController",
+        "action": "index",
+        "middleware": [
+            "auth",
+            "require_scope:commerce:read"
+        ],
+        "name": null
+    },
+    {
+        "method": "POST",
+        "path": "/commerce/admin/orders/drafts",
+        "controller": "Glueful\\Extensions\\Commerce\\Http\\Admin\\AdminOrderDraftController",
+        "action": "store",
+        "middleware": [
+            "auth",
+            "require_scope:commerce:write"
+        ],
+        "name": null
+    },
+    {
+        "method": "GET",
+        "path": "/commerce/admin/orders/drafts/{uuid}",
+        "controller": "Glueful\\Extensions\\Commerce\\Http\\Admin\\AdminOrderDraftController",
+        "action": "show",
+        "middleware": [
+            "auth",
+            "require_scope:commerce:read"
+        ],
+        "name": null
+    },
+    {
+        "method": "PATCH",
+        "path": "/commerce/admin/orders/drafts/{uuid}",
+        "controller": "Glueful\\Extensions\\Commerce\\Http\\Admin\\AdminOrderDraftController",
+        "action": "update",
+        "middleware": [
+            "auth",
+            "require_scope:commerce:write"
+        ],
+        "name": null
+    },
+    {
+        "method": "POST",
+        "path": "/commerce/admin/orders/drafts/{uuid}/cancel",
+        "controller": "Glueful\\Extensions\\Commerce\\Http\\Admin\\AdminOrderDraftController",
+        "action": "cancel",
+        "middleware": [
+            "auth",
+            "require_scope:commerce:write"
+        ],
+        "name": null
+    },
+    {
+        "method": "POST",
+        "path": "/commerce/admin/orders/drafts/{uuid}/finalize",
+        "controller": "Glueful\\Extensions\\Commerce\\Http\\Admin\\AdminOrderDraftController",
+        "action": "finalize",
+        "middleware": [
+            "auth",
+            "require_scope:commerce:write"
+        ],
+        "name": null
+    },
+    {
+        "method": "POST",
+        "path": "/commerce/admin/orders/drafts/{uuid}/recalculate",
+        "controller": "Glueful\\Extensions\\Commerce\\Http\\Admin\\AdminOrderDraftController",
+        "action": "recalculate",
+        "middleware": [
+            "auth",
+            "require_scope:commerce:write"
+        ],
+        "name": null
+    },
+    {
+        "method": "POST",
+        "path": "/commerce/admin/orders/drafts/{uuid}/lines",
+        "controller": "Glueful\\Extensions\\Commerce\\Http\\Admin\\AdminOrderDraftController",
+        "action": "storeLine",
+        "middleware": [
+            "auth",
+            "require_scope:commerce:write"
+        ],
+        "name": null
+    },
+    {
+        "method": "PATCH",
+        "path": "/commerce/admin/orders/drafts/{uuid}/lines/{lineUuid}",
+        "controller": "Glueful\\Extensions\\Commerce\\Http\\Admin\\AdminOrderDraftController",
+        "action": "updateLine",
+        "middleware": [
+            "auth",
+            "require_scope:commerce:write"
+        ],
+        "name": null
+    },
+    {
+        "method": "DELETE",
+        "path": "/commerce/admin/orders/drafts/{uuid}/lines/{lineUuid}",
+        "controller": "Glueful\\Extensions\\Commerce\\Http\\Admin\\AdminOrderDraftController",
+        "action": "destroyLine",
+        "middleware": [
+            "auth",
+            "require_scope:commerce:write"
+        ],
+        "name": null
+    }
+]

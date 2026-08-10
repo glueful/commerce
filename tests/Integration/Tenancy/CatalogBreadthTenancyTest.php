@@ -413,7 +413,9 @@ final class CatalogBreadthTenancyTest extends CommerceTestCase
         // `commerce_seller_webhook_deliveries`,
         // `commerce_seller_webhook_endpoint_events`) added in migration 019,
         // and the two wishlist tables (`commerce_wishlists`,
-        // `commerce_wishlist_items`) added in migration 020), so a future
+        // `commerce_wishlist_items`) added in migration 020, and the
+        // `commerce_order_draft_attempts` finalize-idempotency ledger added in
+        // migration 022, admin-order-creation cycle 2 Task 6), so a future
         // accidental removal/addition is caught here as well as locally.
         self::assertSame([
             'commerce_products',
@@ -423,6 +425,7 @@ final class CatalogBreadthTenancyTest extends CommerceTestCase
             'commerce_carts',
             'commerce_orders',
             'commerce_refunds',
+            'commerce_order_draft_attempts',
             'commerce_sequences',
             'commerce_discounts',
             'commerce_discount_redemptions',

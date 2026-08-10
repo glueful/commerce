@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Glueful\Extensions\Commerce\Reports;
 
 use Glueful\Bootstrap\ApplicationContext;
+use Glueful\Extensions\Commerce\Orders\OrderScope;
 use Glueful\Extensions\Commerce\Support\DateBucketSql;
 
 /**
@@ -129,14 +130,18 @@ final class SalesReportRepository
      */
     private function reportAtDerivedTableSql(): string
     {
+        $notDraft = OrderScope::excludeDraftsSql();
+
         return '('
             . 'SELECT placed_at AS report_at, status, grand_total, discount_total, shipping_total, tax_total '
             . 'FROM commerce_orders '
-            . 'WHERE tenant_uuid = ? AND placed_at IS NOT NULL AND placed_at >= ? AND placed_at < ? '
+            . 'WHERE ' . $notDraft
+            . ' AND tenant_uuid = ? AND placed_at IS NOT NULL AND placed_at >= ? AND placed_at < ? '
             . 'UNION ALL '
             . 'SELECT created_at AS report_at, status, grand_total, discount_total, shipping_total, tax_total '
             . 'FROM commerce_orders '
-            . 'WHERE tenant_uuid = ? AND placed_at IS NULL AND created_at >= ? AND created_at < ?'
+            . 'WHERE ' . $notDraft
+            . ' AND tenant_uuid = ? AND placed_at IS NULL AND created_at >= ? AND created_at < ?'
             . ')';
     }
 }

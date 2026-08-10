@@ -25,6 +25,38 @@ final class VariantRepository
         return $row === null ? null : $this->decodeJson($row);
     }
 
+    /**
+     * Batched `findByUuid()` (Task 7 hardening: shipping-class N+1 fix):
+     * one `IN (...)` query for a LIST of variant uuids, tenant-scoped --
+     * used by {@see \Glueful\Extensions\Commerce\Cart\CartService::pricedLines()}'s
+     * shipping-class pre-pass so it can batch-resolve every distinct class a
+     * WHOLE cart references in one {@see \Glueful\Extensions\Commerce\Shipping\ShippingClassRepository::slugsByUuids()}
+     * call, mirroring {@see self::forProducts()}'s existing batching
+     * pattern. A missing key means the uuid doesn't resolve for this
+     * tenant.
+     *
+     * @param list<string> $uuids
+     * @return array<string,array<string,mixed>> keyed by uuid
+     */
+    public function findByUuids(ApplicationContext $context, string $tenant, array $uuids): array
+    {
+        if ($uuids === []) {
+            return [];
+        }
+
+        $rows = db($context)->table('commerce_variants')
+            ->where('tenant_uuid', '=', $tenant)
+            ->whereIn('uuid', $uuids)
+            ->get();
+
+        $result = [];
+        foreach ($rows as $row) {
+            $result[(string) $row['uuid']] = $this->decodeJson($row);
+        }
+
+        return $result;
+    }
+
     /** @return array<string,mixed>|null */
     public function findBySku(ApplicationContext $context, string $tenant, string $sku): ?array
     {

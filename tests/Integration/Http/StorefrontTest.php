@@ -29,6 +29,7 @@ use Glueful\Extensions\Commerce\Payments\ManualPaymentCollector;
 use Glueful\Extensions\Commerce\Pricing\PricingEngine;
 use Glueful\Extensions\Commerce\Pricing\ShippingQuote;
 use Glueful\Extensions\Commerce\Pricing\TaxQuote;
+use Glueful\Extensions\Commerce\Support\TokenHasher;
 use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
 use Glueful\Extensions\Commerce\Tests\Support\CommerceTestCase;
 use Glueful\Http\Exceptions\Client\NotFoundException;
@@ -93,6 +94,70 @@ final class StorefrontTest extends CommerceTestCase
 
         self::assertSame(200, $res->getStatusCode());
         self::assertSame($number, $this->json($res)['data']['order_number']);
+    }
+
+    /**
+     * Admin-order-creation cycle 2, Task 6 (design spec §2.6): an admin-created order
+     * mints no guest-access credential, so `guest_token_hash` is NULL on that row.
+     * {@see OrderController::tokenMatches()}'s `isset($order['guest_token_hash'])`
+     * already returns false for a NULL array value with no code change required --
+     * this pins that a NULL row genuinely grants no guest access, for any header
+     * value including one that would otherwise coincidentally hash-match an empty
+     * credential.
+     *
+     * Positive control (review fix, minor): the SAME route/controller, against a
+     * row differing ONLY in `guest_token_hash`, DOES grant access when the header
+     * carries the matching raw token -- proving the negative result above isn't
+     * vacuous (a broken route, a controller that always 404s, etc.), it's genuinely
+     * the NULL value that denies access.
+     */
+    public function testNullGuestTokenHashGrantsNoGuestAccess(): void
+    {
+        $this->connection->table('commerce_orders')->insert([
+            'uuid' => 'walkinnoacc1',
+            'tenant_uuid' => '',
+            'order_number' => 'ORD-WALKINNOACC',
+            'status' => 'paid',
+            'fulfillment_status' => 'unfulfilled',
+            'email' => null,
+            'user_uuid' => null,
+            'guest_token_hash' => null,
+            'currency' => 'USD',
+            'subtotal' => 1000,
+            'grand_total' => 1000,
+        ]);
+
+        $req = Request::create('/commerce/orders/ORD-WALKINNOACC', 'GET');
+        $req->headers->set('X-Order-Token', 'some-header-value');
+
+        $this->expectException(NotFoundException::class);
+        $this->orderController()->show($req, 'ORD-WALKINNOACC');
+    }
+
+    public function testPositiveControlNonNullGuestTokenHashWithMatchingTokenGrantsAccess(): void
+    {
+        $rawToken = 'walkin-positive-control-raw-token';
+        $this->connection->table('commerce_orders')->insert([
+            'uuid' => 'walkinacc0001',
+            'tenant_uuid' => '',
+            'order_number' => 'ORD-WALKINACC1',
+            'status' => 'paid',
+            'fulfillment_status' => 'unfulfilled',
+            'email' => null,
+            'user_uuid' => null,
+            'guest_token_hash' => TokenHasher::hash($rawToken),
+            'currency' => 'USD',
+            'subtotal' => 1000,
+            'grand_total' => 1000,
+        ]);
+
+        $req = Request::create('/commerce/orders/ORD-WALKINACC1', 'GET');
+        $req->headers->set('X-Order-Token', $rawToken);
+
+        $response = $this->orderController()->show($req, 'ORD-WALKINACC1');
+
+        self::assertSame(200, $response->getStatusCode());
+        self::assertSame('ORD-WALKINACC1', $this->json($response)['data']['order_number']);
     }
 
     public function testCheckoutShortStockReturnsConflictShape(): void

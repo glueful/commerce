@@ -39,6 +39,10 @@ final class DownloadsBackfillCommand extends BaseCommand
         $tenantOption = $input->getOption('tenant');
         $dryRun = (bool) $input->getOption('dry-run');
 
+        // Draft isolation (admin-order-creation cycle 2, Task 8): the revenue-status
+        // ALLOWLIST below is strictly stronger than OrderScope's exclusion --
+        // `draft` is not in it and never can be -- so no extra predicate is
+        // needed here. This note is the ratchet: keep it an allowlist.
         $query = db($context)->table('commerce_orders')
             ->whereIn('status', ['paid', 'fulfilled', 'refunded'])
             ->orderBy('id', 'ASC');
