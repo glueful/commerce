@@ -52,11 +52,14 @@ use Glueful\Validation\ValidationException;
  * 2. **Read-only tenant-scoped preflight.** Unknown and cross-tenant uuids get
  *    the same non-revealing 404, with ZERO attempt-ledger writes. This is
  *    CONTAINMENT ONLY -- every invariant it happens to observe is re-read under
- *    lock inside the transaction, so nothing here is authority. Note what it
- *    does NOT check: status. A finalized order must stay reachable for an
- *    idempotent REPLAY, so "not a draft" is resolved inside the transaction as a
- *    typed conflict, after replay resolution -- never hidden behind a 404 the way
- *    the mutation endpoints hide one.
+ *    lock inside the transaction, so nothing here is authority. Note what THE
+ *    PREFLIGHT deliberately does not check: status. Unlike
+ *    {@see DraftOrderService::loadDraft()}, it carries no `status = 'draft'`
+ *    predicate, because a finalized order must stay REACHABLE for an idempotent
+ *    replay -- 404ing it here would make a retry of an ambiguous network failure
+ *    permanently unanswerable. Non-drafts ARE still refused, just later and
+ *    differently: the in-transaction check (step 3, after replay resolution)
+ *    turns them into a typed `not_draft` 409.
  * 3. **One transaction**, in this order: lock the order row; claim/replay the
  *    attempt BEFORE any mutation; verify status/revision/currency; verify the
  *    fulfillment-mode contract; re-resolve every line against CURRENT catalog
@@ -115,6 +118,25 @@ final class DraftFinalizationService
      */
     public const LINE_DRIFT = 'drift';
     public const LINE_STOCK = 'stock';
+
+    /**
+     * The per-line currency refusal, mirroring
+     * {@see CheckoutService::placeOrderAttempt()}'s own hard rejection
+     * ("Variant currency no longer matches the store currency",
+     * CheckoutService.php:300-307). A variant's `currency` column is
+     * operator-editable, and {@see \Glueful\Extensions\Commerce\Catalog\VariantRepository}
+     * documents single-store parity as an invariant rather than enforcing it on
+     * every later edit -- so a variant edited from USD to EUR while its numeric
+     * `price` is untouched drifts NOT AT ALL by unit price or add-on hash, and
+     * would otherwise finalize charging EUR minor units as USD.
+     *
+     * Deliberately per LINE and not folded into the order-level
+     * {@see DraftConflictException::CURRENCY} check: that one compares the
+     * ORDER's snapshotted currency to the store's, which stays perfectly
+     * consistent in this scenario. The mismatch is between a single variant and
+     * the store, so the operator needs to be told WHICH line.
+     */
+    public const LINE_CURRENCY = 'currency';
 
     public function __construct(
         private OrderRepository $orders,
@@ -257,7 +279,7 @@ final class DraftFinalizationService
         if ($stored === []) {
             throw ValidationException::forField('lines', 'A draft order needs at least one line to be finalized.');
         }
-        $resolved = $this->reresolve($context, $tenant, $stored);
+        $resolved = $this->reresolve($context, $tenant, $stored, $storeCurrency);
 
         // 6. Money, recomputed from the AUTHORITATIVE lines; the draft's stored
         //    advisory totals are discarded entirely.
@@ -307,8 +329,26 @@ final class DraftFinalizationService
         //     there is no commit between the stamping and the compare-and-set, so
         //     an order can never be observed as `pending_payment` without its
         //     number, totals, and `placed_at` (Task 8's documented obligation).
-        $this->stampFinalizedFields($context, $tenant, $uuid, $number, $totals, $quote, $discount);
-        $this->orders->finalizeDraftTransition($context, $tenant, $uuid);
+        //
+        //     Both are `WHERE ... AND status = 'draft'` compare-and-sets, and both
+        //     signal a lost race by throwing a BARE \DomainException. That is the
+        //     right primitive for a repository, but it is not an HTTP answer: the
+        //     draft controller's guard() catches DraftConflictException, not its
+        //     parent, so an uncaught one would surface as a raw 500. The race is
+        //     genuinely reachable -- findByUuidForUpdate() degrades to an UNLOCKED
+        //     read on any driver without `FOR UPDATE` (SQLite, i.e. the default dev
+        //     and test lane), so two finalizers there really can both get past the
+        //     status check and only one can win here. Re-type the loss as the same
+        //     `not_draft` conflict an EARLY discovery of the same fact produces, so
+        //     the client branches on one discriminator either way.
+        try {
+            $this->stampFinalizedFields($context, $tenant, $uuid, $number, $totals, $quote, $discount);
+            $this->orders->finalizeDraftTransition($context, $tenant, $uuid);
+        } catch (DraftConflictException $e) {
+            throw $e;
+        } catch (\DomainException) {
+            throw DraftConflictException::finalizeRaceLost();
+        }
 
         // 12. The attempt is bound to the order it just finalized, in this same
         //     transaction -- the claim can never commit separately from the work.
@@ -366,11 +406,23 @@ final class DraftFinalizationService
      * operator fixing a multi-line draft sees the whole list at once instead of
      * peeling it one refused finalize at a time.
      *
+     * CHECK ORDER per line is fixed and deliberate: resolvability, then
+     * eligibility, then CURRENCY, then drift. Currency sits ahead of drift
+     * because the two are independent failures and drift cannot see this one --
+     * a variant re-denominated USD -> EUR with its numeric `price` untouched has
+     * an identical `unit_price` and an identical add-on hash, so `hasDrifted()`
+     * reports nothing at all and only {@see self::LINE_CURRENCY} stands between
+     * that line and being charged as store currency.
+     *
      * @param list<array<string,mixed>> $stored
      * @return list<array{line_uuid: string, resolved: ResolvedLine}>
      */
-    private function reresolve(ApplicationContext $context, string $tenant, array $stored): array
-    {
+    private function reresolve(
+        ApplicationContext $context,
+        string $tenant,
+        array $stored,
+        string $storeCurrency
+    ): array {
         $partitioning = $this->partitioning($context, $tenant);
         $resolved = [];
         $conflicts = [];
@@ -411,6 +463,11 @@ final class DraftFinalizationService
                 continue;
             }
 
+            if ($line0->currency !== $storeCurrency) {
+                $conflicts[] = $this->conflictRow($lineUuid, $line, self::LINE_CURRENCY, $line0);
+                continue;
+            }
+
             if ($this->hasDrifted($line, $line0)) {
                 $conflicts[] = $this->conflictRow($lineUuid, $line, self::LINE_DRIFT, $line0);
                 continue;
@@ -438,9 +495,19 @@ final class DraftFinalizationService
      *    carrying a description the operator never saw.
      *
      * `sku`/`product_name`/`option_values` are deliberately NOT drift: they are
-     * display facts the finalize REPLACES with current values anyway (step 9), so
-     * refusing on them would block a sale over a typo fix with no money or
-     * fulfilment consequence.
+     * display facts, and {@see self::lineChanges()} OVERWRITES all three with the
+     * freshly resolved values in step 9 -- so the finalized order records what is
+     * true now, and the operator is never shown a conflict they could not act on.
+     * Refusing here would block a sale over a corrected product name or a
+     * relabelled option with no money or fulfilment consequence. Note that
+     * `option_values` always comes from the variant row itself
+     * ({@see ResolvedLine}), never from a caller, so overwriting it cannot
+     * import anything the operator chose.
+     *
+     * CURRENCY is deliberately NOT checked here either -- see
+     * {@see self::LINE_CURRENCY} and {@see self::reresolve()}: it is a separate,
+     * earlier refusal precisely because a re-denominated variant produces no
+     * drift signal at all.
      *
      * @param array<string,mixed> $stored
      */
@@ -470,6 +537,11 @@ final class DraftFinalizationService
             'reason' => $reason,
             'unit_price' => (int) $stored['unit_price'],
             'current_unit_price' => $resolved?->unitPrice,
+            // The line's AUTHORITATIVE currency right now (null when the line no
+            // longer resolves at all). Always present rather than attached only to
+            // a `currency` conflict, so the payload shape stays uniform across the
+            // whole list and a client renders one row template.
+            'currency' => $resolved?->currency,
         ];
     }
 

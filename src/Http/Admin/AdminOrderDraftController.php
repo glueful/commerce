@@ -172,9 +172,12 @@ final class AdminOrderDraftController
      *    service before any lookup (an absent header arrives as `null`, which the
      *    service rejects with the same 422 a malformed one gets);
      *  - a uuid that resolves to an already-finalized order is a typed 409, not
-     *    the non-revealing 404 `show()`/`update()` return. Finalize must stay
-     *    reachable after finalization so an idempotent RETRY of an ambiguous
-     *    network failure can replay its own result.
+     *    the non-revealing 404 `show()`/`update()` return. The difference lives in
+     *    the PREFLIGHT, which looks the order up WITHOUT the `status = 'draft'`
+     *    predicate the other actions apply -- finalize must stay reachable after
+     *    finalization so an idempotent RETRY of an ambiguous network failure can
+     *    replay its own result. A non-draft is still refused, just inside the
+     *    transaction and as `not_draft`, never hidden behind a 404.
      */
     #[ApiOperation(summary: 'Finalize a draft order', tags: ['Commerce Admin'])]
     #[ApiResponse(200, description: 'Draft order finalized')]

@@ -103,6 +103,23 @@ final class DraftConflictException extends \DomainException
         );
     }
 
+    /**
+     * The same discriminator as {@see self::notDraft()}, for the LATE discovery
+     * of the same fact: the finalize compare-and-set matched zero rows, so
+     * something stopped this order being a draft between the load and the write.
+     * A separate factory only because there is no status to name -- the winner's
+     * new status is not reliably ours to read at that point -- while the client's
+     * branch and remedy (reload the draft, retry) are identical, which is exactly
+     * what one discriminator across two factories is for.
+     */
+    public static function finalizeRaceLost(): self
+    {
+        return new self(
+            self::NOT_DRAFT,
+            'This draft stopped being finalizable while the request was running; reload it and retry.'
+        );
+    }
+
     public static function currencyChanged(string $draftCurrency, string $storeCurrency): self
     {
         return new self(

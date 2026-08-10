@@ -556,6 +556,144 @@ final class DraftFinalizationTest extends CommerceTestCase
         self::assertSame(0, $this->movementCount($uuid));
     }
 
+    /**
+     * Review fix (Important 1). A variant's `currency` column is
+     * operator-editable and single-store parity is documented as an invariant
+     * rather than re-enforced on every edit, so a variant can be re-denominated
+     * USD -> EUR while its numeric `price` is untouched. That line then produces
+     * NO drift signal at all -- same `unit_price`, same add-on hash -- and the
+     * ORDER-level currency check still passes, because the draft's own snapshot
+     * still says USD. Only a per-line check stands between this and an order
+     * charging EUR minor units as USD, which is exactly the refusal
+     * `CheckoutService::placeOrderAttempt()` already makes for a cart line.
+     */
+    public function testAReDenominatedVariantIsATypedPerLineCurrencyConflict(): void
+    {
+        $variantUuid = $this->seedPhysicalProduct('SKU-CUR-1', 1000);
+        $uuid = $this->createDraft();
+        $lineUuid = $this->addLine($uuid, $variantUuid, 2);
+
+        $this->connection->table('commerce_variants')
+            ->where('uuid', '=', $variantUuid)
+            ->update(['currency' => 'EUR']);
+
+        $response = $this->finalize($uuid, self::KEY, 1);
+
+        self::assertSame(409, $response->getStatusCode());
+        $details = $this->json($response)['error']['details'];
+        self::assertSame(DraftConflictException::LINE_CONFLICTS, $details['conflict']);
+        self::assertCount(1, $details['lines']);
+        self::assertSame($lineUuid, $details['lines'][0]['line_uuid']);
+        self::assertSame(DraftFinalizationService::LINE_CURRENCY, $details['lines'][0]['reason']);
+        self::assertSame('EUR', $details['lines'][0]['currency']);
+        // Proof this is invisible to every other check: the price never moved, so
+        // drift reports nothing, and the ORDER's own currency still matches the
+        // store's.
+        self::assertSame(1000, (int) $details['lines'][0]['unit_price']);
+        self::assertSame(1000, (int) $details['lines'][0]['current_unit_price']);
+        self::assertSame('USD', (string) $this->orderRow($uuid)['currency']);
+
+        // Rollback is clean and the draft stays editable.
+        self::assertSame('draft', (string) $this->orderRow($uuid)['status']);
+        self::assertNull($this->orderRow($uuid)['order_number']);
+        self::assertSame(1, (int) $this->orderRow($uuid)['draft_revision']);
+        self::assertSame(100, (new StockRepository())->quantity($this->context, self::TENANT, $variantUuid));
+        self::assertSame(0, $this->movementCount($uuid));
+        self::assertSame(0, $this->attemptCount());
+        self::assertSame([DraftOrderEvents::CREATED], $this->eventTypesFor($uuid));
+        self::assertSame(0, $this->placedDispatches);
+        $this->update($uuid, ['customer_name' => 'Ada Lovelace']);
+    }
+
+    /**
+     * Review fix (Important 2). `findByUuidForUpdate()` degrades to an UNLOCKED
+     * read on any driver without `FOR UPDATE` -- SQLite, i.e. this very lane --
+     * so two finalizers there really can both clear the status check and race to
+     * the compare-and-set. The loser must land on the SAME typed `not_draft`
+     * conflict an early discovery produces, never on the bare
+     * `\DomainException` the repository throws (which `guard()` does not catch,
+     * and which would reach the operator as a raw 500).
+     *
+     * The race is simulated deterministically rather than threaded: the row is
+     * transitioned out of `draft` from inside the finalize transaction, at the
+     * tax-quote seam -- after the status check, before the compare-and-set --
+     * which is precisely the window a real concurrent winner occupies.
+     */
+    public function testLosingTheFinalizeCompareAndSetIsATypedConflictNotAnUncaughtDomainException(): void
+    {
+        $variantUuid = $this->seedPhysicalProduct('SKU-RACE-1', 1000);
+        $uuid = $this->createDraft();
+        $this->addLine($uuid, $variantUuid, 1);
+
+        $this->duringFinalize(function () use ($uuid): void {
+            $this->connection->table('commerce_orders')
+                ->where('uuid', '=', $uuid)
+                ->update(['status' => 'canceled']);
+        });
+
+        $response = $this->finalize($uuid, self::KEY, 1);
+
+        self::assertSame(409, $response->getStatusCode(), (string) $response->getContent());
+        self::assertSame(
+            DraftConflictException::NOT_DRAFT,
+            $this->json($response)['error']['details']['conflict']
+        );
+
+        // Everything the losing attempt did rolled back with it -- including the
+        // simulated winner's own write, which shared this transaction.
+        $row = $this->orderRow($uuid);
+        self::assertSame('draft', (string) $row['status']);
+        self::assertNull($row['order_number']);
+        self::assertSame(0, $this->attemptCount());
+        self::assertSame(0, $this->movementCount($uuid));
+        self::assertSame(0, $this->connection->table('commerce_sequences')->count());
+        self::assertSame(0, $this->placedDispatches);
+    }
+
+    /**
+     * Minor fold (3): the POSITIVE add-on path. An add-on line whose definition
+     * has NOT been touched must finalize cleanly, carrying its price delta into
+     * the authoritative snapshot. Without this, a regression that made every
+     * add-on line read as drift -- for instance a hash computed over a
+     * differently-shaped snapshot on the two sides -- would leave every add-on
+     * draft permanently unfinalizable, and the drift tests above would all still
+     * pass.
+     */
+    public function testAnUntouchedAddonLineFinalizesAndKeepsItsPricedSnapshot(): void
+    {
+        $productUuid = null;
+        $variantUuid = $this->seedPhysicalProduct('SKU-ADDON-OK', 1000, productUuid: $productUuid);
+        $addonUuid = $this->seedCheckboxAddon((string) $productUuid, 250);
+
+        $uuid = $this->createDraft();
+        $lineUuid = $this->addLine($uuid, $variantUuid, 2, [
+            ['addon_uuid' => $addonUuid, 'value' => true],
+        ]);
+
+        $response = $this->finalize($uuid, self::KEY, 1);
+
+        self::assertSame(200, $response->getStatusCode(), (string) $response->getContent());
+        $order = $this->json($response)['data'];
+        self::assertSame('pending_payment', $order['status']);
+        self::assertSame(2500, (int) $order['grand_total']);
+
+        $lines = $this->linesFor($uuid);
+        self::assertCount(1, $lines);
+        self::assertSame($lineUuid, (string) $lines[0]['uuid']);
+        self::assertSame(1250, (int) $lines[0]['unit_price']);
+        self::assertSame(2500, (int) $lines[0]['line_total']);
+
+        $addons = json_decode((string) $lines[0]['addons'], true);
+        self::assertIsArray($addons);
+        self::assertCount(1, $addons);
+        self::assertSame($addonUuid, (string) $addons[0]['addon_uuid']);
+        self::assertSame(250, (int) $addons[0]['price_delta']);
+
+        // And the wire echoes the sanitized snapshot, never the definition uuid.
+        self::assertSame('Gift wrap', $order['lines'][0]['addons'][0]['name']);
+        self::assertArrayNotHasKey('addon_uuid', $order['lines'][0]['addons'][0]);
+    }
+
     // -----------------------------------------------------------------
     // 7. delivery address preflight (design Ruling 5's positive half)
     // -----------------------------------------------------------------
@@ -1104,14 +1242,46 @@ final class DraftFinalizationTest extends CommerceTestCase
         return $this->shippingQuotes;
     }
 
+    /**
+     * Zero-rate, plus a one-shot IN-TRANSACTION seam. The tax calculator is
+     * consulted on every finalize, after the status/revision checks and before
+     * the stock claim, the number allocation, and the two compare-and-sets --
+     * which makes it the one honest place to simulate "something else changed
+     * this row after we loaded it" on a single connection.
+     */
     private function taxCalculator(): TaxCalculator
     {
-        return new class implements TaxCalculator {
+        return new class ($this) implements TaxCalculator {
+            public function __construct(private DraftFinalizationTest $test)
+            {
+            }
+
             public function quote(ApplicationContext $context, int $taxableAmount, array $shippingAddress): TaxQuote
             {
+                $this->test->runDuringFinalizeOnce();
+
                 return new TaxQuote(0);
             }
         };
+    }
+
+    /** @var (callable(): void)|null */
+    private $duringFinalize = null;
+
+    /** @param callable(): void $hook */
+    private function duringFinalize(callable $hook): void
+    {
+        $this->duringFinalize = $hook;
+    }
+
+    public function runDuringFinalizeOnce(): void
+    {
+        $hook = $this->duringFinalize;
+        if ($hook === null) {
+            return;
+        }
+        $this->duringFinalize = null;
+        $hook();
     }
 
     // --- seed helpers ----------------------------------------------------
