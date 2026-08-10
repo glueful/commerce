@@ -60,6 +60,7 @@ use Glueful\Extensions\Commerce\Http\Admin\AdminGrantController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminMarketplaceFinancialController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminMediaController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminOrderController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminOrderDraftController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminPayoutController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminProductController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminRefundController;
@@ -154,6 +155,7 @@ use Glueful\Extensions\Commerce\Orders\Downloads\DownloadGrantRepository;
 use Glueful\Extensions\Commerce\Orders\Downloads\DownloadGrantService;
 use Glueful\Extensions\Commerce\Orders\Downloads\DownloadUrlSigner;
 use Glueful\Extensions\Commerce\Orders\DraftCleanupService;
+use Glueful\Extensions\Commerce\Orders\DraftOrderService;
 use Glueful\Extensions\Commerce\Orders\ExpiryService;
 use Glueful\Extensions\Commerce\Orders\OrderFulfillmentService;
 use Glueful\Extensions\Commerce\Orders\OrderPaymentService;
@@ -676,6 +678,10 @@ final class CommerceServiceProvider extends ServiceProvider
                 'factory' => [self::class, 'makeExpiryService'],
                 'shared' => true,
             ],
+            DraftOrderService::class => [
+                'factory' => [self::class, 'makeDraftOrderService'],
+                'shared' => true,
+            ],
             DraftCleanupService::class => [
                 'factory' => [self::class, 'makeDraftCleanupService'],
                 'shared' => true,
@@ -727,6 +733,10 @@ final class CommerceServiceProvider extends ServiceProvider
             ],
             AdminOrderController::class => [
                 'factory' => [self::class, 'makeAdminOrderController'],
+                'shared' => true,
+            ],
+            AdminOrderDraftController::class => [
+                'factory' => [self::class, 'makeAdminOrderDraftController'],
                 'shared' => true,
             ],
             AdminRefundController::class => [
@@ -1376,6 +1386,39 @@ final class CommerceServiceProvider extends ServiceProvider
      * stock, dispatches no lifecycle event, and captures no seller webhook, so
      * it takes none of the expiry service's marketplace collaborators.
      */
+    /**
+     * Admin-order-creation cycle 2, Task 9. `MarketplaceMode` is injected (not
+     * constructed inline) so the ORDER-level partitioning decision behind the
+     * `marketplace` eligibility reason reads the SAME shared instance every other
+     * marketplace consumer does; the user provider is SOFT-resolved exactly as
+     * {@see self::makeAdminCustomerController()} does -- absent, user attachment
+     * fails closed on its own neutral 422 rather than silently linking.
+     */
+    public static function makeDraftOrderService(ContainerInterface $container): DraftOrderService
+    {
+        return new DraftOrderService(
+            $container->get(OrderRepository::class),
+            $container->get(PurchasableLineResolver::class),
+            $container->get(PricingEngine::class),
+            $container->get(ShippingRateProvider::class),
+            $container->get(TaxCalculator::class),
+            $container->get(DiscountRepository::class),
+            $container->get(DiscountService::class),
+            $container->get(DraftCleanupService::class),
+            self::tenantResolver($container),
+            $container->get(MarketplaceMode::class),
+            self::makeUserProvider($container)
+        );
+    }
+
+    public static function makeAdminOrderDraftController(ContainerInterface $container): AdminOrderDraftController
+    {
+        return new AdminOrderDraftController(
+            $container->get(ApplicationContext::class),
+            $container->get(DraftOrderService::class)
+        );
+    }
+
     public static function makeDraftCleanupService(ContainerInterface $container): DraftCleanupService
     {
         return new DraftCleanupService(
@@ -1475,7 +1518,11 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(ProductRepository::class),
             $container->get(VariantRepository::class),
             self::tenantResolver($container),
-            $container->get(ShippingClassRepository::class)
+            $container->get(ShippingClassRepository::class),
+            // Left null so the pre-existing direct-construction fallback stands; the
+            // appended MarketplaceMode below is what Task 9's eligibility projection needs.
+            null,
+            $container->get(MarketplaceMode::class)
         );
     }
 

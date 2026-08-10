@@ -22,13 +22,23 @@ use Glueful\Routing\Router;
  * the 6 additions live in a second, additive fixture
  * (`admin_route_inventory_1_5_additions.json`) so the original 98 stay byte-parity-pinned
  * while the new total (104) is independently pinned too.
+ *
+ * Admin-order-creation cycle 2, Task 9 follows the SAME additive discipline: the 9 draft
+ * order endpoints live in their own fixture (`admin_route_inventory_1_10_draft_additions.json`),
+ * so every earlier fixture stays byte-frozen and the new total (114) is pinned on top.
+ * `orders.drafts.finalize` is deliberately absent — Task 10 adds it with its service.
  */
 final class AdminRouteMountParityTest extends CommerceRouterTestCase
 {
     private const LEGACY_COUNT = 98;
     private const ADDITIONS_COUNT = 6;
     private const ADDITIONS_1_6_COUNT = 1;
-    private const TOTAL_COUNT = self::LEGACY_COUNT + self::ADDITIONS_COUNT + self::ADDITIONS_1_6_COUNT;
+    /** Admin-order-creation cycle 2, Task 9: the draft order surface (finalize lands in Task 10). */
+    private const ADDITIONS_DRAFT_COUNT = 9;
+    private const TOTAL_COUNT = self::LEGACY_COUNT
+        + self::ADDITIONS_COUNT
+        + self::ADDITIONS_1_6_COUNT
+        + self::ADDITIONS_DRAFT_COUNT;
 
     public function testNativeMountEqualsLegacyInventoryPlusTaskA6Additions(): void
     {
@@ -53,7 +63,14 @@ final class AdminRouteMountParityTest extends CommerceRouterTestCase
             '1.6.0 adds exactly the per-product order-activity read',
         );
 
-        $expected = array_merge($legacy, $additions, $additions16);
+        $draftAdditions = $this->loadFixture('admin_route_inventory_1_10_draft_additions.json');
+        self::assertCount(
+            self::ADDITIONS_DRAFT_COUNT,
+            $draftAdditions,
+            'Task 9 adds exactly 9 draft order endpoints',
+        );
+
+        $expected = array_merge($legacy, $additions, $additions16, $draftAdditions);
         usort($expected, self::routeSortComparator());
         self::assertCount(self::TOTAL_COUNT, $expected);
 
@@ -62,7 +79,8 @@ final class AdminRouteMountParityTest extends CommerceRouterTestCase
         self::assertCount(
             self::TOTAL_COUNT,
             $actual,
-            'mounted non-marketplace admin route count drifted (expected 98 legacy + 6 Task A6 + 1 1.6.0 additions)',
+            'mounted non-marketplace admin route count drifted '
+            . '(expected 98 legacy + 6 Task A6 + 1 1.6.0 + 9 draft additions)',
         );
         foreach ($expected as $i => $record) {
             self::assertSame(
@@ -98,6 +116,12 @@ final class AdminRouteMountParityTest extends CommerceRouterTestCase
         foreach ($this->loadFixture('admin_route_inventory_1_6_additions.json') as $record) {
             $routeKey = $record['method'] . ' ' . $record['path'];
             self::assertArrayHasKey($routeKey, $actualByRoute, "expected 1.6.0 read endpoint missing: {$routeKey}");
+            self::assertSame($record, $actualByRoute[$routeKey]);
+        }
+
+        foreach ($this->loadFixture('admin_route_inventory_1_10_draft_additions.json') as $record) {
+            $routeKey = $record['method'] . ' ' . $record['path'];
+            self::assertArrayHasKey($routeKey, $actualByRoute, "expected draft endpoint missing: {$routeKey}");
             self::assertSame($record, $actualByRoute[$routeKey]);
         }
     }

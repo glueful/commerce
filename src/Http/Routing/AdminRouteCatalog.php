@@ -13,6 +13,7 @@ use Glueful\Extensions\Commerce\Http\Admin\AdminDownloadController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminGrantController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminMediaController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminOrderController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminOrderDraftController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminProductController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminRefundController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminReportController;
@@ -191,6 +192,52 @@ final class AdminRouteCatalog
             ['orders.notes.store', 'POST', '/orders/{uuid}/notes', AdminOrderController::class, 'addNote', 'manage', 'json', 'orders'],
             ['orders.notes.index', 'GET', '/orders/{uuid}/notes', AdminOrderController::class, 'notes', 'view', 'json', 'orders'],
             ['orders.invoice_data', 'GET', '/orders/{uuid}/invoice-data', AdminOrderController::class, 'invoiceData', 'view', 'unusual', 'orders'],
+            // — Draft orders (admin-order-creation cycle 2, Task 9, design spec §2.3) —
+            // `/orders/drafts` is a STATIC path and the router resolves static before
+            // dynamic (Router::match()), so it can never be swallowed by the
+            // `/orders/{uuid}` entry declared above; every deeper draft path pins a
+            // literal `drafts` segment where the sibling order routes pin a literal
+            // verb, so no pair is ambiguous either.
+            // TODO(Task 10): `orders.drafts.finalize` (POST /orders/drafts/{uuid}/finalize,
+            // manage/unusual/orders) is deliberately NOT declared here yet — it is wired
+            // in the same task that adds DraftFinalizationService, so the catalog never
+            // mounts a route to an action that does not exist.
+            ['orders.drafts.index', 'GET', '/orders/drafts', AdminOrderDraftController::class, 'index', 'view', 'json', 'orders'],
+            ['orders.drafts.store', 'POST', '/orders/drafts', AdminOrderDraftController::class, 'store', 'manage', 'json', 'orders'],
+            ['orders.drafts.show', 'GET', '/orders/drafts/{uuid}', AdminOrderDraftController::class, 'show', 'view', 'json', 'orders'],
+            ['orders.drafts.update', 'PATCH', '/orders/drafts/{uuid}', AdminOrderDraftController::class, 'update', 'manage', 'json', 'orders'],
+            ['orders.drafts.cancel', 'POST', '/orders/drafts/{uuid}/cancel', AdminOrderDraftController::class, 'cancel', 'manage', 'unusual', 'orders'],
+            [
+                'orders.drafts.recalculate',
+                'POST',
+                '/orders/drafts/{uuid}/recalculate',
+                AdminOrderDraftController::class,
+                'recalculate',
+                'manage',
+                'unusual',
+                'orders',
+            ],
+            ['orders.drafts.lines.store', 'POST', '/orders/drafts/{uuid}/lines', AdminOrderDraftController::class, 'storeLine', 'manage', 'json', 'orders'],
+            [
+                'orders.drafts.lines.update',
+                'PATCH',
+                '/orders/drafts/{uuid}/lines/{lineUuid}',
+                AdminOrderDraftController::class,
+                'updateLine',
+                'manage',
+                'json',
+                'orders',
+            ],
+            [
+                'orders.drafts.lines.destroy',
+                'DELETE',
+                '/orders/drafts/{uuid}/lines/{lineUuid}',
+                AdminOrderDraftController::class,
+                'destroyLine',
+                'manage',
+                'json',
+                'orders',
+            ],
             ['refunds.list', 'GET', '/refunds', AdminRefundController::class, 'list', 'view', 'json', 'orders'],
             ['refunds.show', 'GET', '/refunds/{uuid}', AdminRefundController::class, 'show', 'view', 'json', 'orders'],
             // — Reviews —
