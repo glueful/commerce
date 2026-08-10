@@ -192,21 +192,27 @@ final class AdminRouteCatalog
             ['orders.notes.store', 'POST', '/orders/{uuid}/notes', AdminOrderController::class, 'addNote', 'manage', 'json', 'orders'],
             ['orders.notes.index', 'GET', '/orders/{uuid}/notes', AdminOrderController::class, 'notes', 'view', 'json', 'orders'],
             ['orders.invoice_data', 'GET', '/orders/{uuid}/invoice-data', AdminOrderController::class, 'invoiceData', 'view', 'unusual', 'orders'],
-            // — Draft orders (admin-order-creation cycle 2, Task 9, design spec §2.3) —
+            // — Draft orders (admin-order-creation cycle 2, Tasks 9 and 10, design spec §2.3/§2.5) —
             // `/orders/drafts` is a STATIC path and the router resolves static before
             // dynamic (Router::match()), so it can never be swallowed by the
             // `/orders/{uuid}` entry declared above; every deeper draft path pins a
             // literal `drafts` segment where the sibling order routes pin a literal
             // verb, so no pair is ambiguous either.
-            // TODO(Task 10): `orders.drafts.finalize` (POST /orders/drafts/{uuid}/finalize,
-            // manage/unusual/orders) is deliberately NOT declared here yet — it is wired
-            // in the same task that adds DraftFinalizationService, so the catalog never
-            // mounts a route to an action that does not exist.
             ['orders.drafts.index', 'GET', '/orders/drafts', AdminOrderDraftController::class, 'index', 'view', 'json', 'orders'],
             ['orders.drafts.store', 'POST', '/orders/drafts', AdminOrderDraftController::class, 'store', 'manage', 'json', 'orders'],
             ['orders.drafts.show', 'GET', '/orders/drafts/{uuid}', AdminOrderDraftController::class, 'show', 'view', 'json', 'orders'],
             ['orders.drafts.update', 'PATCH', '/orders/drafts/{uuid}', AdminOrderDraftController::class, 'update', 'manage', 'json', 'orders'],
             ['orders.drafts.cancel', 'POST', '/orders/drafts/{uuid}/cancel', AdminOrderDraftController::class, 'cancel', 'manage', 'unusual', 'orders'],
+            [
+                'orders.drafts.finalize',
+                'POST',
+                '/orders/drafts/{uuid}/finalize',
+                AdminOrderDraftController::class,
+                'finalize',
+                'manage',
+                'unusual',
+                'orders',
+            ],
             [
                 'orders.drafts.recalculate',
                 'POST',

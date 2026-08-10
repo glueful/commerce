@@ -11,12 +11,32 @@ use Glueful\Extensions\Commerce\Events\OrderPaid;
 use Glueful\Extensions\Commerce\Events\OrderPlaced;
 use Glueful\Extensions\Commerce\Events\RefundCompleted;
 use Glueful\Extensions\Commerce\Orders\Downloads\DownloadGrantService;
+use Glueful\Extensions\Commerce\Support\CommerceSettings;
 
 /**
  * Transactional-email triggers (spec §6). One handler per mapped event; every handler
  * wraps the {@see CommerceMailer} call in try/catch so a rebound, throwing mailer can
  * never escape event dispatch and fail the persisted order/refund/note operation that
  * triggered it.
+ *
+ * **Nullable order email (admin-order-creation cycle 2, Task 10; design Ruling 4/7,
+ * design spec §2.5.9).** A walk-in order legitimately has NO email address -- no
+ * placeholder is ever invented -- so `commerce_orders.email` is nullable from
+ * migration 022 onward. {@see self::safeSend()} therefore carries ONE shared
+ * email-presence guard covering EVERY lifecycle template (placed, paid, fulfilled,
+ * refunded, notifying note), placed there rather than in the five handlers precisely
+ * so a future template cannot be added without it: "no email means no notification
+ * attempt" is Ruling 7's wording, and one guard at the single send site is the only
+ * arrangement that makes that true by construction. It is also why the guard lives
+ * HERE and not in {@see CommerceMailer} implementations -- a host may rebind the
+ * mailer, and the invariant must not be rebindable with it.
+ *
+ * The ADMIN-ORIGIN order-confirmation toggle (`commerce.order_confirmation`) is a
+ * second, narrower gate that gets `OrderPlaced` alone: a counter sale is handed over
+ * in person, so a merchant may reasonably want no "we received your order" mail for
+ * admin-created orders while keeping every payment/fulfilment mail. It is checked
+ * ONLY for `origin = 'admin'`, so storefront behaviour is byte-identical to
+ * pre-Task-10 whatever the toggle says.
  *
  * `RefundFailed` is intentionally NOT mapped here: it is internal/operator-facing and
  * never emails the customer (spec §9) — a gateway failure does not prove a customer-visible
@@ -54,8 +74,22 @@ final class OrderMailListener
         return $this->downloadGrants ??= app($this->context, DownloadGrantService::class);
     }
 
+    /**
+     * The ONE handler the admin-origin confirmation toggle governs (design spec
+     * §2.5.9). The origin is read from the order's OWN `origin` column -- the
+     * immutable fact written at creation time -- never from ambient request
+     * state, so a replayed or requeued dispatch is judged identically to the
+     * original. An order with no origin at all (a legacy row predating migration
+     * 022) reads as `storefront`, which is exactly what the migration's own
+     * backfill decided.
+     */
     public function onOrderPlaced(OrderPlaced $event): void
     {
+        $origin = (string) ($event->order['origin'] ?? 'storefront');
+        if ($origin === 'admin' && !CommerceSettings::orderConfirmation($this->context)) {
+            return;
+        }
+
         $this->safeSend('order_placed', $event->order, []);
     }
 
@@ -84,11 +118,23 @@ final class OrderMailListener
     }
 
     /**
+     * The ONE send site, and therefore the ONE place the email-presence guard has
+     * to live (see the class docblock). A null, non-string, or blank
+     * `commerce_orders.email` short-circuits BEFORE the mailer is touched at all
+     * -- not inside it, and not per template -- so an anonymous walk-in order
+     * generates zero send attempts, zero log noise, and zero notification-store
+     * rows across its entire lifecycle.
+     *
      * @param array<string,mixed> $order
      * @param array<string,mixed> $payload
      */
     private function safeSend(string $template, array $order, array $payload): void
     {
+        $email = $order['email'] ?? null;
+        if (!is_string($email) || trim($email) === '') {
+            return;
+        }
+
         try {
             $this->mailer->send($this->context, $template, $order, $payload);
         } catch (\Throwable $e) {

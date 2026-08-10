@@ -79,6 +79,47 @@ final class OrderRepository
     }
 
     /**
+     * The SAME tenant-scoped lookup as {@see self::findByUuid()}, taken under a
+     * ROW LOCK (admin-order-creation cycle 2, Task 10, design spec §2.5 step 1:
+     * "Load the tenant-scoped order `FOR UPDATE` (or the driver's equivalent)").
+     * Only ever meaningful INSIDE an open transaction -- the lock is released at
+     * commit/rollback -- and its ONLY caller is
+     * {@see DraftFinalizationService::finalize()}, whose whole idempotency
+     * argument rests on it: two finalize requests carrying DIFFERENT idempotency
+     * keys for the SAME draft serialize here, so the second one observes the
+     * first one's committed status flip and loses on a typed conflict rather than
+     * racing it through the stock claim and the number allocator.
+     *
+     * `FOR UPDATE` is appended only for drivers that HAVE it (PostgreSQL,
+     * MySQL). SQLite has no row-level locking clause at all and does not need
+     * one: a write transaction there holds a database-wide write lock, which is
+     * strictly stronger than what this call asks for. Appending the clause
+     * anyway would be a syntax error, and silently dropping it on a driver that
+     * does support it would be far worse -- hence the explicit allowlist rather
+     * than a "skip it on sqlite" exclusion, so a future driver fails closed into
+     * the (correct, merely more contended) unlocked read instead of quietly
+     * losing serialization.
+     *
+     * @return array<string,mixed>|null
+     */
+    public function findByUuidForUpdate(
+        ApplicationContext $context,
+        string $tenant,
+        string $uuid,
+        bool $includeDrafts = false
+    ): ?array {
+        $notDraft = $includeDrafts ? '' : ' AND ' . OrderScope::excludeDraftsSql();
+        $lock = in_array(db($context)->getDriverName(), ['pgsql', 'mysql'], true) ? ' FOR UPDATE' : '';
+
+        $row = db($context)->table('commerce_orders')->executeRawFirst(
+            "SELECT * FROM commerce_orders WHERE tenant_uuid = ? AND uuid = ?{$notDraft}{$lock}",
+            [$tenant, $uuid]
+        );
+
+        return $row === null ? null : $this->decodeJson($row);
+    }
+
+    /**
      * Number-keyed lookup -- the storefront's only order entry point. A draft
      * carries a NULL `order_number` by construction, so it could not match a
      * bound string anyway; the explicit exclusion is defense in depth, so this
@@ -341,13 +382,15 @@ SQL,
      * that may perform `draft -> pending_payment`; {@see self::transition()}
      * refuses that pair outright.
      *
-     * CALLER CONTRACT (enforced by convention + this docblock, since no caller
-     * exists yet): the ONLY permitted caller is Task 10's
-     * `DraftFinalizationService`, inside the finalize transaction that also
-     * stamps the order number, customer identity, and `placed_at`. Nothing
-     * else -- no controller, no console command, no listener -- may call this.
-     * A second caller would mean a second definition of "finalized", which is
-     * exactly what the dedicated path exists to prevent.
+     * CALLER CONTRACT (enforced by convention + this docblock): the ONLY
+     * permitted caller is {@see DraftFinalizationService::finalize()}, from
+     * inside the finalize transaction that also stamps the order number, totals,
+     * and `placed_at` -- that stamping and this compare-and-set share ONE
+     * transaction and must never be separated by a commit, or an order could be
+     * observed as `pending_payment` without a number. Nothing else -- no
+     * controller, no console command, no listener -- may call this. A second
+     * caller would mean a second definition of "finalized", which is exactly what
+     * the dedicated path exists to prevent.
      *
      * Semantics: `WHERE ... AND status = 'draft'` makes this a genuine
      * compare-and-set. Two concurrent finalizations of the same draft cannot

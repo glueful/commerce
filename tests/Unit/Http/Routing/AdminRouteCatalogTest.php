@@ -46,12 +46,12 @@ final class AdminRouteCatalogTest extends TestCase
         }
     }
 
-    public function testEntryCountIs114(): void
+    public function testEntryCountIs115(): void
     {
         // 98 (1.3.x, spec §3) + 6 Task A6 per-product read endpoints (spec §3, 1.5.0)
-        // + 1 (1.6.0 per-product order activity) + 9 draft order endpoints
-        // (admin-order-creation cycle 2, Task 9; `orders.drafts.finalize` lands in Task 10).
-        self::assertCount(114, AdminRouteCatalog::entries());
+        // + 1 (1.6.0 per-product order activity) + 10 draft order endpoints
+        // (admin-order-creation cycle 2: 9 from Task 9, `orders.drafts.finalize` from Task 10).
+        self::assertCount(115, AdminRouteCatalog::entries());
     }
 
     public function testRestrictedProfileRejectsAnEmptyAllowlist(): void

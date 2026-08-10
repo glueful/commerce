@@ -22,13 +22,25 @@ namespace Glueful\Extensions\Commerce\Orders\Events;
  *    through {@see \Glueful\Extensions\Commerce\Orders\DraftCleanupService::cancelDraft()}.
  *  - {@see self::EXPIRED}  -- the TTL sweep,
  *    {@see \Glueful\Extensions\Commerce\Orders\DraftCleanupService::cancelStale()}.
+ *  - {@see self::FINALIZED} -- the finalization authority,
+ *    {@see \Glueful\Extensions\Commerce\Orders\DraftFinalizationService::finalize()}
+ *    (Task 10), written INSIDE the finalize transaction.
  *
- * All three are recorded with the default `internal` visibility: a draft has no
+ * All four are recorded with the default `internal` visibility: a draft has no
  * customer-facing surface at all, so `customer` visibility would be meaningless.
+ *
+ * {@see self::FINALIZED} is the one that survives into a REAL order's trail, and
+ * it is deliberately ADDITIVE to -- never a replacement for -- the ordinary
+ * `status:pending_payment` row
+ * {@see \Glueful\Extensions\Commerce\Orders\OrderRepository::finalizeDraftTransition()}
+ * writes. The lifecycle row keeps a finalized walk-in order's trail
+ * indistinguishable from a storefront order's; this row records the extra fact
+ * that the order began life as a draft, and under which number it was closed.
  */
 final class DraftOrderEvents
 {
     public const CREATED = 'draft_created';
     public const CANCELED = 'draft_canceled';
     public const EXPIRED = 'draft_expired';
+    public const FINALIZED = 'draft_finalized';
 }

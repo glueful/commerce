@@ -23,18 +23,20 @@ use Glueful\Routing\Router;
  * (`admin_route_inventory_1_5_additions.json`) so the original 98 stay byte-parity-pinned
  * while the new total (104) is independently pinned too.
  *
- * Admin-order-creation cycle 2, Task 9 follows the SAME additive discipline: the 9 draft
- * order endpoints live in their own fixture (`admin_route_inventory_1_10_draft_additions.json`),
- * so every earlier fixture stays byte-frozen and the new total (114) is pinned on top.
- * `orders.drafts.finalize` is deliberately absent — Task 10 adds it with its service.
+ * Admin-order-creation cycle 2 follows the SAME additive discipline: the draft order
+ * endpoints live in their own fixture (`admin_route_inventory_1_10_draft_additions.json`),
+ * so every earlier fixture stays byte-frozen and the new total (115) is pinned on top.
+ * Task 9 contributed 9 of them; Task 10 added `orders.drafts.finalize` alongside the
+ * `DraftFinalizationService` it mounts, so the catalog never named an action before it
+ * existed.
  */
 final class AdminRouteMountParityTest extends CommerceRouterTestCase
 {
     private const LEGACY_COUNT = 98;
     private const ADDITIONS_COUNT = 6;
     private const ADDITIONS_1_6_COUNT = 1;
-    /** Admin-order-creation cycle 2, Task 9: the draft order surface (finalize lands in Task 10). */
-    private const ADDITIONS_DRAFT_COUNT = 9;
+    /** Admin-order-creation cycle 2: the draft order surface (9 from Task 9, finalize from Task 10). */
+    private const ADDITIONS_DRAFT_COUNT = 10;
     private const TOTAL_COUNT = self::LEGACY_COUNT
         + self::ADDITIONS_COUNT
         + self::ADDITIONS_1_6_COUNT
@@ -67,7 +69,7 @@ final class AdminRouteMountParityTest extends CommerceRouterTestCase
         self::assertCount(
             self::ADDITIONS_DRAFT_COUNT,
             $draftAdditions,
-            'Task 9 adds exactly 9 draft order endpoints',
+            'cycle 2 adds exactly 10 draft order endpoints (9 from Task 9 + finalize from Task 10)',
         );
 
         $expected = array_merge($legacy, $additions, $additions16, $draftAdditions);

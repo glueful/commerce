@@ -201,6 +201,18 @@ return [
         'tax_id' => env('COMMERCE_SELLER_TAX_ID'),
     ],
 
+    // Admin-origin order-confirmation toggle (admin-order-creation cycle 2,
+    // Task 10; design spec §2.5.9). Governs the "we received your order" mail for
+    // orders whose `origin` is `admin` — a walk-in sale is handed over at the
+    // counter, so a merchant may want no placement mail for those while keeping
+    // every payment/fulfilment mail. ON by default (no behavior change for anyone
+    // who never sets it) and consulted ONLY for admin-origin orders: storefront
+    // OrderPlaced handling is byte-identical either way. Keyed at the config root
+    // because settings keys EQUAL config keys (store-settings spec §3.2) and this
+    // is the runtime-editable `commerce.order_confirmation` toggle a host's
+    // settings screen exposes.
+    'order_confirmation' => (bool) env('COMMERCE_ORDER_CONFIRMATION', true),
+
     'email' => [
         // Master switch: OFF by default. Operators opt in after configuring an email
         // channel and reviewing seller/template data — this preserves existing-install

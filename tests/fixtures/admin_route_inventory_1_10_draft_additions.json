@@ -56,6 +56,17 @@
     },
     {
         "method": "POST",
+        "path": "/commerce/admin/orders/drafts/{uuid}/finalize",
+        "controller": "Glueful\\Extensions\\Commerce\\Http\\Admin\\AdminOrderDraftController",
+        "action": "finalize",
+        "middleware": [
+            "auth",
+            "require_scope:commerce:write"
+        ],
+        "name": null
+    },
+    {
+        "method": "POST",
         "path": "/commerce/admin/orders/drafts/{uuid}/recalculate",
         "controller": "Glueful\\Extensions\\Commerce\\Http\\Admin\\AdminOrderDraftController",
         "action": "recalculate",

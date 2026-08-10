@@ -11,6 +11,7 @@ use Glueful\Extensions\Commerce\Http\DTOs\DraftOrderListQuery;
 use Glueful\Extensions\Commerce\Http\DTOs\UpdateDraftLineData;
 use Glueful\Extensions\Commerce\Http\DTOs\UpdateDraftOrderData;
 use Glueful\Extensions\Commerce\Orders\DraftConflictException;
+use Glueful\Extensions\Commerce\Orders\DraftFinalizationService;
 use Glueful\Extensions\Commerce\Orders\DraftLineRejectedException;
 use Glueful\Extensions\Commerce\Orders\DraftOrderService;
 use Glueful\Http\Response;
@@ -40,7 +41,8 @@ use Symfony\Component\HttpFoundation\Request;
  *    -- the SAME closed strings the admin product search publishes per row, so a
  *    client branches on one vocabulary.
  *  - {@see DraftConflictException} -> 409 carrying `error.details.conflict`
- *    (`stale_revision` | `user_email_mismatch`).
+ *    (the closed vocabulary on that class) plus whatever machine-readable
+ *    `details` the conflict carries -- currently the finalize per-line list.
  *  - {@see ValidationException} -> the ordinary 422 field-error envelope.
  * An unknown/cross-tenant/non-draft uuid raises the framework's own
  * `NotFoundException` from the service and is left to bubble, exactly like
@@ -54,8 +56,23 @@ final class AdminOrderDraftController
     public function __construct(
         private ApplicationContext $context,
         private ?DraftOrderService $drafts = null,
+        // APPENDED OPTIONAL collaborator (the codebase's standing convention for
+        // widening a constructor): every pre-Task-10 direct-construction call
+        // site, tests included, stays source-compatible. Deliberately NOT resolved
+        // eagerly beside `$drafts` above -- Task 9's own suite constructs this
+        // controller with exactly two positional args against a lightweight
+        // container that binds no finalization service at all, and an eager
+        // `??= app(...)` there would throw at construction time even for a request
+        // that never finalizes anything. Same lazy-accessor pattern
+        // `CheckoutController` uses for its address book, and for the same reason.
+        private ?DraftFinalizationService $finalization = null,
     ) {
         $this->drafts ??= app($context, DraftOrderService::class);
+    }
+
+    private function finalization(): DraftFinalizationService
+    {
+        return $this->finalization ??= app($this->context, DraftFinalizationService::class);
     }
 
     #[ApiOperation(summary: 'Create a draft order', tags: ['Commerce Admin'])]
@@ -141,6 +158,50 @@ final class AdminOrderDraftController
         });
     }
 
+    /**
+     * `POST /orders/drafts/{uuid}/finalize` -- the finalization authority
+     * (admin-order-creation cycle 2, Task 10, design spec §2.5).
+     *
+     * The response is the FINALIZED ORDER on the ordinary admin wire
+     * ({@see OrderProjection}), not the draft wire: the row is no longer a draft,
+     * and `draft_revision` has no meaning on it. The SPA navigates straight to
+     * order detail from here.
+     *
+     * Two deliberate deviations from this controller's other actions:
+     *  - the idempotency key is a HEADER, so it is read here and validated by the
+     *    service before any lookup (an absent header arrives as `null`, which the
+     *    service rejects with the same 422 a malformed one gets);
+     *  - a uuid that resolves to an already-finalized order is a typed 409, not
+     *    the non-revealing 404 `show()`/`update()` return. Finalize must stay
+     *    reachable after finalization so an idempotent RETRY of an ambiguous
+     *    network failure can replay its own result.
+     */
+    #[ApiOperation(summary: 'Finalize a draft order', tags: ['Commerce Admin'])]
+    #[ApiResponse(200, description: 'Draft order finalized')]
+    #[ApiResponse(404, description: 'Draft order not found')]
+    #[ApiResponse(409, description: 'Finalize conflict')]
+    #[ApiResponse(422, description: 'Validation failed')]
+    public function finalize(Request $request, string $uuid): Response
+    {
+        return $this->guard(function () use ($request, $uuid): Response {
+            $input = $this->input($request);
+            $result = $this->finalization()->finalize(
+                $this->context,
+                $uuid,
+                $request->headers->get('X-Idempotency-Key'),
+                $input['expected_revision'] ?? null
+            );
+
+            $projected = OrderProjection::forAdmin($result['order']);
+            $projected['lines'] = array_map(
+                [DraftOrderProjection::class, 'line'],
+                $result['lines']
+            );
+
+            return Response::success($projected, 'Draft order finalized');
+        });
+    }
+
     #[ApiOperation(summary: 'Add a line to a draft order', tags: ['Commerce Admin'])]
     #[ApiRequestBody(schema: CreateDraftLineData::class)]
     #[ApiResponse(201, description: 'Draft order line added')]
@@ -202,7 +263,7 @@ final class AdminOrderDraftController
         } catch (DraftLineRejectedException $e) {
             return Response::error($e->getMessage(), 422, ['reason' => $e->reason]);
         } catch (DraftConflictException $e) {
-            return Response::error($e->getMessage(), 409, ['conflict' => $e->conflict]);
+            return Response::error($e->getMessage(), 409, ['conflict' => $e->conflict] + $e->details);
         } catch (ValidationException $e) {
             return Response::validation($e->firstErrors());
         }

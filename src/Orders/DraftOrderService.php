@@ -256,8 +256,10 @@ final class DraftOrderService
      * that turns a draft into an order. Nothing between here and there checks
      * it, so if finalize does not, nothing does.
      *
-     * TODO(Task 10): finalize preflight must refuse delivery drafts without
-     * required address fields.
+     * DISCHARGED (Task 10): {@see DraftFinalizationService::assertFulfillable()}
+     * is that enforcing surface. It refuses a `delivery` finalize whose shipping
+     * address carries no `country`, and one with no server-quoted
+     * `shipping_method`, before the attempt ledger or any mutation is touched.
      *
      * @param array<string,mixed> $input
      * @return array{order: array<string,mixed>, lines: list<array<string,mixed>>}

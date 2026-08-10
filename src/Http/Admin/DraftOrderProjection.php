@@ -56,10 +56,16 @@ final class DraftOrderProjection
      * same SANITIZED echo every other surface uses -- never `addon_uuid`,
      * `choice_key`, or any other addon-definition internal.
      *
+     * PUBLIC because the FINALIZE response (Task 10) reuses it: that response
+     * projects the order itself through {@see OrderProjection} (it is a real
+     * order by then, with no `draft_revision` on its wire) but keeps this line
+     * shape, so the client that just watched the operator build these lines sees
+     * them echoed back in the form it has been editing all along.
+     *
      * @param array<string,mixed> $line
      * @return array<string,mixed>
      */
-    private static function line(array $line): array
+    public static function line(array $line): array
     {
         return [
             'uuid' => (string) ($line['uuid'] ?? ''),

@@ -15,6 +15,7 @@ use Glueful\Extensions\Commerce\Contracts\ShippingRateProvider;
 use Glueful\Extensions\Commerce\Contracts\TaxCalculator;
 use Glueful\Extensions\Commerce\Discounts\DiscountRepository;
 use Glueful\Extensions\Commerce\Discounts\DiscountService;
+use Glueful\Extensions\Commerce\Events\OrderPlaced;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
 use Glueful\Extensions\Commerce\Orders\CheckoutService;
 use Glueful\Extensions\Commerce\Orders\OrderNumberGenerator;
@@ -25,6 +26,9 @@ use Glueful\Extensions\Commerce\Pricing\ShippingQuote;
 use Glueful\Extensions\Commerce\Pricing\TaxQuote;
 use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
 use Glueful\Extensions\Commerce\Tests\Support\CommerceTestCase;
+use Glueful\Events\EventDispatcher;
+use Glueful\Events\EventService;
+use Glueful\Events\ListenerProvider;
 
 /**
  * Review fix (Important 2): `commerce_orders.origin`/`.fulfillment_mode` keep a
@@ -66,6 +70,59 @@ final class CheckoutOriginFulfillmentModeTest extends CommerceTestCase
         self::assertNotNull($order);
         self::assertSame('storefront', $order['origin']);
         self::assertSame('delivery', $order['fulfillment_mode']);
+    }
+
+    /**
+     * `OrderPlaced` PAYLOAD COMPATIBILITY (admin-order-creation cycle 2, Task 10).
+     * The event now also fires from `DraftFinalizationService` with an
+     * `origin = 'admin'` row, which only stays safe for existing consumers if the
+     * STOREFRONT payload is unchanged: every field a pre-cycle-2 listener could
+     * read is still present, still the raw row (not a projection), and `origin`
+     * reads `storefront` rather than being absent. The additive columns ride along
+     * without displacing anything.
+     */
+    public function testOrderPlacedStorefrontPayloadStaysTheRawRowWithStorefrontOrigin(): void
+    {
+        $captured = [];
+        $listeners = new ListenerProvider();
+        $eventService = new EventService(new EventDispatcher($listeners), $listeners);
+        $eventService->addListener(OrderPlaced::class, static function (OrderPlaced $event) use (&$captured): void {
+            $captured[] = $event->order;
+        });
+        $this->bind(EventService::class, $eventService);
+
+        $variantUuid = $this->seedVariant('SKU-ORIGIN-2', 5, 1000);
+        ['cart' => $cart, 'token' => $token] = $this->cart()->create($this->context);
+        $this->cart()->addLine($this->context, $cart, $variantUuid, 1);
+
+        $placed = $this->checkout()->placeOrder(
+            $this->context,
+            $token,
+            ['email' => 'buyer@example.com', 'user_uuid' => null],
+            ['shipping' => ['country' => 'US'], 'billing' => ['country' => 'US']],
+            'std'
+        );
+
+        self::assertCount(1, $captured);
+        $payload = $captured[0];
+
+        self::assertSame('storefront', (string) $payload['origin']);
+        self::assertSame((string) $placed['order']['uuid'], (string) $payload['uuid']);
+
+        // The payload is the RAW row: the whole pre-cycle-2 field set, internal
+        // columns included, is still readable by an existing listener.
+        foreach (
+            [
+                'uuid', 'tenant_uuid', 'order_number', 'status', 'fulfillment_status', 'email', 'user_uuid',
+                'guest_token_hash', 'currency', 'subtotal', 'discount_total', 'shipping_total', 'tax_total',
+                'grand_total', 'discount_code', 'shipping_method', 'addresses', 'placed_at',
+                'marketplace_partitioned', 'created_at', 'updated_at',
+            ] as $field
+        ) {
+            self::assertArrayHasKey($field, $payload, "OrderPlaced payload must still carry {$field}");
+        }
+        self::assertSame('pending_payment', (string) $payload['status']);
+        self::assertIsArray($payload['addresses'], 'addresses must still arrive decoded');
     }
 
     private function seedVariant(string $sku, int $stock, int $price): string

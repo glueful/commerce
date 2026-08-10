@@ -154,7 +154,9 @@ use Glueful\Extensions\Commerce\Orders\Downloads\DownloadAccessService;
 use Glueful\Extensions\Commerce\Orders\Downloads\DownloadGrantRepository;
 use Glueful\Extensions\Commerce\Orders\Downloads\DownloadGrantService;
 use Glueful\Extensions\Commerce\Orders\Downloads\DownloadUrlSigner;
+use Glueful\Extensions\Commerce\Orders\DraftAttemptRepository;
 use Glueful\Extensions\Commerce\Orders\DraftCleanupService;
+use Glueful\Extensions\Commerce\Orders\DraftFinalizationService;
 use Glueful\Extensions\Commerce\Orders\DraftOrderService;
 use Glueful\Extensions\Commerce\Orders\ExpiryService;
 use Glueful\Extensions\Commerce\Orders\OrderFulfillmentService;
@@ -684,6 +686,14 @@ final class CommerceServiceProvider extends ServiceProvider
             ],
             DraftCleanupService::class => [
                 'factory' => [self::class, 'makeDraftCleanupService'],
+                'shared' => true,
+            ],
+            DraftAttemptRepository::class => [
+                'class' => DraftAttemptRepository::class,
+                'shared' => true,
+            ],
+            DraftFinalizationService::class => [
+                'factory' => [self::class, 'makeDraftFinalizationService'],
                 'shared' => true,
             ],
             OrderPaymentConfirmationHandler::class => [
@@ -1404,11 +1414,42 @@ final class CommerceServiceProvider extends ServiceProvider
         );
     }
 
+    /**
+     * Admin-order-creation cycle 2, Task 10 (design spec §2.5). Takes the SAME
+     * shared collaborators the draft mutation surface and storefront checkout
+     * take -- one shipping provider, one tax calculator, one pricing engine, one
+     * resolver -- so a finalize can never price an order differently from the
+     * draft the operator was just looking at for want of a differently-configured
+     * dependency. `MarketplaceMode` is injected for the same reason
+     * {@see self::makeDraftOrderService()} injects it: the order-level
+     * partitioning decision behind the `marketplace` line rejection must read the
+     * shared instance every other marketplace consumer reads.
+     */
+    public static function makeDraftFinalizationService(
+        ContainerInterface $container
+    ): DraftFinalizationService {
+        return new DraftFinalizationService(
+            $container->get(OrderRepository::class),
+            $container->get(DraftAttemptRepository::class),
+            $container->get(PurchasableLineResolver::class),
+            $container->get(PricingEngine::class),
+            $container->get(ShippingRateProvider::class),
+            $container->get(TaxCalculator::class),
+            $container->get(DiscountRepository::class),
+            $container->get(DiscountService::class),
+            $container->get(StockRepository::class),
+            $container->get(OrderNumberGenerator::class),
+            self::tenantResolver($container),
+            $container->get(MarketplaceMode::class)
+        );
+    }
+
     public static function makeAdminOrderDraftController(ContainerInterface $container): AdminOrderDraftController
     {
         return new AdminOrderDraftController(
             $container->get(ApplicationContext::class),
-            $container->get(DraftOrderService::class)
+            $container->get(DraftOrderService::class),
+            $container->get(DraftFinalizationService::class)
         );
     }
 
