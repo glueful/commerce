@@ -309,6 +309,152 @@ final class AdminOrderDraftApiTest extends CommerceTestCase
         self::assertSame(0, (int) $row['draft_revision']);
     }
 
+    /**
+     * The guard is EFFECTIVE-STATE, not per-request. Splitting the two fields
+     * across two PATCHes -- in EITHER order -- must not be a bypass, or a draft
+     * could sit linked to one account while carrying a foreign email, and
+     * finalize would mail an address that account never gave.
+     */
+    public function testAttachingAUserThenSettingAForeignEmailIsStillATypedConflict(): void
+    {
+        $this->bindUserProvider([
+            'usr000000001' => new UserIdentity('usr000000001', [], [], [], 'ada@example.com', 'ada', 'active'),
+        ]);
+        $uuid = $this->createDraft();
+        $this->controller()->update($this->request('PATCH', ['user_uuid' => 'usr000000001']), $uuid);
+        self::assertSame('usr000000001', $this->orderRow($uuid)['user_uuid']);
+
+        $response = $this->controller()->update(
+            $this->request('PATCH', ['email' => 'someone-else@example.com']),
+            $uuid
+        );
+
+        self::assertSame(409, $response->getStatusCode());
+        self::assertSame('user_email_mismatch', $this->json($response)['error']['details']['conflict']);
+
+        $row = $this->orderRow($uuid);
+        self::assertNull($row['email'], 'the foreign email must not be stored');
+        self::assertSame('usr000000001', $row['user_uuid']);
+        self::assertSame(1, (int) $row['draft_revision']);
+    }
+
+    /** The reverse ordering of the same bypass. */
+    public function testSettingAnEmailThenAttachingADisagreeingUserIsStillATypedConflict(): void
+    {
+        $this->bindUserProvider([
+            'usr000000001' => new UserIdentity('usr000000001', [], [], [], 'ada@example.com', 'ada', 'active'),
+        ]);
+        $uuid = $this->createDraft();
+        $this->controller()->update($this->request('PATCH', ['email' => 'someone-else@example.com']), $uuid);
+
+        $response = $this->controller()->update($this->request('PATCH', ['user_uuid' => 'usr000000001']), $uuid);
+
+        self::assertSame(409, $response->getStatusCode());
+        self::assertSame('user_email_mismatch', $this->json($response)['error']['details']['conflict']);
+
+        $row = $this->orderRow($uuid);
+        self::assertNull($row['user_uuid'], 'the order must remain unlinked');
+        self::assertSame('someone-else@example.com', $row['email']);
+        self::assertSame(1, (int) $row['draft_revision']);
+    }
+
+    public function testAttachingAUserThenSettingTheAccountsOwnEmailAcrossTwoRequestsIsAccepted(): void
+    {
+        $this->bindUserProvider([
+            'usr000000001' => new UserIdentity('usr000000001', [], [], [], 'ada@example.com', 'ada', 'active'),
+        ]);
+        $uuid = $this->createDraft();
+        $this->controller()->update($this->request('PATCH', ['user_uuid' => 'usr000000001']), $uuid);
+
+        $response = $this->controller()->update($this->request('PATCH', ['email' => 'ADA@example.com']), $uuid);
+
+        self::assertSame(200, $response->getStatusCode());
+        self::assertSame('ADA@example.com', $this->orderRow($uuid)['email']);
+    }
+
+    /**
+     * Clearing EITHER side is always legal: an unlinked draft with an email and
+     * a linked draft with no email are both legitimate states, so the guard must
+     * only ever fire on a genuine disagreement between two PRESENT values.
+     */
+    public function testDetachingTheUserFreesTheDraftToCarryAnyEmail(): void
+    {
+        $uuid = $this->linkedDraft();
+
+        $detach = $this->controller()->update($this->request('PATCH', ['user_uuid' => null]), $uuid);
+        self::assertSame(200, $detach->getStatusCode());
+        self::assertNull($this->orderRow($uuid)['user_uuid']);
+
+        // The very email that would have conflicted a moment ago is now fine.
+        $response = $this->controller()->update(
+            $this->request('PATCH', ['email' => 'someone-else@example.com']),
+            $uuid
+        );
+        self::assertSame(200, $response->getStatusCode());
+        self::assertSame('someone-else@example.com', $this->orderRow($uuid)['email']);
+    }
+
+    public function testClearingTheEmailIsAllowedOnALinkedDraftButAForeignEmailStillConflicts(): void
+    {
+        $uuid = $this->linkedDraft();
+
+        $clear = $this->controller()->update($this->request('PATCH', ['email' => null]), $uuid);
+        self::assertSame(200, $clear->getStatusCode());
+        self::assertNull($this->orderRow($uuid)['email']);
+        self::assertSame('usr000000001', $this->orderRow($uuid)['user_uuid']);
+
+        // Still linked, so a foreign email is still refused.
+        $response = $this->controller()->update(
+            $this->request('PATCH', ['email' => 'someone-else@example.com']),
+            $uuid
+        );
+        self::assertSame(409, $response->getStatusCode());
+        self::assertNull($this->orderRow($uuid)['email']);
+    }
+
+    /**
+     * Fails CLOSED: a stored link whose account no longer resolves (deleted or
+     * suspended since attachment) cannot confirm an incoming email, so the pair
+     * is refused rather than persisted unverifiable.
+     */
+    public function testAnEmailAgainstAStoredUserThatNoLongerResolvesIsATypedConflict(): void
+    {
+        $this->bindUserProvider([
+            'usr000000001' => new UserIdentity('usr000000001', [], [], [], 'ada@example.com', 'ada', 'active'),
+        ]);
+        $uuid = $this->createDraft();
+        $this->controller()->update($this->request('PATCH', ['user_uuid' => 'usr000000001']), $uuid);
+
+        // The account disappears from the provider between requests.
+        $this->bindUserProvider([]);
+
+        $response = $this->controller()->update($this->request('PATCH', ['email' => 'ada@example.com']), $uuid);
+
+        self::assertSame(409, $response->getStatusCode());
+        self::assertSame('user_email_mismatch', $this->json($response)['error']['details']['conflict']);
+        self::assertNull($this->orderRow($uuid)['email']);
+    }
+
+    /**
+     * A mutation that touches NEITHER identity field must never consult the user
+     * provider -- otherwise every line add on a linked draft would pay for (and
+     * could fail on) an unrelated identity lookup.
+     */
+    public function testANonIdentityMutationOnALinkedDraftNeverConsultsTheUserProvider(): void
+    {
+        $this->bindUserProvider([
+            'usr000000001' => new UserIdentity('usr000000001', [], [], [], 'ada@example.com', 'ada', 'active'),
+        ]);
+        $uuid = $this->createDraft();
+        $this->controller()->update($this->request('PATCH', ['user_uuid' => 'usr000000001']), $uuid);
+        $this->userProviderLookups = 0;
+
+        $response = $this->controller()->update($this->request('PATCH', ['customer_name' => 'Counter sale']), $uuid);
+
+        self::assertSame(200, $response->getStatusCode());
+        self::assertSame(0, $this->userProviderLookups);
+    }
+
     public function testASuppliedEmailMatchingTheResolvedUserLinksAndStoresBoth(): void
     {
         $this->bindUserProvider([
@@ -556,6 +702,42 @@ final class AdminOrderDraftApiTest extends CommerceTestCase
         );
 
         self::assertSame(201, $response->getStatusCode());
+    }
+
+    /**
+     * The order-level partitioning decision is composed PER CALL, never memoized
+     * on the service: `DraftOrderService` is registered `shared`, and
+     * `MarketplaceMode`'s own contract is that behavioral consumers re-check per
+     * call so a live settings-screen toggle takes effect immediately. Proven on
+     * ONE controller/service instance -- a memo would let the second add through.
+     */
+    public function testPartitioningIsRecomposedPerCallSoALiveMarketplaceToggleApplies(): void
+    {
+        $this->context->overrideConfig('commerce.marketplace.enabled', true);
+        $variantUuid = $this->seedPhysicalProduct('SKU-MKT-3', 900, sellerUuid: 'sel000000001');
+        $controller = $this->controller();
+        $uuid = (string) $this->json($controller->store($this->request('POST', [])))['data']['uuid'];
+
+        // Workspace not activated yet: an ordinary line.
+        $before = $controller->storeLine(
+            $this->request('POST', ['variant_uuid' => $variantUuid, 'quantity' => 1]),
+            $uuid
+        );
+        self::assertSame(201, $before->getStatusCode());
+
+        $this->connection->table('commerce_marketplace_settings')->insert([
+            'uuid' => 'mktsettings1',
+            'tenant_uuid' => self::TENANT,
+            'status' => 'active',
+        ]);
+
+        $after = $controller->storeLine(
+            $this->request('POST', ['variant_uuid' => $variantUuid, 'quantity' => 1]),
+            $uuid
+        );
+
+        self::assertSame(422, $after->getStatusCode());
+        self::assertSame(DraftLineEligibility::MARKETPLACE, $this->json($after)['error']['details']['reason']);
     }
 
     public function testExternalProductsAreRejectedAsUnavailable(): void
@@ -958,6 +1140,19 @@ final class AdminOrderDraftApiTest extends CommerceTestCase
         $this->shippingQuotes = [new ShippingQuote('std', 'Standard', 500)];
     }
 
+    /** A draft linked to `usr000000001` and carrying that account's own email. */
+    private function linkedDraft(): string
+    {
+        $this->bindUserProvider([
+            'usr000000001' => new UserIdentity('usr000000001', [], [], [], 'ada@example.com', 'ada', 'active'),
+        ]);
+        $uuid = $this->createDraft();
+        $this->controller()->update($this->request('PATCH', ['user_uuid' => 'usr000000001']), $uuid);
+        $this->controller()->update($this->request('PATCH', ['email' => 'ADA@example.com']), $uuid);
+
+        return $uuid;
+    }
+
     /** @param array<string,mixed> $body */
     private function createDraft(array $body = []): string
     {
@@ -1040,17 +1235,24 @@ final class AdminOrderDraftApiTest extends CommerceTestCase
 
     private ?UserProviderInterface $userProvider = null;
 
+    /** Counts `findByUuid()` calls so a test can pin that a lookup did NOT happen. */
+    private int $userProviderLookups = 0;
+
     /** @param array<string,UserIdentity> $identities */
     private function bindUserProvider(array $identities): void
     {
-        $this->userProvider = new class ($identities) implements UserProviderInterface {
+        $this->userProvider = new class ($identities, $this) implements UserProviderInterface {
             /** @param array<string,UserIdentity> $identities */
-            public function __construct(private array $identities)
-            {
+            public function __construct(
+                private array $identities,
+                private AdminOrderDraftApiTest $test,
+            ) {
             }
 
             public function findByUuid(string $uuid): ?UserIdentity
             {
+                $this->test->recordUserProviderLookup();
+
                 return $this->identities[$uuid] ?? null;
             }
 
@@ -1086,6 +1288,11 @@ final class AdminOrderDraftApiTest extends CommerceTestCase
     public function currentShippingQuotes(): array
     {
         return $this->shippingQuotes;
+    }
+
+    public function recordUserProviderLookup(): void
+    {
+        $this->userProviderLookups++;
     }
 
     private function taxCalculator(): TaxCalculator

@@ -69,8 +69,8 @@ use Glueful\Validation\ValidationException;
  *    {@see DraftLineEligibility} -- the SAME class, and therefore the same
  *    closed reason strings, the admin product search publishes per row. The
  *    marketplace input is the ORDER-level composition
- *    (`installEnabled() && activeFor()`), computed exactly ONCE per request
- *    ({@see self::partitioning()}), mirroring `CheckoutService::placeOrder()`.
+ *    (`installEnabled() && activeFor()`), composed per call exactly as
+ *    `CheckoutService::placeOrder()` composes it ({@see self::partitioning()}).
  *
  * 5. **Identity is never invented.** A fully anonymous walk-in draft is valid:
  *    no placeholder email, no guest credential, no implicit account link. Phone
@@ -121,14 +121,6 @@ final class DraftOrderService
     ];
 
     private const MAX_CUSTOMER_NAME_LENGTH = 255;
-
-    /**
-     * Memoized ORDER-level marketplace decision -- see {@see self::partitioning()}.
-     * This service is constructed per request, so "once per instance" IS "once per
-     * request", which is the property `CommissionSnapshotTest`'s pinned
-     * exactly-once-query assertion protects on the checkout side.
-     */
-    private ?bool $partitioning = null;
 
     public function __construct(
         private OrderRepository $orders,
@@ -252,6 +244,21 @@ final class DraftOrderService
      * this draft's current lines and address -- an amount is never accepted
      * from a client, and an unavailable id is a 422.
      *
+     * !! RULING 5's OTHER HALF -- "`delivery` REQUIRES address fields" -- IS
+     * !! DELIBERATELY *NOT* ENFORCED HERE. FINALIZE IS THE ENFORCING SURFACE.
+     * A draft is scratch work an operator builds in whatever order suits the
+     * counter: choosing `delivery` before the customer has read out their
+     * address must not be rejected, and a half-filled address must not block
+     * adding the next line. So this path enforces only the NEGATIVE half of the
+     * rule (nothing address- or shipping-shaped may exist while `in_store`) and
+     * leaves the POSITIVE half -- a `delivery` order must actually have the
+     * required address fields before it becomes an order -- to the one surface
+     * that turns a draft into an order. Nothing between here and there checks
+     * it, so if finalize does not, nothing does.
+     *
+     * TODO(Task 10): finalize preflight must refuse delivery drafts without
+     * required address fields.
+     *
      * @param array<string,mixed> $input
      * @return array{order: array<string,mixed>, lines: list<array<string,mixed>>}
      */
@@ -262,7 +269,7 @@ final class DraftOrderService
         return db($context)->transaction(function () use ($context, $tenant, $uuid, $input): array {
             $draft = $this->loadDraft($context, $tenant, $uuid);
             $expected = $this->expectedRevision($input, $draft);
-            $changes = $this->customerChanges($input);
+            $changes = $this->customerChanges($input, $draft);
 
             $mode = array_key_exists('fulfillment_mode', $input)
                 ? $this->assertMode($input['fulfillment_mode'])
@@ -518,8 +525,7 @@ final class DraftOrderService
      * `digital` and `marketplace` are NOT the resolver's business (a digital
      * variant is perfectly purchasable through storefront checkout) -- they are
      * draft-specific rejections decided here, from the resolved line's own
-     * `type`/`sellerUuid` plus the once-per-request order-level partitioning
-     * decision.
+     * `type`/`sellerUuid` plus the order-level partitioning decision.
      *
      * @param list<array<string,mixed>> $selections
      */
@@ -550,21 +556,29 @@ final class DraftOrderService
     }
 
     /**
-     * The ORDER-level marketplace decision, computed exactly ONCE per request
-     * (this service is constructed per request) exactly as
-     * {@see CheckoutService::placeOrder()} does it: the config-only
-     * `installEnabled()` master switch first, so a non-marketplace install runs
-     * ZERO `commerce_marketplace_settings` queries, and only then the
-     * workspace's own activation.
+     * The ORDER-level marketplace decision, composed exactly as
+     * {@see CheckoutService::placeOrder()} composes it (CheckoutService.php:328):
+     * the config-only `installEnabled()` master switch FIRST -- so a
+     * non-marketplace install runs ZERO `commerce_marketplace_settings` queries
+     * -- and only then the workspace's own `activeFor()` activation.
+     *
+     * Computed PER CALL, deliberately NOT memoized on this instance. Two
+     * independent reasons, either of which alone would rule a cache out:
+     *  - {@see MarketplaceMode::installEnabled()}'s own contract is that
+     *    behavioral consumers re-check per call, so a live settings-screen
+     *    toggle takes effect immediately; `CheckoutService` never caches it
+     *    either.
+     *  - this service is registered `shared` in the container, so an instance
+     *    can outlive one tenant's request in any long-lived process -- a memo
+     *    here would not merely be stale, it would be CROSS-TENANT wrong, since
+     *    `activeFor()` is tenant-scoped while the memo would not be.
+     * The composition is two cheap calls (the first is zero-query and
+     * short-circuits the second), so there is nothing to buy back.
      */
     private function partitioning(ApplicationContext $context, string $tenant): bool
     {
-        if ($this->partitioning === null) {
-            $this->partitioning = $this->marketplace->installEnabled($context)
-                && $this->marketplace->activeFor($context, $tenant);
-        }
-
-        return $this->partitioning;
+        return $this->marketplace->installEnabled($context)
+            && $this->marketplace->activeFor($context, $tenant);
     }
 
     // -----------------------------------------------------------------
@@ -907,15 +921,34 @@ final class DraftOrderService
      * user through the framework's `UserProviderInterface`. "Active" follows the
      * framework's own convention (`AdminPermissionMiddleware`): a null status
      * means the store has no opinion and is allowed; any other explicit value
-     * must be `active`. Unknown and inactive both raise ONE neutral 422; a
-     * supplied `email` that disagrees with the resolved user's is a typed 409
-     * and links nothing. No provider bound fails closed onto the same 422 --
-     * a draft is never linked to an account this engine could not verify.
+     * must be `active`. Unknown and inactive both raise ONE neutral 422. No
+     * provider bound fails closed onto the same 422 -- a draft is never linked
+     * to an account this engine could not verify.
+     *
+     * THE EMAIL/ACCOUNT AGREEMENT GUARD IS EFFECTIVE-STATE, NOT PER-REQUEST.
+     * Comparing only the two fields that arrived TOGETHER would leave a trivial
+     * two-request bypass: `PATCH {user_uuid}` then `PATCH {email: <foreign>}`
+     * (or the reverse) would persist a linked account sitting beside an email
+     * that account does not own -- exactly the state §2.3 forbids, and the state
+     * that would send a finalize confirmation to an address the account owner
+     * never gave. So whenever EITHER field is in play, the guard resolves the
+     * EFFECTIVE pair (this request's change if present, otherwise the draft's
+     * stored value) and enforces the 409 against that. Clearing either side to
+     * null is always allowed -- an unlinked draft with an email, and a linked
+     * draft with no email, are both legitimate states.
+     *
+     * A stored `user_uuid` that no longer resolves (or is no longer active)
+     * fails CLOSED when an email is in play: the engine cannot confirm the
+     * address belongs to the account, so it refuses rather than persisting an
+     * unverifiable pairing. The remedy is to detach or re-attach the user.
      *
      * @param array<string,mixed> $input
+     * @param array<string,mixed>|null $draft the CURRENT stored row; null on
+     *     create, where every stored value is null by construction, so the
+     *     effective pair is exactly this request's own changes
      * @return array<string,mixed>
      */
-    private function customerChanges(array $input): array
+    private function customerChanges(array $input, ?array $draft = null): array
     {
         $changes = [];
         $identity = null;
@@ -952,15 +985,8 @@ final class DraftOrderService
             }
         }
 
-        if ($identity !== null && ($changes['email'] ?? null) !== null) {
-            $accountEmail = $identity->email();
-            $supplied = (string) $changes['email'];
-            if (
-                $accountEmail === null
-                || EmailNormalizer::normalize($accountEmail) !== EmailNormalizer::normalize($supplied)
-            ) {
-                throw DraftConflictException::userEmailMismatch();
-            }
+        if (array_key_exists('user_uuid', $input) || array_key_exists('email', $input)) {
+            $this->assertIdentityAgreement($changes, $draft, $identity);
         }
 
         if (array_key_exists('customer_name', $input)) {
@@ -992,6 +1018,51 @@ final class DraftOrderService
         }
 
         return $changes;
+    }
+
+    /**
+     * The EFFECTIVE-state email/account agreement check -- see
+     * {@see self::customerChanges()}'s docblock for why it is effective-state
+     * rather than per-request.
+     *
+     * `$resolved` is the identity this request already looked up (when the
+     * request itself supplied `user_uuid`), passed in purely so a
+     * user-and-email request never calls the provider twice.
+     *
+     * @param array<string,mixed> $changes this request's already-validated changes
+     * @param array<string,mixed>|null $draft the current stored row
+     */
+    private function assertIdentityAgreement(array $changes, ?array $draft, ?UserIdentity $resolved): void
+    {
+        $userUuid = array_key_exists('user_uuid', $changes)
+            ? $changes['user_uuid']
+            : ($draft['user_uuid'] ?? null);
+        $email = array_key_exists('email', $changes)
+            ? $changes['email']
+            : ($draft['email'] ?? null);
+
+        // Either side absent = nothing to disagree about. This is what keeps
+        // "clear the email", "detach the user", and every anonymous walk-in
+        // draft legal.
+        if (!is_string($userUuid) || $userUuid === '' || !is_string($email) || $email === '') {
+            return;
+        }
+
+        $identity = $resolved !== null && $resolved->uuid() === $userUuid
+            ? $resolved
+            : $this->users?->findByUuid($userUuid);
+
+        if ($identity === null || !$this->isActive($identity)) {
+            throw DraftConflictException::userEmailMismatch();
+        }
+
+        $accountEmail = $identity->email();
+        if (
+            $accountEmail === null
+            || EmailNormalizer::normalize($accountEmail) !== EmailNormalizer::normalize($email)
+        ) {
+            throw DraftConflictException::userEmailMismatch();
+        }
     }
 
     /** The framework's own "active" convention -- see the class docblock. */

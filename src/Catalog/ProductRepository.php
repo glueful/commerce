@@ -125,6 +125,47 @@ SQL;
         return $row === null ? null : $this->decodeJson($row);
     }
 
+    /**
+     * BATCHED buyer-availability membership test (admin-order-creation cycle 2,
+     * Task 9): "which of these product uuids would {@see self::findBuyerAvailableByUuid()}
+     * resolve?", answered for a whole page in ONE query.
+     *
+     * It reuses that method's predicate verbatim -- the same tombstone guard and
+     * the same {@see self::applyBuyerAvailability()} call, and therefore the same
+     * {@see self::BUYER_SELLER_ACTIVE_SQL} -- rather than restating the
+     * seller-active condition at the call site. That matters because the caller
+     * ({@see \Glueful\Extensions\Commerce\Http\Admin\AdminProductController}'s
+     * draft-eligibility projection) must agree EXACTLY with what the draft line
+     * endpoint's resolver will accept; a second, hand-rolled copy of the
+     * predicate is precisely the kind of thing that silently desyncs.
+     *
+     * Deliberately returns a SET rather than rows: the caller already has the
+     * full admin rows from its own paginated read and needs only membership.
+     *
+     * @param list<string> $uuids
+     * @return array<string,true> the subset that is buyer-available, as a lookup set
+     */
+    public function buyerAvailableUuids(ApplicationContext $context, string $tenant, array $uuids): array
+    {
+        if ($uuids === []) {
+            return [];
+        }
+
+        $query = db($context)->table('commerce_products')
+            ->select(['uuid'])
+            ->where('tenant_uuid', '=', $tenant)
+            ->whereRaw('deleted_at IS NULL')
+            ->whereIn('uuid', $uuids);
+        $this->applyBuyerAvailability($query, $context, $tenant);
+
+        $available = [];
+        foreach ($query->get() as $row) {
+            $available[(string) $row['uuid']] = true;
+        }
+
+        return $available;
+    }
+
     /** @see self::findBuyerAvailableByUuid() @return array<string,mixed>|null */
     public function findBuyerAvailableBySlug(ApplicationContext $context, string $tenant, string $slug): ?array
     {

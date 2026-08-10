@@ -111,18 +111,25 @@ final class AdminProductController
      *
      * TWO reads for a WHOLE page, never one per row:
      *  - the ORDER-level marketplace decision (`installEnabled() && activeFor()`)
-     *    is computed ONCE, exactly as `CheckoutService::placeOrder()` does it, and
-     *    the config-only master switch short-circuits it entirely on a
-     *    non-marketplace install;
-     *  - buyer availability's only page-visible failure mode -- a product owned by
-     *    a NON-ACTIVE seller, which is precisely
-     *    `ProductRepository::BUYER_SELLER_ACTIVE_SQL`'s predicate -- is resolved
-     *    with ONE batched `commerce_sellers` read, and only when the master switch
-     *    is on and the page actually contains seller-owned rows. (Tombstoned rows
-     *    are already excluded by `paginatedForAdmin()`, and product `status` is
-     *    deliberately NOT part of buyer availability -- see
-     *    `ProductRepository::findBuyerAvailableByUuid()` -- so a `draft`-status
-     *    product stays addable here exactly as it is addable to a cart.)
+     *    is composed ONCE for the page, exactly as `CheckoutService::placeOrder()`
+     *    composes it, with the config-only master switch short-circuiting it
+     *    entirely on a non-marketplace install;
+     *  - buyer availability is answered by the SHARED authority,
+     *    {@see ProductRepository::buyerAvailableUuids()} -- the batched form of the
+     *    very `findBuyerAvailableByUuid()` predicate the draft line endpoint's
+     *    resolver applies. The predicate is never restated here, so this
+     *    projection cannot desync from the write authority it is advertising.
+     *
+     * The one short-circuit: with the marketplace master switch OFF,
+     * `ProductRepository::applyBuyerAvailability()` is itself a documented no-op
+     * and `paginatedForAdmin()` has already excluded tombstoned rows, so every row
+     * on the page is buyer-available by construction and the batched read is
+     * skipped. That is the same master-off fast path the repository documents, not
+     * an independent judgement about availability.
+     *
+     * (Product `status` is deliberately NOT part of buyer availability -- see
+     * `ProductRepository::findBuyerAvailableByUuid()` -- so a `draft`-status
+     * product stays addable here exactly as it is addable to a cart.)
      *
      * @param list<array<string,mixed>> $items
      * @return list<array<string,mixed>>
@@ -135,13 +142,16 @@ final class AdminProductController
 
         $installed = $this->marketplace->installEnabled($this->context);
         $partitioning = $installed && $this->marketplace->activeFor($this->context, $tenant);
-        $activeSellers = $installed ? $this->activeSellerUuids($tenant, $items) : null;
+        $available = $installed
+            ? $this->products->buyerAvailableUuids(
+                $this->context,
+                $tenant,
+                array_map(static fn (array $row): string => (string) $row['uuid'], $items)
+            )
+            : null;
 
-        return array_map(static function (array $row) use ($activeSellers, $partitioning): array {
-            $sellerUuid = isset($row['seller_uuid']) ? (string) $row['seller_uuid'] : '';
-            $buyerAvailable = $activeSellers === null
-                || $sellerUuid === ''
-                || isset($activeSellers[$sellerUuid]);
+        return array_map(static function (array $row) use ($available, $partitioning): array {
+            $buyerAvailable = $available === null || isset($available[(string) $row['uuid']]);
             $reason = DraftLineEligibility::forProductRow($row, $buyerAvailable, $partitioning);
 
             return $row + [
@@ -149,38 +159,6 @@ final class AdminProductController
                 'admin_draft_ineligible_reason' => $reason,
             ];
         }, $items);
-    }
-
-    /**
-     * @param list<array<string,mixed>> $items
-     * @return array<string,true> active seller uuids present on this page
-     */
-    private function activeSellerUuids(string $tenant, array $items): array
-    {
-        $sellerUuids = [];
-        foreach ($items as $row) {
-            $sellerUuid = isset($row['seller_uuid']) ? (string) $row['seller_uuid'] : '';
-            if ($sellerUuid !== '') {
-                $sellerUuids[$sellerUuid] = true;
-            }
-        }
-        if ($sellerUuids === []) {
-            return [];
-        }
-
-        $rows = db($this->context)->table('commerce_sellers')
-            ->select(['uuid'])
-            ->where('tenant_uuid', '=', $tenant)
-            ->where('status', '=', 'active')
-            ->whereIn('uuid', array_keys($sellerUuids))
-            ->get();
-
-        $active = [];
-        foreach ($rows as $row) {
-            $active[(string) $row['uuid']] = true;
-        }
-
-        return $active;
     }
 
     /**
