@@ -14,7 +14,7 @@ namespace Glueful\Extensions\Commerce\Orders\Events;
  * seller-webhook outbox, or the marketplace fan-out. The payment itself is
  * still audited by the ordinary lifecycle rows when it happens.
  *
- * Writers, both inside {@see \Glueful\Extensions\Commerce\Orders\PaymentLinkService}:
+ * Writers, all inside {@see \Glueful\Extensions\Commerce\Orders\PaymentLinkService}:
  *  - {@see self::MINTED}  -- one row per link actually inserted, written INSIDE
  *    the mint transaction, so a rolled-back mint audits nothing.
  *  - {@see self::REVOKED} -- one row per link actually transitioned out of
@@ -22,6 +22,14 @@ namespace Glueful\Extensions\Commerce\Orders\Events;
  *    superseded link and its replacement), and an explicit revoke of an order
  *    with no active link writes nothing at all, which is what makes the
  *    operation idempotent in the trail as well as in the table.
+ *  - {@see self::INITIATED} -- one row per checkout session actually EXPOSED to
+ *    a payer, written inside Task 7's Phase B transaction alongside the
+ *    `provider_session_issued_at` stamp. An attempt that reached the provider
+ *    but was then refused by Phase B (a revoke or cancel that committed while
+ *    the provider call was in flight) audits nothing here, exactly as it
+ *    exposes no URL: the two facts commit or roll back together. There is no
+ *    actor -- the payer is anonymous by construction, so `actor_uuid` stays
+ *    null and the row records only which link opened a session, and when.
  *
  * ## The payload is `link_uuid` and nothing else
  *
@@ -34,11 +42,12 @@ namespace Glueful\Extensions\Commerce\Orders\Events;
  * `PaymentLinkServiceTest`'s egress ratchet dumps this table and asserts the
  * token is absent.
  *
- * Both are recorded with the default `internal` visibility: the customer's own
+ * All are recorded with the default `internal` visibility: the customer's own
  * payment-link page is served from the link itself, never from this trail.
  */
 final class PaymentLinkEvents
 {
     public const MINTED = 'payment_link_minted';
     public const REVOKED = 'payment_link_revoked';
+    public const INITIATED = 'payment_link_initiated';
 }

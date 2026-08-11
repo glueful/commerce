@@ -1092,9 +1092,11 @@ final class PaymentLinkServiceTest extends CommerceTestCase
     }
 
     /**
-     * The complement of the runtime ratchet: the SIGNATURE surface. Only
-     * `mint()` and `mintPublic()` may name a raw token at all, and only as an
-     * input on the two seams that must (`resolveByToken`, `matchCurrentToken`).
+     * The complement of the runtime ratchet: the SIGNATURE surface. A raw token
+     * may only ever be an INPUT, and only on the three seams that genuinely
+     * receive one from a caller -- `resolveByToken()`, `matchCurrentToken()`,
+     * and Task 7's `initiateByToken()`. Every one of them hashes it and
+     * overwrites the parameter with the redaction sentinel before any I/O.
      */
     public function testOnlyTheDocumentedMethodsSpeakOfARawTokenAtAll(): void
     {
@@ -1110,7 +1112,10 @@ final class PaymentLinkServiceTest extends CommerceTestCase
         }
         sort($seen);
 
-        self::assertSame(['matchCurrentToken', 'resolveByToken'], array_values(array_unique($seen)));
+        self::assertSame(
+            ['initiateByToken', 'matchCurrentToken', 'resolveByToken'],
+            array_values(array_unique($seen))
+        );
     }
 
     // =====================================================================

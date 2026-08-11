@@ -1246,7 +1246,9 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(OrderRepository::class),
             $container->get(PaymentLinkRepository::class),
             self::tenantResolver($container),
-            self::makePaymentLinkPublicUrlProvider($container)
+            self::makePaymentLinkPublicUrlProvider($container),
+            self::makePaymentCollector($container),
+            self::makePaymentLinkReturnUrlProvider($container)
         );
     }
 
@@ -1260,6 +1262,28 @@ final class CommerceServiceProvider extends ServiceProvider
         $provider = $container->get(PaymentLinkPublicUrlProvider::class);
 
         return $provider instanceof PaymentLinkPublicUrlProvider ? $provider : null;
+    }
+
+    /**
+     * Payment-links Task 7 (design spec §2.2): the return-URL seam, soft-resolved
+     * through the SAME guarded idiom as {@see self::makePaymentLinkPublicUrlProvider()}.
+     * A host that rebinds the id to something that is not a
+     * {@see PaymentLinkReturnUrlProvider}, and a container assembled without the
+     * engine's own definitions, both land on null -- which
+     * {@see PaymentLinkService::initiateByToken()} treats identically to the
+     * engine's bound {@see UnavailablePaymentLinkReturnUrlProvider}: a typed
+     * `return_url_unavailable`, never a fallback redirect.
+     */
+    public static function makePaymentLinkReturnUrlProvider(
+        ContainerInterface $container
+    ): ?PaymentLinkReturnUrlProvider {
+        if (!$container->has(PaymentLinkReturnUrlProvider::class)) {
+            return null;
+        }
+
+        $provider = $container->get(PaymentLinkReturnUrlProvider::class);
+
+        return $provider instanceof PaymentLinkReturnUrlProvider ? $provider : null;
     }
 
     /**

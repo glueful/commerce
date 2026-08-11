@@ -6,8 +6,15 @@ namespace Glueful\Extensions\Commerce\Orders;
 
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Contracts\PaymentLinkPublicUrlProvider;
+use Glueful\Extensions\Commerce\Contracts\PaymentLinkReturnUrlProvider;
 use Glueful\Extensions\Commerce\Orders\Events\PaymentLinkEvents;
+use Glueful\Extensions\Commerce\Payments\ManualPaymentCollector;
+use Glueful\Extensions\Commerce\Payments\OrderPayable;
 use Glueful\Extensions\Commerce\Support\CommerceSettings;
+use Glueful\Extensions\Commerce\Support\HttpsUrl;
+use Glueful\Extensions\Contracts\Payments\PayableReference;
+use Glueful\Extensions\Contracts\Payments\PaymentCollector;
+use Glueful\Extensions\Contracts\Payments\PaymentInitiation;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Glueful\Helpers\Utils;
 
@@ -71,9 +78,10 @@ use Glueful\Helpers\Utils;
  * DEPLOYMENT REQUIREMENT: installs handling payment links MUST pin
  * `zend.exception_ignore_args=On`. The measures above make the engine safe
  * against its OWN frames; they cannot protect a caller that passes a token into
- * its own helper, and defense in depth is cheap here. Task 7's
- * `initiateByToken()` has exactly this shape and its implementer must apply the
- * same two rules.
+ * its own helper, and defense in depth is cheap here.
+ * {@see self::initiateByToken()} has exactly this shape and applies both rules:
+ * the parameter is overwritten before any I/O, and everything below it speaks
+ * in hashes and uuids only.
  *
  * ## Why the shape gate comes before the database
  *
@@ -113,11 +121,49 @@ use Glueful\Helpers\Utils;
  * refunded order transitions nothing -- the view reports the order's honest
  * state and lets the page say so.
  *
+ * ## Initiation is TWO PHASES, and that is a correctness requirement
+ *
+ * {@see self::initiateByToken()} (Task 7, design spec §2.2) turns a click into
+ * a provider checkout session, and the ONE rule that shapes it is: NO PROVIDER
+ * CALL RUNS INSIDE A TRANSACTION OR WHILE ROW LOCKS ARE HELD. A payment gateway
+ * is a network round trip with a multi-second tail; holding this order's row
+ * lock across it would block every operator edit, every sweep, and every other
+ * click on the same order for that whole time, and a provider timeout would
+ * hold locks until the driver gave up.
+ *
+ * So:
+ *  - PHASE A (transaction): lock order, lock link, revalidate every predicate,
+ *    ATOMICALLY CLAIM the fixed-hour rate window, capture the link/order
+ *    identity, COMMIT. The claim happens here -- before the provider call, not
+ *    after -- because a budget that is only consumed by SUCCESSFUL initiations
+ *    protects nothing against a link being hammered.
+ *  - PROVIDER LEG (no transaction, no locks): resolve and validate the host's
+ *    return/cancel URLs, build the ordinary `commerce_order` PayableReference
+ *    from the live order, call the collector.
+ *  - PHASE B (transaction): relock order then link BY UUID, RECHECK EVERY
+ *    PREDICATE, validate the collector's answer, stamp
+ *    `provider_session_issued_at`, audit, COMMIT, and only then return the URL.
+ *
+ * Phase B is not paranoia: the whole point of releasing the locks is that the
+ * world may move while the provider is thinking. A revoke, an admin cancel, an
+ * OrderPaid, or even {@see self::resolveByToken()}'s own UNLOCKED lazy expiry
+ * can all commit in that gap. When they do, Phase B refuses -- the provider
+ * attempt stays server-side and NO URL is exposed.
+ *
+ * Every failure mode of the provider leg is a TYPED refusal
+ * ({@see PaymentLinkException}'s initiation codes): `manual`, no URL, an
+ * untrusted URL, a thrown provider exception (payvia 2.6's ensure-live raises
+ * typed renewal-unavailable errors on repeat initiate, and Commerce programs
+ * against the CONTRACT, so it catches `\Throwable` and maps it), and a missing
+ * or insecure return route. Never an empty redirect, never an open one, never a
+ * provider exception escaping to an anonymous browser.
+ *
  * ## What this class deliberately does NOT do
  *
- * No `initiateByToken()` and no exposure guard -- those are Tasks 7 and 8. This
- * class stamps nothing on the provider-session columns; it only READS
- * `provider_session_issued_at` to publish the exposure flag both views carry.
+ * No exposure guard -- that is Task 8. This class STAMPS
+ * `provider_session_issued_at` (Phase B) and READS it to publish the exposure
+ * flag both views carry, but it does not decide what a sweep or a cancel may do
+ * about it.
  */
 final class PaymentLinkService
 {
@@ -149,6 +195,10 @@ final class PaymentLinkService
     /** The one order status a payment link may be issued for. */
     public const PAYABLE_STATUS = 'pending_payment';
 
+    /** The collector statuses the payments contract defines. */
+    private const STATUS_OK = 'ok';
+    private const STATUS_MANUAL = 'manual';
+
     public function __construct(
         private OrderRepository $orders,
         private PaymentLinkRepository $links,
@@ -161,6 +211,23 @@ final class PaymentLinkService
          * about rather than two.
          */
         private ?PaymentLinkPublicUrlProvider $publicUrls = null,
+        /**
+         * The payment provider seam, programmed against the CONTRACT
+         * ({@see PaymentCollector}) and never against a concrete gateway --
+         * payvia's ensure-live implementation sits behind this interface and
+         * its version is not this engine's business. Null degrades to the same
+         * {@see ManualPaymentCollector} default
+         * `CommerceServiceProvider::makePaymentCollector()` uses, so an
+         * install with no gateway answers a typed `checkout_manual` rather
+         * than a container error or a null dereference.
+         */
+        private ?PaymentCollector $collector = null,
+        /**
+         * The host's payment-link return/cancel routes. Null and a bound
+         * {@see UnavailablePaymentLinkReturnUrlProvider} converge on the same
+         * typed refusal; §2.2 forbids any fallback here.
+         */
+        private ?PaymentLinkReturnUrlProvider $returnUrls = null,
     ) {
     }
 
@@ -456,6 +523,442 @@ final class PaymentLinkService
                 );
             }
         );
+    }
+
+    // =========================================================================
+    // Initiation: two phases, with the provider call strictly between them
+    // =========================================================================
+
+    /**
+     * Turn a payment-link click into a provider checkout session, and return
+     * the ONE thing the caller may redirect to (design spec §2.2).
+     *
+     * UNAUTHENTICATED, like {@see self::resolveByToken()}: the tenant is
+     * host-resolved and the token is the only credential. So the shape gate
+     * runs first, the parameter is redacted the instant it has been hashed, and
+     * every "you cannot pay with this" refusal collapses to ONE generic
+     * {@see PaymentLinkException::PAYMENT_LINK_NOT_PAYABLE} -- malformed,
+     * unknown, another tenant's, revoked, superseded, expired, consumed, and
+     * "that order is no longer awaiting payment" are indistinguishable from
+     * outside, exactly as `resolveByToken()`'s single null is.
+     *
+     * ## The shape of the thing
+     *
+     * See the class docblock for WHY. What it does, in order:
+     *
+     *  1. PHASE A ({@see self::claimInitiation()}), one transaction: lock the
+     *     order, lock the link, revalidate active + unexpired + order
+     *     `pending_payment`, claim one unit of the fixed UTC hour window, and
+     *     capture the link/order identity. Commit.
+     *  2. PROVIDER LEG ({@see self::openProviderSession()}), NO transaction and
+     *     NO locks: resolve and validate the host return/cancel URLs, build the
+     *     ordinary `commerce_order` payable from the LIVE order, call the
+     *     collector.
+     *  3. PHASE B ({@see self::confirmInitiation()}), one transaction: relock
+     *     order then link BY UUID, recheck EVERY predicate, validate
+     *     `status='ok'` plus the checkout URL, stamp
+     *     `provider_session_issued_at`, audit. Commit.
+     *
+     * Only after step 3 commits does the URL leave this method. If the world
+     * moved during step 2 -- a revoke, an admin cancel, an OrderPaid, or an
+     * unlocked `resolveByToken()` lazily expiring the link -- step 3 refuses and
+     * the caller gets a typed non-payable, not a redirect.
+     *
+     * IDEMPOTENCY IS THE PROVIDER'S. There is no caller-supplied key: the
+     * {@see PaymentCollector} contract requires implementations to be
+     * idempotent per `(type, id)`, so repeated clicks converge on the one live
+     * session rather than creating a second charge. The engine's job is only to
+     * bound how often it may ask (the hour window) and to make sure it never
+     * asks on behalf of a link that has stopped being payable.
+     *
+     * BUDGET IS CONSUMED BY ATTEMPTS, NOT BY SUCCESSES. A claim that is followed
+     * by a provider failure is NOT refunded. That is deliberate: the window
+     * exists to protect the gateway and the payer from a shared URL being
+     * hammered, and a failing gateway is precisely when hammering is most
+     * likely and most useless.
+     *
+     * @return array{checkoutUrl: string}
+     * @throws PaymentLinkException `payment_link_not_payable`,
+     *     `payment_link_rate_limited`, `return_url_unavailable`,
+     *     `checkout_manual`, `checkout_url_missing`, `checkout_url_untrusted`,
+     *     or `checkout_initiation_failed` -- and nothing else. In particular no
+     *     provider exception ever escapes, and no refusal carries a URL.
+     */
+    public function initiateByToken(
+        ApplicationContext $context,
+        string $rawToken,
+        ?\DateTimeImmutable $now = null
+    ): array {
+        // Shape gate BEFORE any database work, same as `resolveByToken()`.
+        if (!self::isWellFormedToken($rawToken)) {
+            $rawToken = self::REDACTED_TOKEN;
+
+            throw PaymentLinkException::linkNotPayable();
+        }
+
+        $tokenHash = self::hashToken($rawToken);
+        // The token has served its only purpose in this frame. Overwrite it
+        // BEFORE any I/O and before any throw, so nothing below can put a live
+        // bearer credential into a backtrace (see the class docblock).
+        $rawToken = self::REDACTED_TOKEN;
+
+        $moment = self::moment($now);
+        $tenant = $this->tenants->tenantUuid($context);
+
+        $claim = $this->claimInitiation($context, $tenant, $tokenHash, $moment);
+        $linkUuid = $claim['linkUuid'];
+        $orderUuid = $claim['orderUuid'];
+
+        // Nothing is locked and no transaction is open across this call.
+        $initiation = $this->openProviderSession($context, $tenant, $linkUuid, $orderUuid);
+
+        return [
+            'checkoutUrl' => $this->confirmInitiation($context, $tenant, $linkUuid, $orderUuid, $initiation, $moment),
+        ];
+    }
+
+    /**
+     * PHASE A: decide that this link may start a checkout, and pay for the
+     * privilege out of its hourly budget -- all inside ONE transaction that
+     * commits before any provider I/O begins.
+     *
+     * The token hash lookup at the top is an UNLOCKED POINTER read, and that is
+     * safe by construction rather than by luck: `token_hash` is immutable for
+     * the life of a row, so the uuid it yields is a stable handle, and EVERY
+     * predicate is then decided against the row re-read under the lock. A
+     * concurrent revoke racing this read simply loses to the locked re-read.
+     *
+     * Lock order is ORDER FIRST, THEN LINK -- the order this whole class shares,
+     * which is what keeps mint, revoke, and both initiation phases from
+     * deadlocking against each other.
+     *
+     * @return array{linkUuid: string, orderUuid: string} the captured identity
+     * @throws PaymentLinkException `payment_link_not_payable` or
+     *     `payment_link_rate_limited`
+     */
+    private function claimInitiation(
+        ApplicationContext $context,
+        string $tenant,
+        string $tokenHash,
+        \DateTimeImmutable $now
+    ): array {
+        /** @var array{linkUuid: string, orderUuid: string} */
+        return db($context)->transaction(function () use ($context, $tenant, $tokenHash, $now): array {
+            $found = $this->links->findByTokenHash($context, $tenant, $tokenHash);
+            if ($found === null) {
+                throw PaymentLinkException::linkNotPayable();
+            }
+
+            $linkUuid = (string) $found['uuid'];
+            $orderUuid = (string) $found['order_uuid'];
+
+            $order = $this->orders->findByUuidForUpdate($context, $tenant, $orderUuid, includeDrafts: true);
+            if ($order === null) {
+                throw PaymentLinkException::linkNotPayable();
+            }
+
+            $link = $this->links->findByUuidForUpdate($context, $tenant, $linkUuid);
+            if (!self::isPayable($link, $order, $now)) {
+                throw PaymentLinkException::linkNotPayable();
+            }
+
+            // The window is claimed HERE: inside the transaction, under the
+            // locks, and BEFORE the provider leg. `claimInitiationWindow()`
+            // returns false for three reasons, but two of them cannot happen on
+            // this path -- the link was just read under the order lock (so it
+            // is neither unknown nor cross-tenant), and the same lock serializes
+            // every other claimer (so the compare-and-set cannot lose). What is
+            // left is the genuine rate refusal, which is why reporting it as one
+            // is honest here and would not be from an unlocked caller.
+            if (!$this->links->claimInitiationWindow($context, $tenant, $linkUuid, $now)) {
+                throw PaymentLinkException::initiationRateLimited();
+            }
+
+            return ['linkUuid' => $linkUuid, 'orderUuid' => $orderUuid];
+        });
+    }
+
+    /**
+     * THE PROVIDER LEG, which runs with no transaction open and no row locks
+     * held -- the reason initiation is two-phase at all.
+     *
+     * Order of operations is a contract, not an implementation detail: the
+     * return/cancel URLs are resolved and VALIDATED before the collector is
+     * touched, so a host with no payment-link return surface never causes a
+     * provider session to exist at all. Design spec §2.2 is explicit that a
+     * missing or invalid binding is a typed unavailable outcome and must NOT
+     * fall back to the guest-cookie order return route or to a gateway-global
+     * callback -- either would land the payer on a page they cannot be
+     * authorized for, after their money had already moved.
+     *
+     * The payable is the ORDINARY `commerce_order` reference, built exactly as
+     * {@see CheckoutService::initiatePayment()} builds it (same type, same id,
+     * same amount/currency/description, same `email` + `callback_url` +
+     * `cancel_url` metadata), so a gateway cannot tell a payment-link session
+     * from a storefront one and no reconciliation path needs a special case.
+     * The one addition is `link_uuid`, so a provider webhook or a support
+     * question can be traced back to the link. NEVER the raw token: a payable
+     * is stored in a gateway dashboard and replayed through webhooks, so a
+     * bearer credential in its metadata would be a credential handed to every
+     * intermediary.
+     *
+     * It returns the collector's ANSWER, not a URL: design spec §2.2 puts the
+     * `status='ok'`-plus-checkout-URL validation in Phase B, AFTER the predicate
+     * recheck, so that a link revoked mid-call is refused as non-payable rather
+     * than being told anything about what the provider said.
+     *
+     * @throws PaymentLinkException `payment_link_not_payable`,
+     *     `return_url_unavailable`, or `checkout_initiation_failed`
+     */
+    private function openProviderSession(
+        ApplicationContext $context,
+        string $tenant,
+        string $linkUuid,
+        string $orderUuid
+    ): PaymentInitiation {
+        // "the live order" (design spec §2.2) -- read WITHOUT a lock, because
+        // no transaction may span the provider call. Phase B is what makes this
+        // safe: it re-decides under lock before anything is exposed.
+        $order = $this->orders->findByUuid($context, $tenant, $orderUuid, includeDrafts: true);
+        if ($order === null) {
+            throw PaymentLinkException::linkNotPayable();
+        }
+
+        $payable = new PayableReference(
+            OrderPayable::TYPE,
+            (string) $order['uuid'],
+            (int) $order['grand_total'],
+            (string) $order['currency'],
+            'Order ' . (string) $order['order_number'],
+            ['email' => (string) ($order['email'] ?? ''), 'link_uuid' => $linkUuid]
+                + $this->paymentLinkReturnMetadata($context, $linkUuid)
+        );
+
+        try {
+            return ($this->collector ?? new ManualPaymentCollector())->initiate($context, $payable);
+        } catch (\Throwable) {
+            // Payvia 2.6's ensure-live raises TYPED exceptions for repeat
+            // initiations it cannot renew, and a gateway HTTP client can raise
+            // anything at all. Both are the same fact to a payer: no checkout
+            // right now. The throwable is swallowed rather than chained --
+            // its message and its backtrace may quote the payable metadata,
+            // the return URLs, or a provider reference, and this exception is
+            // on its way to an anonymous browser.
+            throw PaymentLinkException::checkoutInitiationFailed();
+        }
+    }
+
+    /**
+     * The host's return/cancel routes, resolved and validated into the exact
+     * metadata keys `CheckoutService` already uses.
+     *
+     * Validation is {@see HttpsUrl::isAbsoluteHttps()} and nothing else -- the
+     * SHARED definition, deliberately not a second strictness invented here.
+     * It permits a query string on purpose: a signed return route carries its
+     * signature there (design spec §2.3). It is NOT the public-link URL check
+     * ({@see self::isValidPublicUrl()}), which is far stricter because that URL
+     * carries a bearer token and this one does not.
+     *
+     * A provider that throws is caught for the same reason `composePublicUrl()`
+     * catches: third-party code's exception message is not this engine's to
+     * forward.
+     *
+     * @return array{callback_url: string, cancel_url: string}
+     * @throws PaymentLinkException `return_url_unavailable`
+     */
+    private function paymentLinkReturnMetadata(ApplicationContext $context, string $linkUuid): array
+    {
+        if ($this->returnUrls === null) {
+            throw PaymentLinkException::returnUrlUnavailable();
+        }
+
+        try {
+            $urls = $this->returnUrls->urlsFor($context, $linkUuid);
+        } catch (\Throwable) {
+            throw PaymentLinkException::returnUrlUnavailable();
+        }
+
+        if (!is_array($urls)) {
+            throw PaymentLinkException::returnUrlUnavailable();
+        }
+
+        // Widened DELIBERATELY. The contract's return type says both keys are
+        // present and are strings; a HOST IMPLEMENTATION is untrusted code that
+        // can return anything a `mixed`-shaped array can hold, and the checks
+        // below are the ones that actually protect a browser redirect. Without
+        // this the analyser would call those checks redundant and we would end
+        // up deleting the only thing standing between a misconfigured host and
+        // an open redirect.
+        /** @var array<string,mixed> $candidates */
+        $candidates = $urls;
+
+        $resolved = [];
+        foreach (['return' => 'callback_url', 'cancel' => 'cancel_url'] as $key => $metadataKey) {
+            $url = $candidates[$key] ?? null;
+            if (!is_string($url) || !HttpsUrl::isAbsoluteHttps($url)) {
+                throw PaymentLinkException::returnUrlUnavailable();
+            }
+
+            $resolved[$metadataKey] = $url;
+        }
+
+        /** @var array{callback_url: string, cancel_url: string} $resolved */
+        return $resolved;
+    }
+
+    /**
+     * Classify the collector's answer into ONE trusted URL or ONE typed
+     * refusal. There is no partial credit: a payment link's entire purpose is
+     * the redirect, so a `reference`-only payload is as unusable here as an
+     * empty one, even though the storefront's own view model can render it.
+     *
+     * The three refusals are kept apart because they are three different bugs
+     * for whoever has to fix the gateway, even though they are the same
+     * non-event for the payer.
+     *
+     * @throws PaymentLinkException `checkout_manual`, `checkout_url_missing`,
+     *     `checkout_url_untrusted`, or `checkout_initiation_failed`
+     */
+    private static function checkoutUrlFrom(PaymentInitiation $initiation): string
+    {
+        if ($initiation->status === self::STATUS_MANUAL) {
+            throw PaymentLinkException::checkoutManual();
+        }
+
+        // The contract defines exactly `ok` and `manual`. Anything else is a
+        // collector regression, and a payment link must fail closed on one.
+        if ($initiation->status !== self::STATUS_OK) {
+            throw PaymentLinkException::checkoutInitiationFailed();
+        }
+
+        // The SHARED key list (see the const's docblock): the storefront's own
+        // payment view model and a payment-link redirect must find the same URL
+        // in the same payload by the same rule.
+        $url = null;
+        foreach (CheckoutPresentation::CANDIDATE_URL_KEYS as $key) {
+            $candidate = $initiation->payload[$key] ?? null;
+            if (is_string($candidate) && $candidate !== '') {
+                $url = $candidate;
+                break;
+            }
+        }
+
+        if ($url === null) {
+            throw PaymentLinkException::checkoutUrlMissing();
+        }
+
+        // The same absolute-HTTPS definition the return URLs are held to. A
+        // `javascript:`, `data:`, protocol-relative, or relative URL reaching a
+        // browser redirect is an open-redirect/XSS primitive, and a plain-http
+        // one strips the payer's transport security mid-payment.
+        if (!HttpsUrl::isAbsoluteHttps($url)) {
+            throw PaymentLinkException::checkoutUrlUntrusted();
+        }
+
+        return $url;
+    }
+
+    /**
+     * PHASE B: the last word before a URL is exposed.
+     *
+     * Relocks the SAME order then the SAME link BY UUID (never by token again --
+     * this frame has no token, by design) and rechecks EVERY predicate Phase A
+     * checked, because the locks were released for the whole provider call and
+     * anything could have committed in that window: a revoke, an admin cancel,
+     * an OrderPaid consuming the link, or {@see self::resolveByToken()}'s own
+     * unlocked lazy expiry.
+     *
+     * A refusal here THROWS, which rolls this transaction back, so the exposure
+     * stamp and the audit row are never written. That is the design spec's
+     * "an attempt created during that race remains server-side and no URL is
+     * exposed": the provider may well hold a session, but nobody was ever told
+     * where it is.
+     *
+     * The stamp and the audit row commit together with the recheck, so
+     * `provider_session_issued_at` means exactly "a checkout URL for this link
+     * was handed to somebody" -- which is the question Task 8's exposure guard
+     * has to answer.
+     *
+     * The collector's answer is validated HERE rather than at the call site,
+     * and AFTER the predicate recheck, exactly as design spec §2.2 orders it: a
+     * link that stopped being payable mid-call is refused as non-payable and
+     * learns nothing about what the provider said.
+     *
+     * @return string the validated absolute-HTTPS checkout URL
+     * @throws PaymentLinkException `payment_link_not_payable`,
+     *     `checkout_manual`, `checkout_url_missing`, `checkout_url_untrusted`,
+     *     or `checkout_initiation_failed`
+     */
+    private function confirmInitiation(
+        ApplicationContext $context,
+        string $tenant,
+        string $linkUuid,
+        string $orderUuid,
+        PaymentInitiation $initiation,
+        \DateTimeImmutable $now
+    ): string {
+        /** @var string */
+        return db($context)->transaction(
+            function () use ($context, $tenant, $linkUuid, $orderUuid, $initiation, $now): string {
+                // ORDER first, then link -- the same order Phase A took them in.
+                $order = $this->orders->findByUuidForUpdate($context, $tenant, $orderUuid, includeDrafts: true);
+                if ($order === null) {
+                    throw PaymentLinkException::linkNotPayable();
+                }
+
+                $link = $this->links->findByUuidForUpdate($context, $tenant, $linkUuid);
+                if (!self::isPayable($link, $order, $now)) {
+                    throw PaymentLinkException::linkNotPayable();
+                }
+
+                $checkoutUrl = self::checkoutUrlFrom($initiation);
+
+                $this->links->stampProviderSessionIssued($context, $tenant, $linkUuid, $now);
+                $this->orders->recordEvent(
+                    $context,
+                    $orderUuid,
+                    PaymentLinkEvents::INITIATED,
+                    ['link_uuid' => $linkUuid]
+                );
+
+                return $checkoutUrl;
+            }
+        );
+    }
+
+    /**
+     * The FULL payability predicate, in ONE place so Phase A and Phase B cannot
+     * drift: an existing link that is still `active`, whose TTL has not passed,
+     * on an order that is still awaiting payment.
+     *
+     * The expiry boundary is EXCLUSIVE, matching
+     * {@see self::applyLazyTransitions()} and
+     * {@see PaymentLinkRepository::guardRelevantLinks()}: at the stamp itself
+     * the link has lapsed.
+     *
+     * Note what it does NOT do: it never TRANSITIONS anything. Initiation is a
+     * read-side decision about whether to proceed; the lazy `expired`/`consumed`
+     * transitions belong to the display paths, and doing them here would mean an
+     * anonymous initiation could write to the link table on a refusal.
+     *
+     * @param array<string,mixed>|null $link
+     * @param array<string,mixed> $order
+     */
+    private static function isPayable(?array $link, array $order, \DateTimeImmutable $now): bool
+    {
+        if ($link === null) {
+            return false;
+        }
+
+        if ((string) $link['status'] !== PaymentLinkRepository::STATUS_ACTIVE) {
+            return false;
+        }
+
+        if (self::normalizeStamp((string) $link['expires_at']) <= self::stamp($now)) {
+            return false;
+        }
+
+        return (string) $order['status'] === self::PAYABLE_STATUS;
     }
 
     // =========================================================================

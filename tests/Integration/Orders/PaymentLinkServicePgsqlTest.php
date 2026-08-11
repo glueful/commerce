@@ -6,10 +6,15 @@ namespace Glueful\Extensions\Commerce\Tests\Integration\Orders;
 
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Database\Connection;
+use Glueful\Extensions\Commerce\Contracts\PaymentLinkReturnUrlProvider;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
+use Glueful\Extensions\Commerce\Orders\PaymentLinkException;
 use Glueful\Extensions\Commerce\Orders\PaymentLinkRepository;
 use Glueful\Extensions\Commerce\Orders\PaymentLinkService;
 use Glueful\Extensions\Commerce\Tests\Support\CommerceTestCase;
+use Glueful\Extensions\Contracts\Payments\PayableReference;
+use Glueful\Extensions\Contracts\Payments\PaymentCollector;
+use Glueful\Extensions\Contracts\Payments\PaymentInitiation;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
 use Psr\Container\ContainerInterface;
 
@@ -155,11 +160,126 @@ final class PaymentLinkServicePgsqlTest extends CommerceTestCase
         }
     }
 
+    /**
+     * Payment-links Task 7 (design spec §2.2): NO PROVIDER CALL RUNS INSIDE A
+     * TRANSACTION OR WHILE ROW LOCKS ARE HELD -- proven the only way it can
+     * really be proven, with a genuinely separate OS process and connection.
+     *
+     * SQLite can only show that no transaction is OPEN in this process. Here a
+     * second connection tries to take the ORDER row `FOR UPDATE` while the
+     * parent's provider leg is in flight. If the parent still held Phase A's
+     * transaction, that acquisition would block, and the child's short
+     * `lock_timeout` turns the block into a reported failure rather than a hung
+     * suite. It succeeds, revokes, and commits -- and the parent's Phase B then
+     * rechecks every predicate, sees the revocation, and REFUSES the redirect.
+     * The provider attempt stays server-side; no URL is exposed and nothing is
+     * stamped.
+     */
+    public function testTheProviderLegHoldsNoLockSoAConcurrentRevokeWinsAndPhaseBRefuses(): void
+    {
+        $this->skipUnlessPgsql();
+
+        $pgConfig = $this->pgConfig();
+        $connection = $this->migratedConnection($pgConfig);
+        $context = $this->pgsqlContext($connection);
+
+        $this->cleanup($connection);
+
+        try {
+            $this->seedOrder($connection);
+
+            $checkoutUrl = 'https://psp.example.com/session/pg1';
+
+            $collector = new class ($this, $pgConfig, $checkoutUrl) implements PaymentCollector {
+                public int $calls = 0;
+
+                /** @var array<string,mixed> */
+                public array $childResult = [];
+
+                /** @param array<string,mixed> $pgConfig */
+                public function __construct(
+                    private PaymentLinkServicePgsqlTest $test,
+                    private array $pgConfig,
+                    private string $checkoutUrl,
+                ) {
+                }
+
+                public function initiate(ApplicationContext $context, PayableReference $payable): PaymentInitiation
+                {
+                    $this->calls++;
+                    // A REAL second process, competing for the order lock while
+                    // this "network call" is in flight.
+                    $this->childResult = $this->test->runRevokeRaceChild($this->pgConfig);
+
+                    return new PaymentInitiation('fakepsp', 'ok', ['checkout_url' => $this->checkoutUrl]);
+                }
+            };
+
+            $service = $this->service($collector, $this->returnUrlProvider());
+            $minted = $service->mint(
+                $context,
+                self::TENANT,
+                self::ORDER,
+                7,
+                self::ACTOR,
+                new \DateTimeImmutable('2026-08-11 08:00:00', new \DateTimeZone('UTC'))
+            );
+
+            try {
+                $service->initiateByToken(
+                    $context,
+                    $minted['rawToken'],
+                    new \DateTimeImmutable('2026-08-11 09:00:00', new \DateTimeZone('UTC'))
+                );
+                self::fail('Phase B must refuse a link revoked during the provider call');
+            } catch (PaymentLinkException $e) {
+                self::assertSame(PaymentLinkException::PAYMENT_LINK_NOT_PAYABLE, $e->errorCode);
+                self::assertStringNotContainsString($checkoutUrl, $e->getMessage());
+            }
+
+            self::assertTrue(
+                $collector->childResult['ok'] ?? false,
+                'a separate connection must be able to lock the order DURING provider I/O: '
+                    . json_encode($collector->childResult, JSON_THROW_ON_ERROR)
+            );
+            self::assertSame(1, $collector->calls);
+
+            $row = $connection->table('commerce_payment_links')
+                ->where('uuid', '=', $minted['link']->linkUuid)
+                ->first();
+            self::assertNotNull($row);
+            self::assertSame(PaymentLinkRepository::STATUS_REVOKED, (string) $row['status']);
+            self::assertNull($row['provider_session_issued_at'], 'a refused Phase B stamps nothing');
+            self::assertSame(1, (int) $row['initiation_count'], 'the claim was made before the provider call');
+        } finally {
+            $this->cleanup($connection);
+        }
+    }
+
+    /**
+     * Public so the fake collector above can reach it: launches the child that
+     * competes for the order lock, and waits for it.
+     *
+     * @param array<string,mixed> $pgConfig
+     * @return array<string,mixed>
+     */
+    public function runRevokeRaceChild(array $pgConfig): array
+    {
+        return $this->collectRaceChild($this->launchRaceChild($pgConfig, 'lock_order_then_revoke', [
+            'tenant' => self::TENANT,
+            'orderUuid' => self::ORDER,
+            'actor' => self::ACTOR,
+            'now' => '2026-08-11 09:00:01',
+        ]));
+    }
+
     // --- Helpers -------------------------------------------------------------
     // (pgsql lane setup mirrors Orders\PaymentLinkRepositoryPgsqlTest exactly.)
 
-    private function service(): PaymentLinkService
-    {
+    private function service(
+        ?PaymentCollector $collector = null,
+        ?PaymentLinkReturnUrlProvider $returnUrls = null
+    ): PaymentLinkService {
         return new PaymentLinkService(
             new OrderRepository(),
             new PaymentLinkRepository(),
@@ -172,8 +292,25 @@ final class PaymentLinkServicePgsqlTest extends CommerceTestCase
                 {
                     return $this->tenant;
                 }
-            }
+            },
+            null,
+            $collector,
+            $returnUrls
         );
+    }
+
+    private function returnUrlProvider(): PaymentLinkReturnUrlProvider
+    {
+        return new class implements PaymentLinkReturnUrlProvider {
+            /** @return array{return: string, cancel: string}|null */
+            public function urlsFor(ApplicationContext $context, string $linkUuid): ?array
+            {
+                return [
+                    'return' => 'https://shop.example.com/pay/return?sig=pg',
+                    'cancel' => 'https://shop.example.com/pay/cancel?sig=pg',
+                ];
+            }
+        };
     }
 
     private function seedOrder(Connection $connection): void

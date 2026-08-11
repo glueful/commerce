@@ -21,6 +21,16 @@ declare(strict_types=1);
  *    the COMMITTED link -- which is exactly what makes "revoke prior, insert
  *    new" leave exactly one active link instead of two.
  *    stdout: {"ok":true,"linkUuid":string}.
+ *  - lock_order_then_revoke (payment-links Task 7, design spec §2.2): takes the
+ *    ORDER row `FOR UPDATE` under a SHORT `lock_timeout` and then revokes the
+ *    order's active link, committing. The parent calls this from INSIDE its
+ *    fake collector -- i.e. while `initiateByToken()`'s provider leg is in
+ *    flight. If that leg held a transaction or a row lock, this process could
+ *    not take the order lock at all, and the timeout makes it FAIL rather than
+ *    hang the suite, which is exactly the observation the assertion wants.
+ *    Note it needs no token: revocation is addressed by ORDER, so the bearer
+ *    secret never reaches an argv (and therefore never reaches `ps`).
+ *    stdout: {"ok":true} / {"ok":false,...}.
  */
 
 require __DIR__ . '/../../../../vendor/autoload.php';
@@ -100,6 +110,30 @@ try {
             // NOTE: the raw token is deliberately NOT echoed -- this subprocess
             // reports the link identity only, never the bearer secret.
             $out = ['ok' => true, 'linkUuid' => $minted['link']->linkUuid];
+            break;
+
+        case 'lock_order_then_revoke':
+            $service = new PaymentLinkService(new OrderRepository(), new PaymentLinkRepository(), $tenants);
+            $connection->getTransactionManager()->begin();
+            // Bounded, so a parent that WRONGLY held the order lock across its
+            // provider call produces a clean failure instead of a hung suite.
+            $connection->table('commerce_orders')->executeModification(
+                "SET LOCAL lock_timeout = '3s'",
+                []
+            );
+            $connection->table('commerce_orders')->executeRawFirst(
+                'SELECT * FROM commerce_orders WHERE tenant_uuid = ? AND uuid = ? FOR UPDATE',
+                [(string) $args['tenant'], (string) $args['orderUuid']]
+            );
+            $service->revoke(
+                $context,
+                (string) $args['tenant'],
+                (string) $args['orderUuid'],
+                (string) $args['actor'],
+                new \DateTimeImmutable((string) $args['now'], new \DateTimeZone('UTC'))
+            );
+            $connection->getTransactionManager()->commit();
+            $out = ['ok' => true];
             break;
 
         default:

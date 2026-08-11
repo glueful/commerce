@@ -48,7 +48,17 @@ use Psr\Log\NullLogger;
  */
 final class CheckoutPresentation
 {
-    private const CANDIDATE_URL_KEYS = ['checkout_url', 'redirect_url', 'url'];
+    /**
+     * Where a hosted-checkout URL may live in a collector payload, in priority
+     * order. PUBLIC because it is the ONE definition: payment-link initiation
+     * ({@see PaymentLinkService::initiateByToken()}) has to find the same URL in
+     * the same payload, and a URL the storefront would redirect to must not be
+     * discovered by a different rule than one a payment link would redirect to.
+     * Same reasoning as {@see \Glueful\Extensions\Commerce\Support\HttpsUrl}.
+     *
+     * @var list<string>
+     */
+    public const CANDIDATE_URL_KEYS = ['checkout_url', 'redirect_url', 'url'];
 
     public function __construct(private readonly LoggerInterface $logger = new NullLogger())
     {
