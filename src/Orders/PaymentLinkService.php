@@ -158,6 +158,18 @@ use Glueful\Helpers\Utils;
  * or insecure return route. Never an empty redirect, never an open one, never a
  * provider exception escaping to an anonymous browser.
  *
+ * HONEST LIMIT on that claim (review round 1, minor 4): it covers every
+ * PAYER-FACING outcome, not every throwable. A database driver failure -- a
+ * lost connection, a deadlock, a constraint violation -- still escapes
+ * initiation UNTYPED, as it does from every other method here. Those frames are
+ * proven token-free, but they are not states: Task 8's controller must map any
+ * unknown throwable from `initiateByToken()` to a BODILESS 500 rather than
+ * assuming the typed set is exhaustive.
+ *
+ * INITIATION ALSO REFUSES TO RUN INSIDE A CALLER'S TRANSACTION -- see
+ * {@see NestedInitiationTransactionException}, which explains why a nested
+ * Phase A would silently hold locks across the provider call.
+ *
  * ## What this class deliberately does NOT do
  *
  * No exposure guard -- that is Task 8. This class STAMPS
@@ -577,12 +589,37 @@ final class PaymentLinkService
      * hammered, and a failing gateway is precisely when hammering is most
      * likely and most useless.
      *
+     * MUST NOT BE CALLED INSIDE A TRANSACTION (review round 1, Important 1).
+     * `Connection::transaction()` delegates to an already-active
+     * TransactionManager, so a nested Phase A would "commit" a mere savepoint
+     * and the caller's transaction would hold this order's and link's row locks
+     * across the provider network call -- silently reintroducing the exact
+     * failure the two phases exist to prevent. There is no safe automatic
+     * remedy, so an ambient transaction is refused up front with
+     * {@see NestedInitiationTransactionException}.
+     *
+     * THE CLOCK. Each phase reads the clock FRESHLY when the caller injected
+     * none, because the provider round trip takes real time and a link whose
+     * TTL lapses during it must not be handed a URL by Phase B (review round 1,
+     * Important 2). An INJECTED `$now` deliberately governs BOTH phases, so a
+     * test that pins a moment gets one deterministic instant everywhere rather
+     * than a frozen Phase A and a live Phase B.
+     *
      * @return array{checkoutUrl: string}
      * @throws PaymentLinkException `payment_link_not_payable`,
      *     `payment_link_rate_limited`, `return_url_unavailable`,
      *     `checkout_manual`, `checkout_url_missing`, `checkout_url_untrusted`,
-     *     or `checkout_initiation_failed` -- and nothing else. In particular no
-     *     provider exception ever escapes, and no refusal carries a URL.
+     *     or `checkout_initiation_failed`. Those are the complete set of
+     *     PAYER-FACING outcomes: no provider exception ever escapes and no
+     *     refusal carries a URL. Two non-payer throwables remain possible and
+     *     are deliberately untyped -- {@see NestedInitiationTransactionException}
+     *     for the caller bug above, and whatever the database driver raises for
+     *     a genuine infrastructure failure (a lost connection, a deadlock). Both
+     *     are proven token-free by `PaymentLinkInitiationTest`'s frame-scrub
+     *     ratchet, but neither is a state a controller can render: Task 8 must
+     *     map any unknown throwable from this method to a BODILESS 500.
+     * @throws NestedInitiationTransactionException when a transaction is
+     *     already open on the caller's connection
      */
     public function initiateByToken(
         ApplicationContext $context,
@@ -602,10 +639,13 @@ final class PaymentLinkService
         // bearer credential into a backtrace (see the class docblock).
         $rawToken = self::REDACTED_TOKEN;
 
-        $moment = self::moment($now);
+        if (db($context)->transactionLevel() > 0) {
+            throw NestedInitiationTransactionException::forInitiation();
+        }
+
         $tenant = $this->tenants->tenantUuid($context);
 
-        $claim = $this->claimInitiation($context, $tenant, $tokenHash, $moment);
+        $claim = $this->claimInitiation($context, $tenant, $tokenHash, self::moment($now));
         $linkUuid = $claim['linkUuid'];
         $orderUuid = $claim['orderUuid'];
 
@@ -613,7 +653,17 @@ final class PaymentLinkService
         $initiation = $this->openProviderSession($context, $tenant, $linkUuid, $orderUuid);
 
         return [
-            'checkoutUrl' => $this->confirmInitiation($context, $tenant, $linkUuid, $orderUuid, $initiation, $moment),
+            'checkoutUrl' => $this->confirmInitiation(
+                $context,
+                $tenant,
+                $linkUuid,
+                $orderUuid,
+                $initiation,
+                // FRESH unless the caller pinned one: the provider call just
+                // consumed real time, and expiry is the one predicate whose
+                // truth depends on the clock rather than on the row.
+                self::moment($now)
+            ),
         ];
     }
 
@@ -724,14 +774,23 @@ final class PaymentLinkService
             throw PaymentLinkException::linkNotPayable();
         }
 
+        // The `email` key is OMITTED rather than sent empty when the order has
+        // none (review round 1, minor 5). Unlike a storefront order, an
+        // admin/walk-in order legitimately has no email at all -- and payvia's
+        // collector reads `metadata['email'] ?? null`, so an ABSENT key means
+        // exactly "no payer email" while an empty STRING is an invalid address
+        // that a gateway rejects, turning a supportable order into an
+        // undiagnosable `checkout_initiation_failed`.
+        $email = trim((string) ($order['email'] ?? ''));
+        $identity = $email === '' ? [] : ['email' => $email];
+
         $payable = new PayableReference(
             OrderPayable::TYPE,
             (string) $order['uuid'],
             (int) $order['grand_total'],
             (string) $order['currency'],
             'Order ' . (string) $order['order_number'],
-            ['email' => (string) ($order['email'] ?? ''), 'link_uuid' => $linkUuid]
-                + $this->paymentLinkReturnMetadata($context, $linkUuid)
+            $identity + ['link_uuid' => $linkUuid] + $this->paymentLinkReturnMetadata($context, $linkUuid)
         );
 
         try {
@@ -855,6 +914,24 @@ final class PaymentLinkService
             throw PaymentLinkException::checkoutUrlUntrusted();
         }
 
+        // PLUS one check the shared definition deliberately does NOT make
+        // (review round 1, minor 3). `https://psp.example.com@evil.example.com/x`
+        // is absolute HTTPS to a parser and reads as the PSP's domain to a
+        // human: the real host is `evil.example.com` and everything before the
+        // `@` is userinfo. That is a textbook phishing primitive, and this is
+        // the one URL here that a BROWSER IS SENT TO while the payer is being
+        // asked for card details. No payment provider needs userinfo in a
+        // hosted-checkout URL, so it is refused.
+        //
+        // Scoped to THIS branch on purpose: {@see HttpsUrl} stays permissive
+        // for the return/cancel URLs, which are the host's own signed routes
+        // (§2.3) rather than a third party's, and tightening the shared
+        // definition would reject correct hosts.
+        $parts = parse_url($url);
+        if (!is_array($parts) || isset($parts['user']) || isset($parts['pass'])) {
+            throw PaymentLinkException::checkoutUrlUntrusted();
+        }
+
         return $url;
     }
 
@@ -883,6 +960,13 @@ final class PaymentLinkService
      * and AFTER the predicate recheck, exactly as design spec §2.2 orders it: a
      * link that stopped being payable mid-call is refused as non-payable and
      * learns nothing about what the provider said.
+     *
+     * `$now` is a FRESH reading unless the caller injected one (review round 1,
+     * Important 2). Expiry is the one predicate whose truth lives in the clock
+     * rather than in the row: re-reading the link under lock proves nothing
+     * about a TTL that lapsed while the provider was thinking. Reusing Phase A's
+     * timestamp would both expose a URL for an already-dead link and back-date
+     * `provider_session_issued_at` by the whole duration of the provider call.
      *
      * @return string the validated absolute-HTTPS checkout URL
      * @throws PaymentLinkException `payment_link_not_payable`,

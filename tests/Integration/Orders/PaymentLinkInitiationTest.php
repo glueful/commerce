@@ -7,12 +7,14 @@ namespace Glueful\Extensions\Commerce\Tests\Integration\Orders;
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Contracts\PaymentLinkReturnUrlProvider;
 use Glueful\Extensions\Commerce\Orders\Events\PaymentLinkEvents;
+use Glueful\Extensions\Commerce\Orders\NestedInitiationTransactionException;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
 use Glueful\Extensions\Commerce\Orders\PaymentLinkException;
 use Glueful\Extensions\Commerce\Orders\PaymentLinkRepository;
 use Glueful\Extensions\Commerce\Orders\PaymentLinkService;
 use Glueful\Extensions\Commerce\Orders\UnavailablePaymentLinkReturnUrlProvider;
 use Glueful\Extensions\Commerce\Payments\OrderPayable;
+use Glueful\Extensions\Commerce\Support\HttpsUrl;
 use Glueful\Extensions\Commerce\Tests\Support\CommerceTestCase;
 use Glueful\Extensions\Contracts\Payments\PayableReference;
 use Glueful\Extensions\Contracts\Payments\PaymentCollector;
@@ -299,6 +301,121 @@ final class PaymentLinkInitiationTest extends CommerceTestCase
         self::assertNull($this->currentLinkRow()['provider_session_issued_at']);
     }
 
+    /**
+     * Review round 1, Important 1. `Connection::transaction()` DELEGATES to an
+     * already-active manager, so a nested Phase A would release a savepoint
+     * instead of committing, and the caller's transaction would keep the order
+     * and link locks for the whole provider call -- silently, with every other
+     * assertion in this file still passing. Initiation therefore refuses to run
+     * inside a caller's transaction at all.
+     */
+    public function testInitiationRefusesToRunInsideACallerOwnedTransaction(): void
+    {
+        $this->seedOrder(self::ORDER);
+        $collector = $this->collector($this->ok(self::CHECKOUT_URL));
+        $service = $this->service($collector, $this->returnUrls());
+        $token = $this->mintToken($service);
+
+        $manager = $this->connection->getTransactionManager();
+        $manager->begin();
+
+        try {
+            $service->initiateByToken($this->context, $token, $this->at('09:00:00'));
+            self::fail('an ambient transaction must be refused');
+        } catch (NestedInitiationTransactionException $e) {
+            self::assertStringNotContainsString($token, $e->getMessage());
+            self::assertStringNotContainsString($token, $e->getTraceAsString());
+        } finally {
+            $manager->rollback();
+        }
+
+        self::assertSame(0, $collector->calls, 'nothing may reach the provider');
+        $row = $this->currentLinkRow();
+        self::assertSame(0, (int) $row['initiation_count'], 'no budget may be consumed');
+        self::assertNull($row['provider_session_issued_at']);
+    }
+
+    public function testTheTransactionGuardIsNotAPayerFacingState(): void
+    {
+        self::assertTrue(
+            is_subclass_of(NestedInitiationTransactionException::class, \LogicException::class),
+            'a caller bug is a LogicException, not a payer-facing domain state'
+        );
+        self::assertFalse(
+            is_subclass_of(NestedInitiationTransactionException::class, PaymentLinkException::class)
+        );
+    }
+
+    // =====================================================================
+    // Phase B rechecks expiry against a FRESH clock
+    // =====================================================================
+
+    /**
+     * Review round 1, Important 2. Every other predicate is genuinely re-read
+     * under lock in Phase B; expiry is different, because its truth lives in the
+     * CLOCK rather than in the row. A link whose TTL lapses DURING the provider
+     * round trip must not be handed a URL, and its exposure stamp must not be
+     * back-dated to before the call.
+     *
+     * This is the one test here that must use the REAL clock -- an injected
+     * `$now` deliberately governs both phases for determinism -- so the link is
+     * given a one-second TTL and the collector burns more than that. Note the
+     * collector does NOT touch the link row: its status is still `active` at the
+     * end, so nothing but the clock can make this refusal happen.
+     */
+    public function testALinkWhoseTtlLapsesDuringTheProviderCallIsRefusedByPhaseB(): void
+    {
+        $this->seedOrder(self::ORDER);
+        $collector = $this->collector(static function (): PaymentInitiation {
+            usleep(1_500_000);
+
+            return new PaymentInitiation('fakepsp', 'ok', ['checkout_url' => self::CHECKOUT_URL]);
+        });
+        $service = $this->service($collector, $this->returnUrls());
+
+        $token = $service->mint($this->context, self::TENANT, self::ORDER, null, self::ACTOR)['rawToken'];
+        // One second of life, measured against the real clock the service reads.
+        $this->setLinkExpiry((new \DateTimeImmutable('now', new \DateTimeZone('UTC')))->modify('+1 second'));
+
+        $refusal = $this->assertRefuses(
+            PaymentLinkException::PAYMENT_LINK_NOT_PAYABLE,
+            fn () => $service->initiateByToken($this->context, $token)
+        );
+
+        self::assertSame(1, $collector->calls, 'the provider WAS called -- Phase A saw a live link');
+        self::assertStringNotContainsString(self::CHECKOUT_URL, $refusal->getMessage());
+
+        $row = $this->currentLinkRow();
+        self::assertSame(
+            PaymentLinkRepository::STATUS_ACTIVE,
+            (string) $row['status'],
+            'only the clock moved: nothing transitioned the row, so this cannot pass for another reason'
+        );
+        self::assertNull($row['provider_session_issued_at'], 'no exposure, and no back-dated stamp');
+    }
+
+    public function testAnInjectedClockGovernsBothPhasesSoTestsStayDeterministic(): void
+    {
+        $this->seedOrder(self::ORDER);
+        $collector = $this->collector(static function (): PaymentInitiation {
+            usleep(1_100_000);
+
+            return new PaymentInitiation('fakepsp', 'ok', ['checkout_url' => self::CHECKOUT_URL]);
+        });
+        $service = $this->service($collector, $this->returnUrls());
+        $token = $this->mintToken($service);
+
+        $result = $service->initiateByToken($this->context, $token, $this->at('09:00:00'));
+
+        self::assertSame(self::CHECKOUT_URL, $result['checkoutUrl']);
+        // The stamp is the INJECTED instant, not a wall-clock reading taken
+        // after the deliberately slow provider call.
+        self::assertSame(
+            '2026-08-11 09:00:00',
+            $this->normalize((string) $this->currentLinkRow()['provider_session_issued_at'])
+        );
+    }
+
     // =====================================================================
     // The return-URL seam: resolved and validated BEFORE provider I/O
     // =====================================================================
@@ -474,7 +591,25 @@ final class PaymentLinkInitiationTest extends CommerceTestCase
             'data uri' => ['data:text/html;base64,PHNjcmlwdD4='],
             'no host' => ['https:///session/abc'],
             'not a url' => ['definitely not a url'],
+            // Review round 1, minor 3: absolute HTTPS to a parser, the PSP's
+            // domain to a human, and `evil.example.com` to a browser. The one
+            // URL here that a payer is actually navigated to, so userinfo is
+            // refused in THIS branch (the shared HttpsUrl definition, which the
+            // host's own signed return routes use, stays permissive).
+            'userinfo phishing' => ['https://psp.example.com@evil.example.com/session/abc'],
+            'user only' => ['https://psp.example.com@evil.example.com/x'],
+            'user and password' => ['https://user:pass@evil.example.com/session/abc'],
         ];
+    }
+
+    public function testTheSharedReturnUrlDefinitionStaysPermissiveAboutUserinfo(): void
+    {
+        // The complement of the case above: the stricter userinfo rule is scoped
+        // to the CHECKOUT url. Tightening HttpsUrl would change what
+        // CheckoutService accepts too, which is not this task's call to make.
+        self::assertTrue(HttpsUrl::isAbsoluteHttps('https://user@shop.example.com/pay/return?sig=x'));
+        self::assertTrue(HttpsUrl::isAbsoluteHttps(self::RETURN_URL));
+        self::assertFalse(HttpsUrl::isAbsoluteHttps('http://shop.example.com/pay/return'));
     }
 
     /**
@@ -633,6 +768,44 @@ final class PaymentLinkInitiationTest extends CommerceTestCase
         self::assertSame(self::CANCEL_URL, $payable->metadata['cancel_url']);
         self::assertSame($linkUuid, $payable->metadata['link_uuid']);
         self::assertSame('buyer@example.com', $payable->metadata['email']);
+    }
+
+    /**
+     * Review round 1, minor 5. A WALK-IN admin order legitimately has no email
+     * at all -- and a payment link is exactly the instrument for collecting on
+     * one. The key must therefore be OMITTED, not sent as `''`: payvia reads
+     * `metadata['email'] ?? null`, so absent means "no payer email" while an
+     * empty string is an invalid address a gateway rejects, turning a
+     * supportable order into an undiagnosable `checkout_initiation_failed`.
+     *
+     * @dataProvider emptyOrderEmails
+     */
+    public function testAnOrderWithNoEmailOmitsTheKeyRatherThanSendingAnEmptyOne(?string $email): void
+    {
+        $this->seedOrder(self::ORDER);
+        $this->setOrderEmail(self::ORDER, $email);
+
+        $collector = $this->collector($this->ok(self::CHECKOUT_URL));
+        $service = $this->service($collector, $this->returnUrls());
+        $token = $this->mintToken($service);
+
+        $result = $service->initiateByToken($this->context, $token, $this->at('09:00:00'));
+
+        self::assertSame(self::CHECKOUT_URL, $result['checkoutUrl'], 'an emailless order still initiates');
+        $metadata = $collector->payables[0]->metadata;
+        self::assertArrayNotHasKey('email', $metadata);
+        self::assertSame(['callback_url', 'cancel_url', 'link_uuid'], $this->sortedKeys($metadata));
+        self::assertNotNull($this->currentLinkRow()['provider_session_issued_at']);
+    }
+
+    /** @return array<string, array{string|null}> */
+    public static function emptyOrderEmails(): array
+    {
+        return [
+            'null email' => [null],
+            'empty email' => [''],
+            'whitespace email' => ['   '],
+        ];
     }
 
     /**
@@ -1097,6 +1270,21 @@ final class PaymentLinkInitiationTest extends CommerceTestCase
         $this->connection->table('commerce_orders')
             ->where('uuid', '=', $orderUuid)
             ->update(['status' => $status]);
+    }
+
+    private function setOrderEmail(string $orderUuid, ?string $email): void
+    {
+        $this->connection->table('commerce_orders')
+            ->where('uuid', '=', $orderUuid)
+            ->update(['email' => $email]);
+    }
+
+    /** Rewrites the current link's TTL directly -- the only way to pin it against the REAL clock. */
+    private function setLinkExpiry(\DateTimeImmutable $expiresAt): void
+    {
+        $this->connection->table('commerce_payment_links')
+            ->where('uuid', '=', (string) $this->currentLinkRow()['uuid'])
+            ->update(['expires_at' => $expiresAt->setTimezone(new \DateTimeZone('UTC'))->format('Y-m-d H:i:s')]);
     }
 
     private function contextWithoutDatabase(): ApplicationContext
