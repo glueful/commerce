@@ -233,17 +233,18 @@ final class PaymentLinkServiceTest extends CommerceTestCase
         self::assertSame(PaymentLinkRepository::STATUS_REVOKED, $byUuid[$first['link']->linkUuid]);
         self::assertSame(PaymentLinkRepository::STATUS_ACTIVE, $byUuid[$second['link']->linkUuid]);
 
-        // The superseded token still RESOLVES -- to an honest `revoked` state, so
-        // the page can say "this link was replaced" instead of 404ing a customer
-        // who clicked a link the operator regenerated. It is a KNOWN link of this
-        // tenant; only unknown/malformed/cross-tenant collapse to the generic null.
+        // The superseded token still RESOLVES -- but to the STATE-ONLY shape, so
+        // the page can say "this link was replaced" without the holder of a
+        // superseded (possibly leaked) token continuing to read the order.
         $stale = $service->resolveByToken($this->context, $first['rawToken'], $this->at('09:01:00'));
         self::assertInstanceOf(LinkView::class, $stale);
         self::assertSame(PaymentLinkRepository::STATUS_REVOKED, $stale->linkStatus);
+        self::assertTrue($stale->contentRedacted);
 
         $current = $service->resolveByToken($this->context, $second['rawToken'], $this->at('09:01:00'));
         self::assertInstanceOf(LinkView::class, $current);
         self::assertSame(PaymentLinkRepository::STATUS_ACTIVE, $current->linkStatus);
+        self::assertFalse($current->contentRedacted);
     }
 
     public function testRevokeRevokesTheActiveLinkAndIsIdempotent(): void
@@ -261,7 +262,8 @@ final class PaymentLinkServiceTest extends CommerceTestCase
 
         $view = $service->resolveByToken($this->context, $minted['rawToken'], $this->at('09:10:00'));
         self::assertInstanceOf(LinkView::class, $view);
-        self::assertSame(PaymentLinkRepository::STATUS_REVOKED, $view->linkStatus, 'a revoked link reports honestly');
+        self::assertSame(PaymentLinkRepository::STATUS_REVOKED, $view->linkStatus, 'a revoked link reports its state');
+        self::assertTrue($view->contentRedacted, 'and stops disclosing the order');
 
         // Idempotent: the second revoke records nothing extra.
         $revocations = array_filter(
@@ -300,7 +302,7 @@ final class PaymentLinkServiceTest extends CommerceTestCase
         self::assertSame(PaymentLinkRepository::STATUS_ACTIVE, $view->linkStatus);
         self::assertSame('2026-08-18 08:00:00', $view->expiresAt);
         self::assertFalse($view->providerSessionIssued);
-        self::assertSame(2400, $view->grandTotal);
+        self::assertSame(2874, $view->grandTotal);
         self::assertSame([['name' => 'Blue Mug', 'quantity' => 2]], $view->lines);
     }
 
@@ -411,6 +413,97 @@ final class PaymentLinkServiceTest extends CommerceTestCase
     public static function terminalOrderStatuses(): array
     {
         return ['canceled' => ['canceled'], 'refunded' => ['refunded']];
+    }
+
+    /**
+     * Review round 1, Important 2. The primary reason to revoke is a LEAKED
+     * link, so revocation must stop the leaker reading the order -- not merely
+     * stop them paying. A revoked link resolves to state and expiry only, and
+     * its serialized shape contains none of the order's commercial strings.
+     */
+    public function testARevokedLinkResolvesToStateOnlyAndDisclosesNoOrderContent(): void
+    {
+        $this->seedOrder(self::ORDER);
+        $service = $this->service();
+        $minted = $service->mint($this->context, self::TENANT, self::ORDER, null, self::ACTOR, $this->at('08:00:00'));
+        $service->revoke($this->context, self::TENANT, self::ORDER, self::ACTOR, $this->at('08:30:00'));
+
+        $view = $service->resolveByToken($this->context, $minted['rawToken'], $this->at('09:00:00'));
+        self::assertInstanceOf(LinkView::class, $view);
+
+        // State survives; content does not.
+        self::assertTrue($view->contentRedacted);
+        self::assertSame(PaymentLinkRepository::STATUS_REVOKED, $view->linkStatus);
+        self::assertSame('pending_payment', $view->orderStatus);
+        self::assertSame('2026-08-18 08:00:00', $view->expiresAt);
+
+        $payload = $view->toArray();
+        self::assertSame(
+            ['content_redacted', 'expires_at', 'link_status', 'order_status', 'provider_session_issued'],
+            $this->sortedKeys($payload),
+            'the commercial keys are ABSENT, not zeroed -- a zero total could be rendered as a real bill'
+        );
+
+        $serialized = json_encode($payload, JSON_THROW_ON_ERROR);
+        foreach ([
+            'ORD-PL-0001',
+            'Blue Mug',
+            'MUG-BLUE',
+            'plsvcvar0001',
+            'USD',
+            '2874',
+            '2474',
+            '1237',
+        ] as $commercial) {
+            self::assertStringNotContainsString(
+                $commercial,
+                $serialized,
+                "a revoked link must not keep disclosing: {$commercial}"
+            );
+        }
+    }
+
+    /**
+     * The complement of the redaction rule, and the reason it is not simply
+     * "every terminal state redacts": expired and consumed links are presumed to
+     * be in the hands of the person they were SENT to, who needs to understand
+     * what happened to their bill. Only revocation carries a compromise signal.
+     *
+     * @dataProvider fullyDisclosingTerminalStates
+     */
+    public function testEveryOtherTerminalStateKeepsResolvingInFull(string $scenario): void
+    {
+        $this->seedOrder(self::ORDER);
+        $service = $this->service();
+        $ttl = $scenario === 'expired' ? 1 : null;
+        $minted = $service->mint($this->context, self::TENANT, self::ORDER, $ttl, self::ACTOR, $this->at('08:00:00'));
+
+        $at = $this->at('09:00:00');
+        if ($scenario === 'expired') {
+            $at = $this->at2('2026-08-20 08:00:00');
+        } else {
+            $this->setOrderStatus(self::ORDER, $scenario === 'consumed' ? 'paid' : $scenario);
+        }
+
+        $view = $service->resolveByToken($this->context, $minted['rawToken'], $at);
+
+        self::assertInstanceOf(LinkView::class, $view);
+        self::assertFalse($view->contentRedacted, "{$scenario} must keep disclosing");
+        self::assertSame('ORD-PL-0001', $view->orderNumber);
+        self::assertSame([['name' => 'Blue Mug', 'quantity' => 2]], $view->lines);
+        self::assertSame(2874, $view->grandTotal);
+        self::assertArrayHasKey('totals', $view->toArray());
+    }
+
+    /** @return array<string, array{string}> */
+    public static function fullyDisclosingTerminalStates(): array
+    {
+        return [
+            'expired' => ['expired'],
+            'consumed' => ['consumed'],
+            'canceled order' => ['canceled'],
+            'refunded order' => ['refunded'],
+        ];
     }
 
     public function testResolveExposesTheProviderSessionFlag(): void
@@ -623,6 +716,30 @@ final class PaymentLinkServiceTest extends CommerceTestCase
         ];
     }
 
+    /**
+     * Review round 1, minor 3 -- the ONE externally observable proof that URL
+     * composition and validation happen BEFORE the mint transaction opens.
+     *
+     * The order is PAID (so the transaction would refuse with
+     * `order_not_pending_payment`) AND the provider's URL is invalid (so the
+     * pre-transaction check refuses with `public_url_unavailable`). Whichever
+     * code comes back names which check ran FIRST. Nothing else about the
+     * observable behaviour distinguishes the two orderings.
+     */
+    public function testMintPublicValidatesTheUrlBeforeItEverLooksAtTheOrder(): void
+    {
+        $this->seedOrder(self::ORDER, status: 'paid');
+        $provider = $this->urlProvider(static fn (string $token): string => "http://shop.example.com/pay/{$token}");
+
+        $this->assertRefuses(
+            PaymentLinkException::PUBLIC_URL_UNAVAILABLE,
+            fn () => $this->service($provider)
+                ->mintPublic($this->context, self::TENANT, self::ORDER, null, self::ACTOR, $this->at('08:00:00'))
+        );
+
+        self::assertSame([], $this->allLinkRows());
+    }
+
     public function testAProviderThatThrowsBecomesTypedUnavailableAndCreatesNoLink(): void
     {
         $this->seedOrder(self::ORDER);
@@ -673,6 +790,7 @@ final class PaymentLinkServiceTest extends CommerceTestCase
 
         self::assertSame(
             [
+                'content_redacted',
                 'currency',
                 'expires_at',
                 'line_items',
@@ -684,6 +802,7 @@ final class PaymentLinkServiceTest extends CommerceTestCase
             ],
             $this->sortedKeys($view->toArray())
         );
+        self::assertFalse($view->toArray()['content_redacted']);
         self::assertSame(
             ['discount_total', 'grand_total', 'shipping_total', 'subtotal', 'tax_total'],
             $this->sortedKeys($view->toArray()['totals'])
@@ -711,11 +830,21 @@ final class PaymentLinkServiceTest extends CommerceTestCase
             self::TENANT,
             self::ACTOR,
             'Example Store',
+            // Per-line internals: the payer gets name + quantity, nothing else.
+            'MUG-BLUE',
+            'plsvcvar0001',
+            '1237',
+            // The storefront's own bearer credential for this order.
+            str_repeat('c', 64),
         ] as $excluded) {
             self::assertStringNotContainsString($excluded, $serialized, "LinkView must not carry: {$excluded}");
         }
 
-        foreach (['token', 'hash', 'email', 'phone', 'address', 'user_uuid', 'note', 'tenant', 'uuid', 'id'] as $key) {
+        foreach ([
+            'token', 'hash', 'email', 'phone', 'address', 'user_uuid', 'note',
+            'tenant', 'uuid', 'id', 'sku', 'variant_uuid', 'unit_price',
+            'guest_token_hash',
+        ] as $key) {
             self::assertArrayNotHasKey($key, $view->toArray());
         }
     }
@@ -787,6 +916,178 @@ final class PaymentLinkServiceTest extends CommerceTestCase
             self::assertStringNotContainsString($token, $encoded, "{$label} leaked the raw token");
             self::assertStringNotContainsString($provider->seen, $encoded, "{$label} leaked the raw token");
             self::assertStringNotContainsString($hash, $encoded, "{$label} leaked the token hash");
+        }
+    }
+
+    /**
+     * Review round 1, Important 1: STACK FRAMES ARE AN EGRESS POINT.
+     *
+     * PHP records call arguments in exception backtraces unless
+     * `zend.exception_ignore_args` is On, and the framework's handler writes
+     * `getTraceAsString()` into the error log. So a throwable raised while a raw
+     * token sits in a live frame's argument list leaks a bearer credential with
+     * no application code involved.
+     *
+     * This test forces the ini setting to the DANGEROUS value (args recorded),
+     * proves the harness is meaningful with a control frame that genuinely
+     * leaks, and then asserts that none of the four throw paths through this
+     * service put a token in a trace.
+     *
+     * @dataProvider throwPathsThatMustNotLeak
+     */
+    public function testNoThrowPathPutsARawTokenInAStackTrace(string $scenario): void
+    {
+        $previous = ini_get('zend.exception_ignore_args');
+        ini_set('zend.exception_ignore_args', '0');
+
+        try {
+            // CONTROL: with args recorded, a frame that keeps a token as a
+            // parameter really does leak it. Without this the assertions below
+            // could pass because the ini flag silently defeated the test.
+            $control = self::leakyControlFrame(str_repeat('e', 64));
+            self::assertStringContainsString(
+                str_repeat('e', 15),
+                $control,
+                'the harness must be able to observe an argument leak at all'
+            );
+
+            [$token, $trace] = $this->{'traceFor' . ucfirst($scenario)}();
+
+            self::assertNotSame('', $token);
+            self::assertStringNotContainsString($token, $trace, "{$scenario} leaked the whole token");
+            // The framework truncates trace arguments to 15 characters, so a
+            // PREFIX is the realistic leak shape -- assert against that too.
+            self::assertStringNotContainsString(
+                substr($token, 0, 15),
+                $trace,
+                "{$scenario} leaked a token prefix"
+            );
+            // Nothing token-shaped at all, however it got there.
+            self::assertDoesNotMatchRegularExpression('/[a-f0-9]{32,}/', $trace, "{$scenario} trace holds hex");
+        } finally {
+            ini_set('zend.exception_ignore_args', $previous === false ? '1' : $previous);
+        }
+    }
+
+    /** @return array<string, array{string}> */
+    public static function throwPathsThatMustNotLeak(): array
+    {
+        return [
+            'mint refusal inside the transaction' => ['mintRefusal'],
+            'resolve hitting a broken connection' => ['resolveFailure'],
+            'stale token on matchCurrentToken' => ['staleMatch'],
+            'invalid public url' => ['invalidPublicUrl'],
+        ];
+    }
+
+    /** The deliberately-vulnerable shape, for the control assertion above. */
+    private static function leakyControlFrame(string $secret): string
+    {
+        try {
+            self::throwsWhileHolding($secret);
+        } catch (\Throwable $e) {
+            return $e->getTraceAsString();
+        }
+
+        self::fail('control frame must throw');
+    }
+
+    private static function throwsWhileHolding(string $secret): void
+    {
+        throw new \RuntimeException('control');
+    }
+
+    /** @return array{0: string, 1: string} */
+    private function traceForMintRefusal(): array
+    {
+        // A paid order refuses INSIDE persistMint's transaction. The token is
+        // generated in mint()'s frame, so the test cannot see it -- which is why
+        // this case asserts on the "no hex at all" rule.
+        $this->seedOrder(self::ORDER, status: 'paid');
+
+        try {
+            $this->service()->mint($this->context, self::TENANT, self::ORDER, null, self::ACTOR, $this->at('08:00:00'));
+        } catch (PaymentLinkException $e) {
+            return [str_repeat('f', 64), $e->getTraceAsString()];
+        }
+
+        self::fail('a paid order must refuse');
+    }
+
+    /** @return array{0: string, 1: string} */
+    private function traceForResolveFailure(): array
+    {
+        $token = str_repeat('a', 64);
+
+        try {
+            $this->service()->resolveByToken($this->contextWithoutDatabase(), $token, $this->at('09:00:00'));
+        } catch (\Throwable $e) {
+            return [$token, $e->getTraceAsString()];
+        }
+
+        self::fail('a well-formed token must reach the (broken) database');
+    }
+
+    /** @return array{0: string, 1: string} */
+    private function traceForStaleMatch(): array
+    {
+        $this->seedOrder(self::ORDER);
+        $service = $this->service();
+        $stale = $service->mint($this->context, self::TENANT, self::ORDER, null, self::ACTOR, $this->at('08:00:00'));
+        $service->mint($this->context, self::TENANT, self::ORDER, null, self::ACTOR, $this->at('09:00:00'));
+
+        try {
+            $service->matchCurrentToken(
+                $this->context,
+                self::TENANT,
+                self::ORDER,
+                $stale['rawToken'],
+                $this->at('09:30:00')
+            );
+        } catch (PaymentLinkException $e) {
+            return [$stale['rawToken'], $e->getTraceAsString()];
+        }
+
+        self::fail('a stale token must refuse');
+    }
+
+    /** @return array{0: string, 1: string} */
+    private function traceForInvalidPublicUrl(): array
+    {
+        $this->seedOrder(self::ORDER);
+        $provider = $this->urlProvider(static fn (string $token): string => "http://shop.example.com/pay/{$token}");
+
+        try {
+            $this->service($provider)
+                ->mintPublic($this->context, self::TENANT, self::ORDER, null, self::ACTOR, $this->at('08:00:00'));
+        } catch (PaymentLinkException $e) {
+            self::assertNotNull($provider->seen);
+
+            return [$provider->seen, $e->getTraceAsString()];
+        }
+
+        self::fail('plain http must refuse');
+    }
+
+    /**
+     * The structural half of Important 1: the mint transaction can never hold a
+     * raw token, because the private method that OPENS it does not accept one.
+     */
+    public function testThePrivateMintPathAcceptsOnlyAHash(): void
+    {
+        $method = new \ReflectionMethod(PaymentLinkService::class, 'persistMint');
+        $names = array_map(
+            static fn (\ReflectionParameter $p): string => $p->getName(),
+            $method->getParameters()
+        );
+
+        self::assertContains('tokenHash', $names);
+        foreach ($names as $name) {
+            self::assertStringNotContainsStringIgnoringCase(
+                'rawtoken',
+                $name,
+                'the mint transaction must never receive a raw token'
+            );
         }
     }
 
@@ -1069,11 +1370,11 @@ final class PaymentLinkServiceTest extends CommerceTestCase
             'customer_name' => 'Example Store',
             'guest_token_hash' => str_repeat('c', 64),
             'currency' => 'USD',
-            'subtotal' => 2000,
+            'subtotal' => 2474,
             'discount_total' => 100,
             'shipping_total' => 300,
             'tax_total' => 200,
-            'grand_total' => 2400,
+            'grand_total' => 2874,
             'addresses' => json_encode(['shipping' => ['line1' => '12 Placeholder Road']], JSON_THROW_ON_ERROR),
             'metadata' => json_encode(['note' => 'a private operator note'], JSON_THROW_ON_ERROR),
         ]);
@@ -1085,9 +1386,11 @@ final class PaymentLinkServiceTest extends CommerceTestCase
             'product_name' => 'Blue Mug',
             'sku' => 'MUG-BLUE',
             'option_values' => json_encode(['color' => 'blue'], JSON_THROW_ON_ERROR),
-            'unit_price' => 1000,
+            // A distinctive unit price: it is EXCLUDED from LinkView, and a
+            // round number would hide inside the totals that are included.
+            'unit_price' => 1237,
             'quantity' => 2,
-            'line_total' => 2000,
+            'line_total' => 2474,
         ]);
     }
 }

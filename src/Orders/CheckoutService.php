@@ -32,6 +32,7 @@ use Glueful\Extensions\Commerce\Pricing\TaxBreakdown;
 use Glueful\Extensions\Commerce\Pricing\TaxQuote;
 use Glueful\Extensions\Commerce\Pricing\Totals;
 use Glueful\Extensions\Commerce\Support\CommerceSettings;
+use Glueful\Extensions\Commerce\Support\HttpsUrl;
 use Glueful\Extensions\Commerce\Support\TokenHasher;
 use Glueful\Extensions\Commerce\Tax\DiscountAllocation;
 use Glueful\Extensions\Contracts\Payments\PayableReference;
@@ -958,8 +959,9 @@ final class CheckoutService
 
         foreach (['return', 'cancel'] as $key) {
             $url = $urls[$key] ?? '';
-            $parts = is_string($url) ? parse_url($url) : false;
-            if (!is_array($parts) || ($parts['scheme'] ?? '') !== 'https' || ($parts['host'] ?? '') === '') {
+            // The SHARED definition (review round 1, minor 6): this check and the
+            // payment-link return-URL check must not drift apart.
+            if (!is_string($url) || !HttpsUrl::isAbsoluteHttps($url)) {
                 ($this->logger ?? new NullLogger())->warning(
                     'Order payment return-URL provider returned an invalid URL; payment initiation degraded',
                     ['key' => $key, 'order' => (string) ($order['order_number'] ?? '')]
