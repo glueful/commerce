@@ -24,6 +24,10 @@ final class CommerceSettings
     public const PAYMENT_LINK_INITIATIONS_MIN = 1;
     public const PAYMENT_LINK_INITIATIONS_MAX = 100;
 
+    /** Payment-links spec §2.2: the closed range a link's TTL, in days, is clamped into. */
+    public const PAYMENT_LINK_TTL_DAYS_MIN = 1;
+    public const PAYMENT_LINK_TTL_DAYS_MAX = 30;
+
     public static function currency(ApplicationContext $context): string
     {
         $override = self::override($context, 'commerce.currency');
@@ -94,6 +98,40 @@ final class CommerceSettings
         return max(
             self::PAYMENT_LINK_INITIATIONS_MIN,
             min(self::PAYMENT_LINK_INITIATIONS_MAX, $value)
+        );
+    }
+
+    /**
+     * Payment-links Task 6 (design spec §2.2): how long a freshly minted payment
+     * link stays valid, in days. Default 7.
+     *
+     * The ONE resolution point for a link's TTL, which is why it takes the
+     * caller's REQUESTED value too: an operator may choose a TTL per link, and
+     * both that choice and the configured default must pass through the SAME
+     * 1..30 clamp. Routing them separately is how a store ends up able to mint a
+     * zero-day link (already expired the moment it is sent) through one path and
+     * not the other.
+     *
+     * Clamped rather than merely cast, exactly like
+     * {@see self::paymentLinkInitiationsPerHour()}: 0 or negative would mint an
+     * already-dead link, and an unbounded value would make a bearer credential
+     * effectively permanent.
+     *
+     * @param int|null $requested the caller's chosen TTL, or null to take the
+     *     configured default
+     */
+    public static function paymentLinkTtlDays(ApplicationContext $context, ?int $requested = null): int
+    {
+        return self::clampTtlDays(
+            $requested ?? self::intValue($context, 'commerce.payment_links.ttl_days', 7)
+        );
+    }
+
+    public static function clampTtlDays(int $value): int
+    {
+        return max(
+            self::PAYMENT_LINK_TTL_DAYS_MIN,
+            min(self::PAYMENT_LINK_TTL_DAYS_MAX, $value)
         );
     }
 
