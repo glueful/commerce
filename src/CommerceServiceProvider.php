@@ -162,6 +162,7 @@ use Glueful\Extensions\Commerce\Orders\ExpiryService;
 use Glueful\Extensions\Commerce\Orders\OrderFulfillmentService;
 use Glueful\Extensions\Commerce\Orders\OrderPaymentService;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
+use Glueful\Extensions\Commerce\Orders\PaymentLinkRepository;
 use Glueful\Extensions\Commerce\Orders\PurchasableLineResolver;
 use Glueful\Extensions\Commerce\Orders\Refunds\RefundRepository;
 use Glueful\Extensions\Commerce\Orders\Refunds\RefundService;
@@ -690,6 +691,13 @@ final class CommerceServiceProvider extends ServiceProvider
             ],
             DraftAttemptRepository::class => [
                 'class' => DraftAttemptRepository::class,
+                'shared' => true,
+            ],
+            // Payment-links Task 5 (design spec §2.2): row mechanics for
+            // `commerce_payment_links`. Stateless and dependency-free -- the
+            // clock is an explicit parameter on every method, never injected.
+            PaymentLinkRepository::class => [
+                'class' => PaymentLinkRepository::class,
                 'shared' => true,
             ],
             DraftFinalizationService::class => [

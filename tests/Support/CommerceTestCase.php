@@ -41,6 +41,7 @@ abstract class CommerceTestCase extends TestCase
         \Glueful\Extensions\Commerce\Database\Migrations\CreateWishlistTables::class,
         \Glueful\Extensions\Commerce\Database\Migrations\EnforceStockQuantityTrackedNotNull::class,
         \Glueful\Extensions\Commerce\Database\Migrations\AddWalkInOrderFieldsAndDraftAttemptLedger::class,
+        \Glueful\Extensions\Commerce\Database\Migrations\CreatePaymentLinksTable::class,
     ];
 
     protected function setUp(): void

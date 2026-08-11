@@ -20,6 +20,10 @@ use Glueful\Bootstrap\ApplicationContext;
  */
 final class CommerceSettings
 {
+    /** Payment-links spec §2.2: the closed range a per-hour initiation ceiling is clamped into. */
+    public const PAYMENT_LINK_INITIATIONS_MIN = 1;
+    public const PAYMENT_LINK_INITIATIONS_MAX = 100;
+
     public static function currency(ApplicationContext $context): string
     {
         $override = self::override($context, 'commerce.currency');
@@ -63,6 +67,34 @@ final class CommerceSettings
     public static function draftTtlDays(ApplicationContext $context): int
     {
         return self::intValue($context, 'commerce.orders.draft_ttl_days', 30);
+    }
+
+    /**
+     * Payment-links Task 5 (design spec §2.2): how many checkout initiations ONE
+     * payment link may claim inside a FIXED UTC one-hour window. Default 10.
+     *
+     * Unlike every other int getter here, the resolved value is CLAMPED rather
+     * than merely cast: 0 (or negative) would make every link permanently
+     * unusable and an unbounded value would make the ceiling meaningless, so
+     * both are brought back inside 1..100 instead of being honoured. The clamp
+     * is exposed as {@see self::clampInitiationsPerHour()} so
+     * {@see \Glueful\Extensions\Commerce\Orders\PaymentLinkRepository::claimInitiationWindow()}
+     * applies the SAME bound to an explicitly supplied ceiling -- there is
+     * exactly one definition of the range.
+     */
+    public static function paymentLinkInitiationsPerHour(ApplicationContext $context): int
+    {
+        return self::clampInitiationsPerHour(
+            self::intValue($context, 'commerce.payment_links.initiations_per_hour', 10)
+        );
+    }
+
+    public static function clampInitiationsPerHour(int $value): int
+    {
+        return max(
+            self::PAYMENT_LINK_INITIATIONS_MIN,
+            min(self::PAYMENT_LINK_INITIATIONS_MAX, $value)
+        );
     }
 
     public static function cartTtlDays(ApplicationContext $context): int
