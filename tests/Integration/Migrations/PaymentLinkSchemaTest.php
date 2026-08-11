@@ -6,6 +6,7 @@ namespace Glueful\Extensions\Commerce\Tests\Integration\Migrations;
 
 use Glueful\Database\Connection;
 use Glueful\Extensions\Commerce\Database\Migrations\CreatePaymentLinksTable;
+use Glueful\Extensions\Commerce\Support\DiagnosticsReport;
 use Glueful\Extensions\Commerce\Tests\Support\CommerceTestCase;
 
 /**
@@ -112,6 +113,81 @@ final class PaymentLinkSchemaTest extends CommerceTestCase
         } catch (\Throwable) {
             $this->addToAssertionCount(1);
         }
+    }
+
+    /**
+     * `token_hash` is NOT NULL for the same reason `status` carries no default:
+     * a row with no credential is not a payment link, and under ANSI NULL
+     * semantics it would additionally be exempt from the
+     * `(tenant_uuid, token_hash)` unique -- so any number of them could
+     * accumulate unnoticed.
+     */
+    public function testTokenHashIsNotNull(): void
+    {
+        try {
+            $this->connection->table('commerce_payment_links')->insert([
+                'uuid' => 'plinknoth001',
+                'tenant_uuid' => '',
+                'order_uuid' => 'plinkord0007',
+                'token_hash' => null,
+                'status' => 'active',
+                'expires_at' => '2026-09-01 00:00:00',
+                'created_by' => 'plinkactor01',
+            ]);
+            self::fail('token_hash must be NOT NULL');
+        } catch (\Throwable) {
+            $this->addToAssertionCount(1);
+        }
+    }
+
+    /**
+     * Review fix (Important 1): `(tenant_uuid, uuid)` is a ROW IDENTITY
+     * guarantee, not a performance index. `PaymentLinkRepository` resolves a
+     * link by uuid with `first()` and then revokes/consumes/expires/claims
+     * against it -- a duplicate `(tenant, uuid)` would make every one of those
+     * operations silently act on an arbitrary row, with no error anywhere.
+     * Every other uuid-bearing table in this schema already carries it.
+     */
+    public function testUniqueTenantUuidRejectsDuplicateButAllowsTheSameUuidForAnotherTenant(): void
+    {
+        $this->connection->table('commerce_payment_links')->insert([
+            'uuid' => 'plinkiden001',
+            'tenant_uuid' => 'plinktenI001',
+            'order_uuid' => 'plinkordI001',
+            'token_hash' => str_repeat('1', 64),
+            'status' => 'active',
+            'expires_at' => '2026-09-01 00:00:00',
+            'created_by' => 'plinkactor01',
+        ]);
+
+        try {
+            $this->connection->table('commerce_payment_links')->insert([
+                'uuid' => 'plinkiden001',
+                'tenant_uuid' => 'plinktenI001',
+                'order_uuid' => 'plinkordI002',
+                'token_hash' => str_repeat('2', 64),
+                'status' => 'revoked',
+                'expires_at' => '2026-09-01 00:00:00',
+                'created_by' => 'plinkactor01',
+            ]);
+            self::fail('a duplicate (tenant_uuid, uuid) must be rejected -- link identity is not advisory');
+        } catch (\PDOException) {
+            $this->addToAssertionCount(1);
+        }
+
+        // The same uuid under a DIFFERENT tenant is unaffected (the unique is
+        // tenant-scoped, like every sibling table's).
+        $this->connection->table('commerce_payment_links')->insert([
+            'uuid' => 'plinkiden001',
+            'tenant_uuid' => 'plinktenI002',
+            'order_uuid' => 'plinkordI003',
+            'token_hash' => str_repeat('3', 64),
+            'status' => 'active',
+            'expires_at' => '2026-09-01 00:00:00',
+            'created_by' => 'plinkactor01',
+        ]);
+
+        self::assertSame(2, $this->connection->table('commerce_payment_links')->count());
     }
 
     public function testUniqueTenantTokenHashRejectsDuplicateButAllowsOtherTenantOrHash(): void
@@ -230,6 +306,11 @@ final class PaymentLinkSchemaTest extends CommerceTestCase
     {
         $indexes = $this->sqliteIndexes('commerce_payment_links');
 
+        self::assertContains(
+            ['tenant_uuid', 'uuid'],
+            array_values($indexes),
+            'the (tenant_uuid, uuid) identity unique must exist'
+        );
         self::assertContains(
             ['tenant_uuid', 'token_hash'],
             array_values($indexes),
@@ -384,6 +465,62 @@ final class PaymentLinkSchemaTest extends CommerceTestCase
         } catch (\PDOException) {
             $this->addToAssertionCount(1);
         }
+
+        // ...and the identity unique too.
+        try {
+            $connection->table('commerce_payment_links')->insert([
+                'uuid' => 'plinkdown001',
+                'tenant_uuid' => 'plinkdownt1',
+                'order_uuid' => 'plinkdowno3',
+                'token_hash' => str_repeat('6', 64),
+                'status' => 'active',
+                'expires_at' => '2026-09-01 00:00:00',
+                'created_by' => 'plinkactor01',
+            ]);
+            self::fail('the (tenant_uuid, uuid) unique must survive an up->down->up cycle');
+        } catch (\PDOException) {
+            $this->addToAssertionCount(1);
+        }
+    }
+
+    // =====================================================================
+    // DiagnosticsReport registration -- the tenant purge/adoption inventory.
+    // (Kept here with the shape assertions, matching SellerApiKeyShapeTest et al.)
+    // =====================================================================
+
+    public function testDiagnosticsCommerceTablesIncludesPaymentLinks(): void
+    {
+        self::assertContains(
+            'commerce_payment_links',
+            DiagnosticsReport::commerceTables(),
+            'DiagnosticsReport::commerceTables() missing commerce_payment_links'
+        );
+    }
+
+    /**
+     * `commerce_payment_links` carries its own `tenant_uuid`, so it must be a
+     * TENANT table -- that membership is what wires both `CommerceTenantPurge`
+     * and `TenantAdopter` to it. A surviving row after a purge would leave a
+     * hashed bearer credential resolvable against a workspace that no longer
+     * exists.
+     */
+    public function testDiagnosticsTenantTablesIncludesPaymentLinks(): void
+    {
+        self::assertContains(
+            'commerce_payment_links',
+            DiagnosticsReport::tenantTables(),
+            'DiagnosticsReport::tenantTables() missing commerce_payment_links'
+        );
+    }
+
+    public function testDiagnosticsReportBuildShowsPaymentLinksPresent(): void
+    {
+        $report = DiagnosticsReport::build($this->appContext());
+
+        self::assertTrue(
+            $report['database']['commerce_tables_present']['commerce_payment_links'] ?? false,
+            'DiagnosticsReport::build() must report commerce_payment_links as present'
+        );
     }
 
     // =====================================================================
@@ -430,6 +567,21 @@ final class PaymentLinkSchemaTest extends CommerceTestCase
                 $this->addToAssertionCount(1);
             }
 
+            try {
+                $connection->table('commerce_payment_links')->insert([
+                    'uuid' => 'pgplinkl001',
+                    'tenant_uuid' => $tenant,
+                    'order_uuid' => 'pgplinkord3',
+                    'token_hash' => str_repeat('d', 64),
+                    'status' => 'active',
+                    'expires_at' => '2026-09-01 00:00:00',
+                    'created_by' => 'pgplinkact1',
+                ]);
+                self::fail('a duplicate (tenant_uuid, uuid) must be rejected on real PostgreSQL');
+            } catch (\PDOException) {
+                $this->addToAssertionCount(1);
+            }
+
             // Ruling 7: two ACTIVE links for one order still coexist on PostgreSQL.
             $connection->table('commerce_payment_links')->insert([
                 'uuid' => 'pgplinkl003',
@@ -463,6 +615,11 @@ final class PaymentLinkSchemaTest extends CommerceTestCase
             ->fetchAll(\PDO::FETCH_COLUMN);
         $definitions = implode("\n", array_map('strval', $rows));
 
+        self::assertMatchesRegularExpression(
+            '/UNIQUE INDEX .*\(tenant_uuid, uuid\)/i',
+            $definitions,
+            'the (tenant_uuid, uuid) identity unique must exist on PostgreSQL'
+        );
         self::assertMatchesRegularExpression(
             '/UNIQUE INDEX .*\(tenant_uuid, token_hash\)/i',
             $definitions,
@@ -601,9 +758,25 @@ final class PaymentLinkSchemaTest extends CommerceTestCase
         return $connection;
     }
 
+    /**
+     * The full migration list against the shared PostgreSQL fixture database.
+     *
+     * `commerce_payment_links` is DROPPED first, unlike the sibling shape tests'
+     * equivalent helper. Migration 023 is `hasTable()`-guarded, so once the
+     * fixture database holds ANY version of this table `up()` returns
+     * immediately -- and 023 is unreleased and was amended in review (the
+     * `(tenant_uuid, uuid)` identity unique, `token_hash NOT NULL`), so a
+     * fixture database carried through the pre-amendment shape by an earlier run
+     * would silently keep it and fail the index assertions below for a reason
+     * that has nothing to do with the code under test. Dropping makes this lane
+     * self-healing across the amendment. Safe precisely because no released
+     * database has ever contained this table: there is no upgrade path to
+     * preserve here, only a test fixture to rebuild.
+     */
     private function migratedPgConnection(): Connection
     {
         $connection = new Connection($this->pgConfig());
+        $connection->getPDO()->exec('DROP TABLE IF EXISTS commerce_payment_links');
         $schema = $connection->getSchemaBuilder();
         foreach (self::MIGRATIONS as $migration) {
             (new $migration())->up($schema);

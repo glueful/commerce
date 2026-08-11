@@ -288,8 +288,18 @@ final class PaymentLinkRepository
      * ceiling protects nothing.
      *
      * @return bool true when this call consumed one unit of the window's
-     *     budget; false when the ceiling is already reached, or the link is
-     *     unknown/cross-tenant. A refused claim never advances the counter.
+     *     budget. False has THREE causes, which callers must not conflate:
+     *     (1) the ceiling is already reached for this window -- a genuine rate
+     *     refusal; (2) the link is unknown or cross-tenant; (3) the
+     *     compare-and-set LOST, i.e. another writer changed
+     *     `(initiation_window_started_at, initiation_count)` between this
+     *     call's locked read and its update. Cause (3) is effectively
+     *     unreachable when the spec §2.2 flow is followed (order locked, then
+     *     this method taking the link lock, all inside one transaction), but it
+     *     is a RACE, not a rate-limit refusal -- Task 7 must not report it to a
+     *     customer as "too many attempts"; retrying once is the correct
+     *     response if a caller ever needs to distinguish it. A refused claim
+     *     never advances the counter in any of the three cases.
      */
     public function claimInitiationWindow(
         ApplicationContext $context,
@@ -353,6 +363,19 @@ SQL,
      * asks is "was a session EVER exposed", so overwriting the original time
      * would lose information and gain nothing. The stamp is never cleared and
      * survives every terminal transition.
+     *
+     * DRIVER CAVEAT on the return value. The framework never sets
+     * `PDO::MYSQL_ATTR_FOUND_ROWS`, so on MySQL `rowCount()` reports CHANGED
+     * rows, not MATCHED rows. A re-stamp within the SAME second therefore
+     * changes nothing (`provider_session_issued_at` is pinned by the COALESCE
+     * and `updated_at` is written with an identical value), so MySQL would
+     * return 0 and this method would answer false for a link that IS exposed.
+     * SQLite and PostgreSQL both report MATCHED rows and are unaffected. MySQL
+     * is not a tested lane for this extension (the suite runs SQLite by default
+     * and PostgreSQL under `COMMERCE_TEST_DB_DRIVER=pgsql`), so the contract
+     * below is PROVEN on SQLite/PostgreSQL only. Nothing is changed to
+     * accommodate MySQL here -- a caller that needs certainty on that driver
+     * should read the row rather than trust this boolean.
      *
      * @return bool true when the tenant's link exists and is now marked exposed
      *     (whether or not this call was the one that first stamped it); false

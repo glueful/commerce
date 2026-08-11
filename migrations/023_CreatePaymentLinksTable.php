@@ -23,7 +23,12 @@ use Glueful\Database\Schema\Interfaces\SchemaBuilderInterface;
  *    The raw token exists exactly once, in the mint call's return value, and
  *    never reaches this table, this repository, a query log, or an exception
  *    trace -- see {@see \Glueful\Extensions\Commerce\Orders\PaymentLinkRepository},
- *    whose public surface has no raw-token parameter at all.
+ *    whose public surface has no raw-token parameter at all. NOT NULL, for the
+ *    same reason `status` carries no default: the "fail loudly rather than mint
+ *    a fail-open credential" argument applies at least as strongly to the hash
+ *    itself. (A NULL hash would additionally be exempt from the unique below
+ *    under ANSI NULL semantics, so any number of credential-less rows could
+ *    accumulate unnoticed.)
  *  - `status` is the CLOSED domain `active|revoked|expired|consumed`. It is
  *    NOT NULL with NO STANDING DEFAULT, deliberately. Migration 022's
  *    `origin`/`fulfillment_mode` had to keep their defaults because a large
@@ -47,7 +52,19 @@ use Glueful\Database\Schema\Interfaces\SchemaBuilderInterface;
  *    revoked or expired link whose checkout session was already handed to a
  *    customer still blocks automatic cancellation.
  *
- * INDEXES (exactly the three the spec names -- no more):
+ * INDEXES:
+ *  - UNIQUE `(tenant_uuid, uuid)`: the ROW IDENTITY guarantee, not a
+ *    performance index. `PaymentLinkRepository::findByUuid()` and its locking
+ *    sibling both resolve with `first()`, and `revoke()`/`consume()`/
+ *    `expire()`/`claimInitiationWindow()`/`stampProviderSessionIssued()` all
+ *    address a link BY uuid -- so without this constraint a duplicate
+ *    `(tenant, uuid)` would silently resolve to an arbitrary row and those
+ *    mutations would act on an arbitrary one of them, with no error anywhere.
+ *    Every other uuid-bearing table in this schema (migrations 004, 006,
+ *    011-020) already carries it; this table would otherwise be the sole
+ *    outlier. The spec's §2.2 index list enumerates the FEATURE lookup indexes
+ *    below; its only prohibition is the partial unique (Ruling 7), which this
+ *    is not.
  *  - UNIQUE `(tenant_uuid, token_hash)`: the resolve path's only lookup key.
  *    Tenant-scoped rather than global, so a hash collision across tenants is
  *    not this table's problem and cross-tenant probing is impossible.
@@ -95,7 +112,7 @@ final class CreatePaymentLinksTable implements MigrationInterface
             $table->string('tenant_uuid', 12)->default('');
             $table->string('order_uuid', 12);
             // SHA-256 hex of the raw bearer token -- never the token itself.
-            $table->string('token_hash', 64);
+            $table->string('token_hash', 64)->notNull();
             // Closed domain: active|revoked|expired|consumed. No default: see the
             // class docblock (a writer that forgets this must fail, not fail open).
             $table->string('status', 16)->notNull();
@@ -111,6 +128,7 @@ final class CreatePaymentLinksTable implements MigrationInterface
             $table->timestamp('created_at')->default('CURRENT_TIMESTAMP');
             $table->timestamp('updated_at')->nullable();
 
+            $table->unique(['tenant_uuid', 'uuid'], 'commerce_payment_links_tenant_uuid_unique');
             $table->unique(['tenant_uuid', 'token_hash'], 'commerce_payment_links_tenant_token_unique');
             $table->index(
                 ['tenant_uuid', 'order_uuid', 'status'],

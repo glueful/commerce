@@ -186,25 +186,16 @@ final class CommerceTenantPurgeTest extends CommerceTestCase
     }
 
     /**
-     * Payment-links Task 5 (spec §2.2): registration in
-     * {@see DiagnosticsReport::commerceTables()} is the whole mechanism, so this
-     * asserts the INVENTORY explicitly as well as the physical deletion -- the
-     * seeded-table loop above would still pass vacuously if the table were
-     * silently missing from `tenantTables()`.
+     * Payment-links Task 5 (spec §2.2): the PHYSICAL destruction proof. The
+     * seeded-table loop above would pass vacuously if the table were silently
+     * missing from `tenantTables()`, so this asserts deletion directly against
+     * the table. The inventory MEMBERSHIP that makes it happen is asserted
+     * beside the rest of the shape, in
+     * {@see \Glueful\Extensions\Commerce\Tests\Integration\Migrations\PaymentLinkSchemaTest}
+     * (the convention `SellerApiKeyShapeTest` et al. already follow).
      */
     public function testPurgeDestroysPaymentLinksForTheTargetTenantOnly(): void
     {
-        self::assertContains(
-            'commerce_payment_links',
-            DiagnosticsReport::commerceTables(),
-            'commerce_payment_links must be registered in the commerce table inventory'
-        );
-        self::assertContains(
-            'commerce_payment_links',
-            DiagnosticsReport::tenantTables(),
-            'commerce_payment_links carries tenant_uuid directly, so it must be a tenant table'
-        );
-
         $this->seedTenant(self::TENANT_A);
         $this->seedTenant(self::TENANT_B);
 

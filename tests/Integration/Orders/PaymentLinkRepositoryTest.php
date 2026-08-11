@@ -49,15 +49,69 @@ final class PaymentLinkRepositoryTest extends CommerceTestCase
     public function testNoPublicMethodAcceptsARawToken(): void
     {
         $reflection = new \ReflectionClass(PaymentLinkRepository::class);
+        $seenTokenParameters = [];
 
         foreach ($reflection->getMethods(\ReflectionMethod::IS_PUBLIC) as $method) {
             foreach ($method->getParameters() as $parameter) {
-                $name = strtolower($parameter->getName());
-                self::assertNotSame('rawtoken', $name, "{$method->getName()} accepts a raw token");
-                self::assertNotSame('token', $name, "{$method->getName()} accepts a raw token");
-                self::assertNotSame('raw', $name, "{$method->getName()} accepts a raw token");
+                $name = $parameter->getName();
+                if (stripos($name, 'token') === false) {
+                    continue;
+                }
+
+                // ALLOWLIST, not a blacklist of three known-bad spellings: ANY
+                // token-ish parameter must end in `hash`, so `$plainToken`,
+                // `$bearerToken`, `$tokenValue` and friends fail here even though
+                // no one thought to name them in advance.
+                self::assertMatchesRegularExpression(
+                    '/hash$/i',
+                    $name,
+                    "{$method->getName()}(\${$name}) looks like a raw token: every token-shaped "
+                    . 'parameter on this class must be a hash and must be named so'
+                );
+                $seenTokenParameters[] = $method->getName() . '($' . $name . ')';
             }
         }
+
+        // Guard against the assertion loop passing vacuously if the hashed lookup
+        // surface is ever renamed away entirely.
+        self::assertNotSame([], $seenTokenParameters, 'the hashed lookup surface must still exist');
+    }
+
+    /**
+     * The complement of the allowlist above: the FULL public parameter-name
+     * inventory, pinned exactly. A new parameter of any name -- `$bearer`,
+     * `$secret`, `$credential`, none of which contain "token" -- fails here
+     * until it is deliberately added to this list and re-reviewed.
+     */
+    public function testThePublicParameterNameInventoryIsPinned(): void
+    {
+        $reflection = new \ReflectionClass(PaymentLinkRepository::class);
+        $names = [];
+
+        foreach ($reflection->getMethods(\ReflectionMethod::IS_PUBLIC) as $method) {
+            foreach ($method->getParameters() as $parameter) {
+                $names[$parameter->getName()] = true;
+            }
+        }
+
+        $actual = array_keys($names);
+        sort($actual);
+
+        self::assertSame(
+            [
+                'context',
+                'createdBy',
+                'expiresAt',
+                'limit',
+                'linkUuid',
+                'now',
+                'orderUuid',
+                'tenant',
+                'tokenHash',
+                'uuid',
+            ],
+            $actual
+        );
     }
 
     public function testInsertPersistsTheHashAndFindByTokenHashResolvesItWithinTheTenant(): void
