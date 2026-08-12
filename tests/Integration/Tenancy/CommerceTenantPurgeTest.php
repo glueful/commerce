@@ -72,6 +72,7 @@ final class CommerceTenantPurgeTest extends CommerceTestCase
             'commerce_shipping_zones', 'commerce_refunds',
             'commerce_wishlists', 'commerce_wishlist_items',
             'commerce_order_draft_attempts',
+            'commerce_payment_links',
         ];
         foreach ($this->existingTenantTables() as $table) {
             $expected = in_array($table, $seededTenantTables, true) ? 1 : 0;
@@ -184,6 +185,39 @@ final class CommerceTenantPurgeTest extends CommerceTestCase
         }
     }
 
+    /**
+     * Payment-links Task 5 (spec §2.2): the PHYSICAL destruction proof. The
+     * seeded-table loop above would pass vacuously if the table were silently
+     * missing from `tenantTables()`, so this asserts deletion directly against
+     * the table. The inventory MEMBERSHIP that makes it happen is asserted
+     * beside the rest of the shape, in
+     * {@see \Glueful\Extensions\Commerce\Tests\Integration\Migrations\PaymentLinkSchemaTest}
+     * (the convention `SellerApiKeyShapeTest` et al. already follow).
+     */
+    public function testPurgeDestroysPaymentLinksForTheTargetTenantOnly(): void
+    {
+        $this->seedTenant(self::TENANT_A);
+        $this->seedTenant(self::TENANT_B);
+
+        $purge = new CommerceTenantPurge();
+        $result = $purge->purgeTenant($this->context, self::TENANT_A);
+
+        self::assertSame(1, $result['commerce_payment_links']);
+        self::assertSame(
+            0,
+            $this->connection->table('commerce_payment_links')
+                ->where('tenant_uuid', '=', self::TENANT_A)
+                ->count(),
+            "a purged tenant's hashed payment-link credentials must be physically gone"
+        );
+        self::assertSame(
+            1,
+            $this->connection->table('commerce_payment_links')
+                ->where('tenant_uuid', '=', self::TENANT_B)
+                ->count()
+        );
+    }
+
     public function testPurgeRefusesTheSentinelTenant(): void
     {
         $purge = new CommerceTenantPurge();
@@ -292,6 +326,19 @@ final class CommerceTenantPurgeTest extends CommerceTestCase
             'request_fingerprint' => md5('draft-' . $tenant),
             'order_uuid' => $orderUuid,
             'status' => 'pending',
+        ]);
+        // Payment-links Task 5 (spec §2.2): a payment link carries `tenant_uuid`
+        // directly, so purging a workspace must destroy its outstanding payment
+        // links too -- a surviving row would keep a hashed bearer credential
+        // resolvable against a tenant that no longer exists.
+        $this->connection->table('commerce_payment_links')->insert([
+            'uuid' => substr('plink' . $tenant, 0, 12),
+            'tenant_uuid' => $tenant,
+            'order_uuid' => $orderUuid,
+            'token_hash' => hash('sha256', 'payment-link-' . $tenant),
+            'status' => 'active',
+            'expires_at' => '2026-09-01 00:00:00',
+            'created_by' => substr('actor' . $tenant, 0, 12),
         ]);
 
         // --- Children: no tenant_uuid of their own, reachable only via the parent above ---

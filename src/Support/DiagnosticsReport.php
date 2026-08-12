@@ -200,6 +200,13 @@ final class DiagnosticsReport
             // so it is swept by `tenantTables()` below by omission from its
             // exclusion list -- no addition to that list needed.
             'commerce_order_draft_attempts',
+            // Payment-links Task 5 (design spec §2.2): hashed payment-link custody.
+            // Carries its own `tenant_uuid` directly (not a join-child of
+            // `commerce_orders`), so it is swept by `tenantTables()` below by
+            // omission from its exclusion list -- no addition to that list needed.
+            // Purge MUST reach it: a surviving row would leave a hashed bearer
+            // credential resolvable against a workspace that no longer exists.
+            'commerce_payment_links',
             'commerce_sequences',
             'commerce_discounts',
             'commerce_discount_redemptions',

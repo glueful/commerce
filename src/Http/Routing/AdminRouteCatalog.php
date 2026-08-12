@@ -14,6 +14,7 @@ use Glueful\Extensions\Commerce\Http\Admin\AdminGrantController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminMediaController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminOrderController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminOrderDraftController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminOrderPaymentLinkController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminProductController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminRefundController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminReportController;
@@ -192,6 +193,44 @@ final class AdminRouteCatalog
             ['orders.notes.store', 'POST', '/orders/{uuid}/notes', AdminOrderController::class, 'addNote', 'manage', 'json', 'orders'],
             ['orders.notes.index', 'GET', '/orders/{uuid}/notes', AdminOrderController::class, 'notes', 'view', 'json', 'orders'],
             ['orders.invoice_data', 'GET', '/orders/{uuid}/invoice-data', AdminOrderController::class, 'invoiceData', 'view', 'unusual', 'orders'],
+            // — Payment links (payment-links Task 8, design spec §2.2) —
+            // The ONE HTTP owner of mint/revoke/status. All three are MANAGE mode,
+            // including the status read: a link's state, expiry, and
+            // provider-session exposure are payment-custody facts about how an
+            // order may be paid, not ordinary order reading, and §2.2 pins the
+            // whole trio to manage. Embedding hosts mount these keys and never
+            // redeclare the method/path pairs; a pack's own delivery route lives
+            // at a deeper path (`.../payment-link/send`) so no pair collides.
+            [
+                'orders.payment_link.store',
+                'POST',
+                '/orders/{uuid}/payment-link',
+                AdminOrderPaymentLinkController::class,
+                'store',
+                'manage',
+                'json',
+                'orders',
+            ],
+            [
+                'orders.payment_link.destroy',
+                'DELETE',
+                '/orders/{uuid}/payment-link',
+                AdminOrderPaymentLinkController::class,
+                'destroy',
+                'manage',
+                'json',
+                'orders',
+            ],
+            [
+                'orders.payment_link.show',
+                'GET',
+                '/orders/{uuid}/payment-link',
+                AdminOrderPaymentLinkController::class,
+                'show',
+                'manage',
+                'json',
+                'orders',
+            ],
             // — Draft orders (admin-order-creation cycle 2, Tasks 9 and 10, design spec §2.3/§2.5) —
             // `/orders/drafts` is a STATIC path and the router resolves static before
             // dynamic (Router::match()), so it can never be swallowed by the

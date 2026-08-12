@@ -2,6 +2,92 @@
 
 ## [Unreleased]
 
+## [1.11.0] - 2026-08-12 — Payment Links & Session-Exposure Guarded Cancellation
+
+**Theme: a payment link is a bearer credential, and once it has shown a provider a live
+session, cancellation stops being automatic.** Admins can now mint a tokenized public payment
+link for any `pending_payment` order and hand it to a payer with no login; the raw token exists
+nowhere but the mint response and the minted URL, every custody row stores only its SHA-256
+hash, and initiating checkout from a public link is a two-phase, lock-disciplined operation with
+its own per-link hourly ceiling. The moment any link on an order has ever exposed a live provider
+session, the new `PaymentSessionExposureGuard` becomes the sole authority over that order's
+non-draft cancellation — the sweep backs off entirely and an operator must explicitly accept the
+late-payment risk, audited in the same transaction as the override.
+
+### Added
+- **`commerce_payment_links` table** (migration 023) — hashed token custody: every row stores a
+  SHA-256 `token_hash`, never a raw token; the raw value is engine-egress-limited to `mint()`'s
+  return and `mintPublic()`'s composed URL, pinned by a reflection ratchet over every public
+  signature in the custody path. `status` and `token_hash` are NOT NULL with no standing default,
+  so a writer that omits either fails loudly rather than minting a credential silently. Indexed by
+  UNIQUE `(tenant_uuid, token_hash)`, UNIQUE `(tenant_uuid, uuid)` (row identity), plus a
+  `(tenant_uuid, provider_session_issued_at, order_uuid)` prefilter index for the expiry/cancel
+  guard scan. No partial-unique index anywhere — two ACTIVE rows can coexist for one order at the
+  database level; the service layer is the one-active-per-order authority.
+- **`PaymentLinkService`** — the mint/resolve/initiate authority. `mint()`/`mintPublic()` run
+  inside one transaction that locks the order before the link, revoking any prior active link so
+  exactly one survives; `mintPublic()`'s host seam (`PaymentLinkPublicUrlProvider`) composes and
+  validates the public URL **before** anything is persisted, so a misconfigured host mints nothing.
+  `resolveByToken()` is the anonymous, unlocked read: a **revoked** link resolves to a
+  content-redacted, state-only view (status/expiry/exposure only — no order number, lines,
+  currency, or totals); every other terminal state (expired, consumed, canceled, refunded) still
+  resolves in full, since the payer holding that link needs to understand what happened to their
+  bill. Every throwing path — mint refusals, resolve, stale matches, invalid provider URLs — runs
+  with the raw token scrubbed from the parameter list or held only as a local, never as a
+  live stack-frame argument, so a backtrace reaching a log or a reviewer cannot leak it.
+- **Two-phase `initiateByToken()`** — Phase A claims the order/link locks, revalidates every
+  predicate, and claims the link's hourly initiation window (default 10/hour, config-clamped
+  1-100) all inside one committed transaction; the provider round trip that follows holds no
+  transaction and no row lock; Phase B re-locks and rechecks every predicate against a **fresh**
+  clock read before trusting the collector's answer and stamping `provider_session_issued_at`.
+  Calling `initiateByToken()` from inside a caller-owned transaction throws a dedicated
+  `LogicException` rather than running unguarded. Per-link TTL defaults to 7 days
+  (config-clamped 1-30). Every typed refusal (unknown/expired/revoked/superseded token, rate
+  limit, unavailable return URL, untrusted or missing checkout URL, collector failure) carries no
+  URL and quotes neither the token nor a provider message.
+- **`PaymentSessionExposureGuard`** — the single authority over non-draft order cancellation.
+  Given a locked order, it decides one of: no relevant link (ordinary cancellation proceeds); an
+  active, unexpired, never-initiated link (blocks the automatic sweep, but an operator may still
+  cancel plainly); or a link that has **ever** issued a provider session, whatever its current
+  status (blocks automatic cancellation entirely — an operator may only override by acknowledging
+  `accept_late_payment_risk=true`, audited as `payment_session_risk_accepted` in the same
+  transaction as the cancellation). The exposure sweep-exclusion prefilter is a lease-aware
+  addition to `ExpiryService`; the guard itself re-decides inside each order's own transaction, so
+  the prefilter is never mistaken for authority.
+- **Admin catalog** — `orders.payment_link.store` / `.destroy` / `.show` (manage mode,
+  `POST|DELETE|GET /orders/{uuid}/payment-link`). `store` mints via `mintPublic()` only, never the
+  raw-token-returning `mint()`; `show` reads via a new token-free `PaymentLinkService::currentLink()`
+  and reports the current exposure decision; `destroy` revokes idempotently by order. Refusals map
+  through a closed, publicly documented error-code table; any unmapped throwable — driver failure,
+  the transaction guard above — renders a bodiless 500, never a message or trace.
+
+### Changed
+- **Cancellation** now runs the exposure guard before stock release on every guarded authority
+  (`AdminOrderController::cancel`, `ExpiryService`'s sweep); an inventory ratchet test pins the
+  exact set of code paths that transition an order to `canceled` or release its stock, so a future
+  authority cannot be added without also wiring the guard.
+- **`CheckoutService::paymentReturnMetadata()`** now shares the same `Support\HttpsUrl::isAbsoluteHttps()`
+  definition the payment-link return-URL seam uses, removing a duplicate inline validation
+  predicate; behavior is unchanged except that an uppercase `HTTPS://` scheme, previously
+  rejected, is now correctly accepted per RFC 3986.
+
+### Host obligations (Thallo and any embedding host)
+- Bind `Contracts\PaymentLinkPublicUrlProvider` and `Contracts\PaymentLinkReturnUrlProvider` —
+  the engine defaults are typed-unavailable, so minting and initiation refuse with a typed 503
+  until a host supplies its canonical-origin URLs.
+- Carry route-level (IP/route) rate limiting on every public token-bearing surface. The engine's
+  per-link hourly ceiling bounds how often one **known** link can open a checkout; it cannot bound
+  anonymous enumeration of unknown tokens, which never reach a link to count against.
+- Pin `zend.exception_ignore_args=On` in deployment — defense in depth alongside the engine's own
+  stack-frame scrubbing of the raw token.
+- Map any throwable from `initiateByToken()` that is not a typed `PaymentLinkException` to a
+  bodiless 500; the typed set covers payer-facing outcomes only.
+- **Requires payvia >= 2.6 semantics** (ensure-live session renewal) for full payment-link
+  behavior in production, but the `PaymentCollector` **contract** consumed here is unchanged from
+  2.5, so no `composer.json` constraint moves in this release — every collector failure mode,
+  including a 2.6 renewal refusal, is caught and surfaced as the typed `checkout_initiation_failed`
+  refusal rather than an uncaught exception.
+
 ## [1.10.0] - 2026-08-10 — Admin Draft Orders & Walk-In Finalization
 
 **Theme: an admin-born order that acquires its invariants at finalize.** Admins can now build

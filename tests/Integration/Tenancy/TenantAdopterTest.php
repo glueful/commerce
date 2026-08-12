@@ -108,6 +108,40 @@ final class TenantAdopterTest extends CommerceTestCase
         );
     }
 
+    /**
+     * Payment-links Task 5 (spec §2.2): `commerce_payment_links` carries its own
+     * `tenant_uuid` directly, so adoption rekeys it through the ordinary
+     * `tenantTables()` inventory. A link left behind on the sentinel tenant
+     * would become unresolvable the moment the workspace is adopted -- the
+     * repository only ever queries under the host-resolved tenant.
+     */
+    public function testAdoptRekeysPaymentLinksTable(): void
+    {
+        $this->connection->table('commerce_payment_links')->insert([
+            'uuid' => 'plinkadopt01',
+            'tenant_uuid' => '',
+            'order_uuid' => 'orderadopt02',
+            'token_hash' => hash('sha256', 'adopt-payment-link'),
+            'status' => 'active',
+            'expires_at' => '2026-09-01 00:00:00',
+            'created_by' => 'actoradopt01',
+        ]);
+
+        $result = (new TenantAdopter())->adopt($this->context, 'tenantPLK0001');
+
+        self::assertSame(1, $result['tables']['commerce_payment_links']);
+        self::assertSame(
+            0,
+            $this->connection->table('commerce_payment_links')->where('tenant_uuid', '=', '')->count()
+        );
+        self::assertSame(
+            1,
+            $this->connection->table('commerce_payment_links')
+                ->where('tenant_uuid', '=', 'tenantPLK0001')
+                ->count()
+        );
+    }
+
     public function testAdoptRekeysMarketplaceTablesEvenWhenTheMasterSwitchIsOff(): void
     {
         self::assertFalse(

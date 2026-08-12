@@ -32,6 +32,8 @@ final class OrderPaymentService
     /** @var callable(ApplicationContext,string,string):void */
     private $afterPaidHook;
 
+    private PaymentLinkRepository $paymentLinks;
+
     /**
      * @param (callable(ApplicationContext,string,string):void)|null $afterPaidHook
      *     Invoked with (context, tenant, orderUuid) AFTER the paid CAS and
@@ -48,6 +50,7 @@ final class OrderPaymentService
         private ?SellerOrderRepository $sellerOrders = null,
         private ?LedgerPostingService $ledgerPosting = null,
         private ?SellerWebhookOutboxPublisher $webhooks = null,
+        ?PaymentLinkRepository $paymentLinks = null,
     ) {
         $this->afterPaidHook = $afterPaidHook ?? static function (
             ApplicationContext $context,
@@ -55,6 +58,13 @@ final class OrderPaymentService
             string $orderUuid
         ): void {
         };
+        // Appended optional like every other widening here, but defaulting to a
+        // REAL repository rather than to null: the terminal transition in
+        // markPaid() is a custody fact, not an opt-in feature, and this class
+        // must not have a mode in which a paid order keeps a live payment link.
+        // PaymentLinkRepository is stateless and dependency-free, so direct
+        // construction is exactly equivalent to the container's shared instance.
+        $this->paymentLinks = $paymentLinks ?? new PaymentLinkRepository();
     }
 
     /**
@@ -92,6 +102,32 @@ final class OrderPaymentService
             if ($order === null) {
                 return;
             }
+
+            // TERMINAL TRANSITION, EAGERLY (payment-links Task 8, design spec
+            // §2.2: "order paid => link `consumed` (eagerly where OrderPaid is
+            // observed; lazily on resolve)").
+            //
+            // This method IS that observation point: it is the engine's only
+            // `pending_payment -> paid` transition and the sole dispatcher of
+            // `OrderPaid`, and both callers -- the provider confirmation handler
+            // and the admin mark-paid endpoint -- route through it. Consuming
+            // here rather than from an `OrderPaid` LISTENER is deliberate: the
+            // event is registered `afterCommit`, is fault-isolated, and is not
+            // dispatched at all when no `EventService` is bound, so a listener
+            // would make a custody transition best-effort. Inside this
+            // transaction it commits or rolls back with the paid CAS itself.
+            //
+            // The repository's compare-and-set is `active` -> `consumed`, so a
+            // revoked or expired sibling keeps its own honest terminal state and
+            // an order with no links is a no-op. The lazy transition on resolve
+            // (Task 6) still covers any order paid by some future path that does
+            // not come through here.
+            $this->paymentLinks->consumeActiveForOrder(
+                $context,
+                $tenant,
+                $orderUuid,
+                new \DateTimeImmutable('now', new \DateTimeZone('UTC'))
+            );
 
             $partitioned = (bool) ($order['marketplace_partitioned'] ?? false);
 

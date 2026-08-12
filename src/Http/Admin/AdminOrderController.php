@@ -24,6 +24,9 @@ use Glueful\Extensions\Commerce\Orders\OrderFulfillmentService;
 use Glueful\Extensions\Commerce\Orders\OrderPaymentService;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
 use Glueful\Extensions\Commerce\Orders\OrderStateMachine;
+use Glueful\Extensions\Commerce\Orders\PaymentLinkRepository;
+use Glueful\Extensions\Commerce\Orders\PaymentSessionExposureException;
+use Glueful\Extensions\Commerce\Orders\PaymentSessionExposureGuard;
 use Glueful\Extensions\Commerce\Orders\Refunds\RefundRepository;
 use Glueful\Extensions\Commerce\Tenancy\SentinelTenantResolver;
 use Glueful\Extensions\Contracts\Tenancy\CurrentTenantResolver;
@@ -35,7 +38,10 @@ use Symfony\Component\HttpFoundation\Request;
 
 final class AdminOrderController
 {
+    use ReadsAdminInput;
     use ResolvesActor;
+
+    private PaymentSessionExposureGuard $exposure;
 
     public function __construct(
         private ApplicationContext $context,
@@ -50,6 +56,7 @@ final class AdminOrderController
         private ?SellerWebhookOutboxPublisher $webhooks = null,
         private ?ProductRepository $products = null,
         private ?OrderFulfillmentService $orderFulfillment = null,
+        ?PaymentSessionExposureGuard $exposure = null,
     ) {
         $this->orders ??= app($context, OrderRepository::class);
         $this->stock ??= app($context, StockRepository::class);
@@ -80,6 +87,18 @@ final class AdminOrderController
         // appended 11th constructor argument never breaks a pre-existing
         // positional-arg test call site either.
         $this->orderFulfillment ??= new OrderFulfillmentService($this->orders);
+        // Payment-links Task 8 (design spec §2.2). Appended optional like every
+        // collaborator above, but defaulting to a REAL guard rather than to
+        // null: `cancel()` is one of the engine's two non-draft cancellation
+        // authorities, and a null guard would be a call site that silently
+        // bypasses the policy. Both of the guard's own collaborators are
+        // stateless, so direct construction is equivalent to the container's
+        // shared instances -- and it keeps every pre-existing positional-arg
+        // test call site working unchanged.
+        $this->exposure = $exposure ?? new PaymentSessionExposureGuard(
+            new PaymentLinkRepository(),
+            $this->orders
+        );
     }
 
     #[ApiOperation(summary: 'List orders', tags: ['Commerce Admin'])]
@@ -166,16 +185,45 @@ final class AdminOrderController
         return Response::success($projected, 'Order retrieved');
     }
 
+    /**
+     * The OPERATOR cancellation authority (design spec §2.2: "the ordinary admin
+     * cancel endpoint uses the same guard so it cannot bypass this policy").
+     *
+     * Three things happen in this order, inside ONE transaction, and the order
+     * is the contract:
+     *  1. the order is LOCKED and reloaded -- not merely read -- so the guard's
+     *     decision and the cancellation are one atomic story rather than two
+     *     observations of a moving world;
+     *  2. {@see OrderStateMachine} rejects an impossible transition, exactly as
+     *     before (an already-canceled order is still the ordinary 409);
+     *  3. {@see PaymentSessionExposureGuard} decides. An order whose payment
+     *     link already handed a payer a checkout URL refuses an UNACKNOWLEDGED
+     *     cancellation with 409 `payment_session_risk_unacknowledged`; with
+     *     `accept_late_payment_risk=true` it proceeds and the acknowledgement is
+     *     recorded HERE, before a single unit of stock is released.
+     *
+     * A refusal throws, so the transaction rolls back and nothing -- stock,
+     * status, audit -- moved.
+     */
     #[ApiOperation(summary: 'Cancel an order', tags: ['Commerce Admin'])]
     #[ApiResponse(200, description: 'Order canceled')]
-    #[ApiResponse(409, description: 'Invalid order transition')]
+    #[ApiResponse(409, description: 'Invalid order transition or unacknowledged payment-session risk')]
     public function cancel(Request $request, string $uuid): Response
     {
         try {
             $tenant = $this->tenants->tenantUuid($this->context);
-            db($this->context)->transaction(function () use ($tenant, $uuid): void {
-                $order = $this->order($uuid);
+            $riskAccepted = $this->acceptsLatePaymentRisk($request);
+            $actorUuid = $this->actorUuid($request);
+            db($this->context)->transaction(function () use ($tenant, $uuid, $riskAccepted, $actorUuid): void {
+                $order = $this->lockedOrder($tenant, $uuid);
                 OrderStateMachine::assertTransition((string) $order['status'], 'canceled');
+                $this->exposure->authorizeOperatorCancellation(
+                    $this->context,
+                    $tenant,
+                    $order,
+                    $riskAccepted,
+                    $actorUuid
+                );
                 $this->releaseStock($tenant, $uuid);
                 $this->orders->transition($this->context, $tenant, $uuid, 'canceled');
 
@@ -194,6 +242,13 @@ final class AdminOrderController
             });
 
             return Response::success(OrderProjection::forAdmin($this->order($uuid)), 'Order canceled');
+        } catch (PaymentSessionExposureException $e) {
+            // Caught BEFORE the \DomainException arm below (it is a subclass) so
+            // the machine-readable discriminator reaches the client: an operator
+            // surface has to tell "this order cannot be canceled at all" apart
+            // from "this order can be canceled, but you must say you accept the
+            // late-payment risk", and only the second one has a next step.
+            return Response::error($e->getMessage(), 409, ['reason' => $e->errorCode]);
         } catch (\DomainException $e) {
             return Response::error($e->getMessage(), 409);
         }
@@ -522,6 +577,39 @@ final class AdminOrderController
                 $orderUuid
             );
         }
+    }
+
+    /**
+     * The acknowledgement, parsed STRICTLY: only a real boolean true or its
+     * ordinary wire spellings (`"true"`, `"1"`, `"on"`, `"yes"`) count.
+     * `filter_var()`'s NULL_ON_FAILURE mode is what makes that exact -- a bare
+     * presence, a `"false"`, a `0`, or an empty string are all NOT an
+     * acknowledgement, and an operator surface must not be able to acquire one
+     * by accident.
+     */
+    private function acceptsLatePaymentRisk(Request $request): bool
+    {
+        $raw = $this->input($request)[PaymentSessionExposureGuard::ACKNOWLEDGEMENT_FIELD] ?? null;
+
+        return filter_var($raw, FILTER_VALIDATE_BOOL, FILTER_NULL_ON_FAILURE) === true;
+    }
+
+    /**
+     * The order under a ROW LOCK, for the cancellation authority. Same
+     * non-revealing 404 as {@see self::order()} -- and same draft exclusion, so
+     * a draft is not found here at all and stays the exclusive concern of
+     * {@see \Glueful\Extensions\Commerce\Orders\DraftOrderService::cancel()}.
+     *
+     * @return array<string,mixed>
+     */
+    private function lockedOrder(string $tenant, string $uuid): array
+    {
+        $order = $this->orders->findByUuidForUpdate($this->context, $tenant, $uuid);
+        if ($order === null) {
+            throw new NotFoundException('Resource not found.');
+        }
+
+        return $order;
     }
 
     /** @return array<string,mixed> */

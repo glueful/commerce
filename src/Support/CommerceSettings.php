@@ -20,6 +20,14 @@ use Glueful\Bootstrap\ApplicationContext;
  */
 final class CommerceSettings
 {
+    /** Payment-links spec §2.2: the closed range a per-hour initiation ceiling is clamped into. */
+    public const PAYMENT_LINK_INITIATIONS_MIN = 1;
+    public const PAYMENT_LINK_INITIATIONS_MAX = 100;
+
+    /** Payment-links spec §2.2: the closed range a link's TTL, in days, is clamped into. */
+    public const PAYMENT_LINK_TTL_DAYS_MIN = 1;
+    public const PAYMENT_LINK_TTL_DAYS_MAX = 30;
+
     public static function currency(ApplicationContext $context): string
     {
         $override = self::override($context, 'commerce.currency');
@@ -63,6 +71,68 @@ final class CommerceSettings
     public static function draftTtlDays(ApplicationContext $context): int
     {
         return self::intValue($context, 'commerce.orders.draft_ttl_days', 30);
+    }
+
+    /**
+     * Payment-links Task 5 (design spec §2.2): how many checkout initiations ONE
+     * payment link may claim inside a FIXED UTC one-hour window. Default 10.
+     *
+     * Unlike every other int getter here, the resolved value is CLAMPED rather
+     * than merely cast: 0 (or negative) would make every link permanently
+     * unusable and an unbounded value would make the ceiling meaningless, so
+     * both are brought back inside 1..100 instead of being honoured. The clamp
+     * is exposed as {@see self::clampInitiationsPerHour()} so
+     * {@see \Glueful\Extensions\Commerce\Orders\PaymentLinkRepository::claimInitiationWindow()}
+     * applies the SAME bound to an explicitly supplied ceiling -- there is
+     * exactly one definition of the range.
+     */
+    public static function paymentLinkInitiationsPerHour(ApplicationContext $context): int
+    {
+        return self::clampInitiationsPerHour(
+            self::intValue($context, 'commerce.payment_links.initiations_per_hour', 10)
+        );
+    }
+
+    public static function clampInitiationsPerHour(int $value): int
+    {
+        return max(
+            self::PAYMENT_LINK_INITIATIONS_MIN,
+            min(self::PAYMENT_LINK_INITIATIONS_MAX, $value)
+        );
+    }
+
+    /**
+     * Payment-links Task 6 (design spec §2.2): how long a freshly minted payment
+     * link stays valid, in days. Default 7.
+     *
+     * The ONE resolution point for a link's TTL, which is why it takes the
+     * caller's REQUESTED value too: an operator may choose a TTL per link, and
+     * both that choice and the configured default must pass through the SAME
+     * 1..30 clamp. Routing them separately is how a store ends up able to mint a
+     * zero-day link (already expired the moment it is sent) through one path and
+     * not the other.
+     *
+     * Clamped rather than merely cast, exactly like
+     * {@see self::paymentLinkInitiationsPerHour()}: 0 or negative would mint an
+     * already-dead link, and an unbounded value would make a bearer credential
+     * effectively permanent.
+     *
+     * @param int|null $requested the caller's chosen TTL, or null to take the
+     *     configured default
+     */
+    public static function paymentLinkTtlDays(ApplicationContext $context, ?int $requested = null): int
+    {
+        return self::clampTtlDays(
+            $requested ?? self::intValue($context, 'commerce.payment_links.ttl_days', 7)
+        );
+    }
+
+    public static function clampTtlDays(int $value): int
+    {
+        return max(
+            self::PAYMENT_LINK_TTL_DAYS_MIN,
+            min(self::PAYMENT_LINK_TTL_DAYS_MAX, $value)
+        );
     }
 
     public static function cartTtlDays(ApplicationContext $context): int

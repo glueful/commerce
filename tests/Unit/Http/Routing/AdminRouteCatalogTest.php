@@ -46,12 +46,56 @@ final class AdminRouteCatalogTest extends TestCase
         }
     }
 
-    public function testEntryCountIs115(): void
+    public function testEntryCountIs118(): void
     {
         // 98 (1.3.x, spec §3) + 6 Task A6 per-product read endpoints (spec §3, 1.5.0)
         // + 1 (1.6.0 per-product order activity) + 10 draft order endpoints
-        // (admin-order-creation cycle 2: 9 from Task 9, `orders.drafts.finalize` from Task 10).
-        self::assertCount(115, AdminRouteCatalog::entries());
+        // (admin-order-creation cycle 2: 9 from Task 9, `orders.drafts.finalize` from Task 10)
+        // + 3 payment-link endpoints (payment-links Task 8, design spec §2.2).
+        self::assertCount(118, AdminRouteCatalog::entries());
+    }
+
+    /**
+     * Payment-links Task 8 (design spec §2.2 "Catalog entries (manage mode)"):
+     * the three entries, all `manage` -- INCLUDING `show`. That is a deliberate
+     * departure from this catalog's read=view convention: a link's state,
+     * expiry, and provider-session exposure are payment-custody facts about how
+     * an order may be paid, not ordinary order reading, and the spec pins the
+     * whole trio to manage mode. There is exactly ONE HTTP owner of
+     * mint/revoke/status, so an embedding host mounts these keys rather than
+     * redeclaring the method/path pairs.
+     */
+    public function testThePaymentLinkEntriesAreTheThreeDeclaredManageModeOnes(): void
+    {
+        $byKey = [];
+        foreach (AdminRouteCatalog::entries() as $entry) {
+            $byKey[$entry->key] = $entry;
+        }
+
+        $expected = [
+            'orders.payment_link.store' => 'POST',
+            'orders.payment_link.destroy' => 'DELETE',
+            'orders.payment_link.show' => 'GET',
+        ];
+
+        foreach ($expected as $key => $method) {
+            self::assertArrayHasKey($key, $byKey, $key);
+            self::assertSame($method, $byKey[$key]->method, $key);
+            self::assertSame('/orders/{uuid}/payment-link', $byKey[$key]->path, $key);
+            self::assertSame('manage', $byKey[$key]->mode, $key);
+            self::assertSame('orders', $byKey[$key]->domain, $key);
+            self::assertSame(
+                'Glueful\\Extensions\\Commerce\\Http\\Admin\\AdminOrderPaymentLinkController',
+                $byKey[$key]->controller,
+                $key,
+            );
+        }
+
+        $paymentLinkKeys = array_values(array_filter(
+            array_keys($byKey),
+            static fn (string $key): bool => str_contains($key, 'payment_link'),
+        ));
+        self::assertSame(array_keys($expected), $paymentLinkKeys, 'no unpinned payment-link entry may exist');
     }
 
     public function testRestrictedProfileRejectsAnEmptyAllowlist(): void

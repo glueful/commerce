@@ -1,0 +1,35 @@
+[
+    {
+        "method": "POST",
+        "path": "/commerce/admin/orders/{uuid}/payment-link",
+        "controller": "Glueful\\Extensions\\Commerce\\Http\\Admin\\AdminOrderPaymentLinkController",
+        "action": "store",
+        "middleware": [
+            "auth",
+            "require_scope:commerce:write"
+        ],
+        "name": null
+    },
+    {
+        "method": "DELETE",
+        "path": "/commerce/admin/orders/{uuid}/payment-link",
+        "controller": "Glueful\\Extensions\\Commerce\\Http\\Admin\\AdminOrderPaymentLinkController",
+        "action": "destroy",
+        "middleware": [
+            "auth",
+            "require_scope:commerce:write"
+        ],
+        "name": null
+    },
+    {
+        "method": "GET",
+        "path": "/commerce/admin/orders/{uuid}/payment-link",
+        "controller": "Glueful\\Extensions\\Commerce\\Http\\Admin\\AdminOrderPaymentLinkController",
+        "action": "show",
+        "middleware": [
+            "auth",
+            "require_scope:commerce:write"
+        ],
+        "name": null
+    }
+]

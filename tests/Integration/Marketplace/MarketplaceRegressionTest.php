@@ -227,7 +227,10 @@ final class MarketplaceRegressionTest extends CommerceTestCase
      * additive to the non-marketplace surface and mounted through the SAME
      * `AdminRouteCatalog` (never inside a marketplace-gated group), so the
      * property this test actually guards -- master switch off means zero
-     * marketplace/seller routes -- is untouched.
+     * marketplace/seller routes -- is untouched. Updated once more for
+     * payment-links Task 8: +3 `/commerce/admin/orders/{uuid}/payment-link`
+     * endpoints (POST/DELETE/GET), again purely additive through the SAME
+     * catalog and again unrelated to the marketplace flag.
      *
      * @var list<string>
      */
@@ -243,6 +246,7 @@ final class MarketplaceRegressionTest extends CommerceTestCase
         'DELETE /commerce/admin/grants/{uuid}/refund-access-override',
         'DELETE /commerce/admin/media/{uuid}',
         'DELETE /commerce/admin/orders/drafts/{uuid}/lines/{lineUuid}',
+        'DELETE /commerce/admin/orders/{uuid}/payment-link',
         'DELETE /commerce/admin/products/{uuid}',
         'DELETE /commerce/admin/reviews/{uuid}',
         'DELETE /commerce/admin/shipping/classes/{uuid}',
@@ -268,6 +272,7 @@ final class MarketplaceRegressionTest extends CommerceTestCase
         'GET /commerce/admin/orders/{uuid}',
         'GET /commerce/admin/orders/{uuid}/invoice-data',
         'GET /commerce/admin/orders/{uuid}/notes',
+        'GET /commerce/admin/orders/{uuid}/payment-link',
         'GET /commerce/admin/orders/{uuid}/refunds',
         'GET /commerce/admin/products',
         'GET /commerce/admin/products/{uuid}',
@@ -342,6 +347,7 @@ final class MarketplaceRegressionTest extends CommerceTestCase
         'POST /commerce/admin/orders/{uuid}/fulfill',
         'POST /commerce/admin/orders/{uuid}/mark-paid',
         'POST /commerce/admin/orders/{uuid}/notes',
+        'POST /commerce/admin/orders/{uuid}/payment-link',
         'POST /commerce/admin/orders/{uuid}/refunds',
         'POST /commerce/admin/products',
         'POST /commerce/admin/products/bulk-status',
@@ -392,7 +398,7 @@ final class MarketplaceRegressionTest extends CommerceTestCase
         sort($manifest);
 
         self::assertSame(self::PRE_MV1_ROUTE_MANIFEST, $manifest);
-        self::assertCount(143, $manifest);
+        self::assertCount(146, $manifest);
 
         foreach ($manifest as $route) {
             self::assertDoesNotMatchRegularExpression('#^\S+ /commerce/admin/marketplace#', $route);

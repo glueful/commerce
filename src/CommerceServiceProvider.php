@@ -34,6 +34,8 @@ use Glueful\Extensions\Commerce\Cart\CartPruner;
 use Glueful\Extensions\Commerce\Cart\CartRepository;
 use Glueful\Extensions\Commerce\Cart\CartService;
 use Glueful\Extensions\Commerce\Contracts\OrderPaymentReturnUrlProvider;
+use Glueful\Extensions\Commerce\Contracts\PaymentLinkPublicUrlProvider;
+use Glueful\Extensions\Commerce\Contracts\PaymentLinkReturnUrlProvider;
 use Glueful\Extensions\Commerce\Contracts\ShippingRateProvider;
 use Glueful\Extensions\Commerce\Contracts\TaxCalculator;
 use Glueful\Extensions\Commerce\Customers\AddressBookRepository;
@@ -61,6 +63,7 @@ use Glueful\Extensions\Commerce\Http\Admin\AdminMarketplaceFinancialController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminMediaController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminOrderController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminOrderDraftController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminOrderPaymentLinkController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminPayoutController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminProductController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminRefundController;
@@ -162,6 +165,11 @@ use Glueful\Extensions\Commerce\Orders\ExpiryService;
 use Glueful\Extensions\Commerce\Orders\OrderFulfillmentService;
 use Glueful\Extensions\Commerce\Orders\OrderPaymentService;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
+use Glueful\Extensions\Commerce\Orders\PaymentLinkRepository;
+use Glueful\Extensions\Commerce\Orders\PaymentLinkService;
+use Glueful\Extensions\Commerce\Orders\PaymentSessionExposureGuard;
+use Glueful\Extensions\Commerce\Orders\UnavailablePaymentLinkPublicUrlProvider;
+use Glueful\Extensions\Commerce\Orders\UnavailablePaymentLinkReturnUrlProvider;
 use Glueful\Extensions\Commerce\Orders\PurchasableLineResolver;
 use Glueful\Extensions\Commerce\Orders\Refunds\RefundRepository;
 use Glueful\Extensions\Commerce\Orders\Refunds\RefundService;
@@ -692,6 +700,49 @@ final class CommerceServiceProvider extends ServiceProvider
                 'class' => DraftAttemptRepository::class,
                 'shared' => true,
             ],
+            // Payment-links Task 5 (design spec §2.2): row mechanics for
+            // `commerce_payment_links`. Stateless and dependency-free -- the
+            // clock is an explicit parameter on every method, never injected.
+            PaymentLinkRepository::class => [
+                'class' => PaymentLinkRepository::class,
+                'shared' => true,
+            ],
+            // Payment-links Task 8 (design spec §2.2): THE authority every
+            // non-draft cancellation path consults. Two stateless collaborators
+            // and no config, so a plain autowired binding is exactly right --
+            // and both cancellation authorities default-construct one anyway, so
+            // this binding is a convenience for hosts, never the thing that
+            // makes the policy apply.
+            PaymentSessionExposureGuard::class => [
+                'class' => PaymentSessionExposureGuard::class,
+                'shared' => true,
+                'autowire' => true,
+            ],
+            // Payment-links Task 6 (design spec §2.2): the mint/revoke/resolve
+            // authority, plus the two host seams it and Task 7 speak through.
+            //
+            // Unlike `OrderPaymentReturnUrlProvider::class` -- which Commerce
+            // deliberately leaves UNBOUND, because an absent order-return URL
+            // degrades gracefully -- both payment-link seams are bound to an
+            // engine-owned UNAVAILABLE implementation. A payment link with no
+            // public address, or a payment session with no return route, must
+            // fail EXPLICITLY and typed rather than fall back to a guessed
+            // origin or a gateway-global callback. Binding a default is also
+            // what lets a generic host compile and resolve the service at all.
+            // A host with a real surface (Thallo) rebinds these ids; its own
+            // definition wins outright.
+            PaymentLinkPublicUrlProvider::class => [
+                'class' => UnavailablePaymentLinkPublicUrlProvider::class,
+                'shared' => true,
+            ],
+            PaymentLinkReturnUrlProvider::class => [
+                'class' => UnavailablePaymentLinkReturnUrlProvider::class,
+                'shared' => true,
+            ],
+            PaymentLinkService::class => [
+                'factory' => [self::class, 'makePaymentLinkService'],
+                'shared' => true,
+            ],
             DraftFinalizationService::class => [
                 'factory' => [self::class, 'makeDraftFinalizationService'],
                 'shared' => true,
@@ -747,6 +798,12 @@ final class CommerceServiceProvider extends ServiceProvider
             ],
             AdminOrderDraftController::class => [
                 'factory' => [self::class, 'makeAdminOrderDraftController'],
+                'shared' => true,
+            ],
+            // Payment-links Task 8 (design spec §2.2): the ONE HTTP owner of
+            // mint/revoke/status.
+            AdminOrderPaymentLinkController::class => [
+                'factory' => [self::class, 'makeAdminOrderPaymentLinkController'],
                 'shared' => true,
             ],
             AdminRefundController::class => [
@@ -1194,6 +1251,61 @@ final class CommerceServiceProvider extends ServiceProvider
     }
 
     /**
+     * Payment-links Task 6 (design spec §2.2). The public-URL seam is soft-resolved
+     * through the SAME guarded idiom as {@see self::makeOrderPaymentReturnUrlProvider()}
+     * even though Commerce binds a default for it: a host that rebinds the id to
+     * something that is not a {@see PaymentLinkPublicUrlProvider}, or a container
+     * assembled without the engine's own definitions (the test harnesses), must
+     * still produce a working service that answers `public_url_unavailable`
+     * rather than a container error at boot.
+     */
+    public static function makePaymentLinkService(ContainerInterface $container): PaymentLinkService
+    {
+        return new PaymentLinkService(
+            $container->get(OrderRepository::class),
+            $container->get(PaymentLinkRepository::class),
+            self::tenantResolver($container),
+            self::makePaymentLinkPublicUrlProvider($container),
+            self::makePaymentCollector($container),
+            self::makePaymentLinkReturnUrlProvider($container)
+        );
+    }
+
+    public static function makePaymentLinkPublicUrlProvider(
+        ContainerInterface $container
+    ): ?PaymentLinkPublicUrlProvider {
+        if (!$container->has(PaymentLinkPublicUrlProvider::class)) {
+            return null;
+        }
+
+        $provider = $container->get(PaymentLinkPublicUrlProvider::class);
+
+        return $provider instanceof PaymentLinkPublicUrlProvider ? $provider : null;
+    }
+
+    /**
+     * Payment-links Task 7 (design spec §2.2): the return-URL seam, soft-resolved
+     * through the SAME guarded idiom as {@see self::makePaymentLinkPublicUrlProvider()}.
+     * A host that rebinds the id to something that is not a
+     * {@see PaymentLinkReturnUrlProvider}, and a container assembled without the
+     * engine's own definitions, both land on null -- which
+     * {@see PaymentLinkService::initiateByToken()} treats identically to the
+     * engine's bound {@see UnavailablePaymentLinkReturnUrlProvider}: a typed
+     * `return_url_unavailable`, never a fallback redirect.
+     */
+    public static function makePaymentLinkReturnUrlProvider(
+        ContainerInterface $container
+    ): ?PaymentLinkReturnUrlProvider {
+        if (!$container->has(PaymentLinkReturnUrlProvider::class)) {
+            return null;
+        }
+
+        $provider = $container->get(PaymentLinkReturnUrlProvider::class);
+
+        return $provider instanceof PaymentLinkReturnUrlProvider ? $provider : null;
+    }
+
+    /**
      * Soft-resolved, same pattern as {@see self::makeCheckoutAttemptAuthority()}: Commerce never
      * binds an {@see OrderPaymentReturnUrlProvider} itself — a host-bound provider is used when
      * present, otherwise `CheckoutService` gets null and payables carry no return-URL metadata.
@@ -1385,7 +1497,12 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(StockRepository::class),
             self::tenantResolver($container),
             $container->get(SellerOrderRepository::class),
-            $container->get(SellerWebhookOutboxPublisher::class)
+            $container->get(SellerWebhookOutboxPublisher::class),
+            // Payment-links Task 8 (design spec §2.2): the sweep's own copy of
+            // THE cancellation authority, plus the link repository its candidate
+            // prefilters and its lapsed-link sweep speak through.
+            $container->get(PaymentSessionExposureGuard::class),
+            $container->get(PaymentLinkRepository::class)
         );
     }
 
@@ -1597,7 +1714,31 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(SellerIdentityProvider::class),
             $container->get(SellerOrderRepository::class),
             $container->get(SellerOrderFulfillmentService::class),
-            $container->get(SellerWebhookOutboxPublisher::class)
+            $container->get(SellerWebhookOutboxPublisher::class),
+            // Positions 11-12 keep their own in-constructor defaults; the
+            // exposure guard (position 13, payment-links Task 8) is passed
+            // explicitly so the container's shared instance is the one the
+            // operator cancel path uses.
+            exposure: $container->get(PaymentSessionExposureGuard::class)
+        );
+    }
+
+    /**
+     * Payment-links Task 8 (design spec §2.2). `PaymentLinkService` is passed
+     * NULL here on purpose: the controller resolves it lazily on first use, so
+     * an install with no payment gateway and no public-URL provider can still
+     * construct (and mount) this controller and answer an honest typed refusal,
+     * rather than failing at container-build time.
+     */
+    public static function makeAdminOrderPaymentLinkController(
+        ContainerInterface $container
+    ): AdminOrderPaymentLinkController {
+        return new AdminOrderPaymentLinkController(
+            $container->get(ApplicationContext::class),
+            null,
+            $container->get(OrderRepository::class),
+            self::tenantResolver($container),
+            $container->get(PaymentSessionExposureGuard::class)
         );
     }
 

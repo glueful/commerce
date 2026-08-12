@@ -53,6 +53,27 @@ return [
         'draft_ttl_days' => (int) env('COMMERCE_ORDER_DRAFT_TTL_DAYS', 30),
     ],
 
+    // Payment links (payment-links spec §2.2).
+    'payment_links' => [
+        // How many checkout initiations ONE link may claim inside a FIXED UTC
+        // one-hour window. Per-link, not per-order or per-tenant: what is being
+        // protected is the payment provider from a single shared URL being
+        // hammered, and the customer from a wall of abandoned sessions. Clamped
+        // to 1..100 on read ({@see \Glueful\Extensions\Commerce\Support\CommerceSettings::paymentLinkInitiationsPerHour()})
+        // -- 0 would make every link permanently unusable and an unbounded value
+        // would make the ceiling meaningless, so neither is honoured.
+        'initiations_per_hour' => (int) env('COMMERCE_PAYMENT_LINK_INITIATIONS_PER_HOUR', 10),
+
+        // How long a freshly minted link stays valid, in days, when the operator
+        // does not choose a TTL for that link. Clamped to 1..30 on read
+        // ({@see \Glueful\Extensions\Commerce\Support\CommerceSettings::paymentLinkTtlDays()})
+        // -- 0 would mint a link that is already expired by the time it is sent,
+        // and an unbounded value would make a bearer credential effectively
+        // permanent. The SAME clamp applies to an explicitly requested per-link
+        // TTL, so there is exactly one definition of the range.
+        'ttl_days' => (int) env('COMMERCE_PAYMENT_LINK_TTL_DAYS', 7),
+    ],
+
     'tenancy' => [
         'enabled' => (bool) env('COMMERCE_TENANCY_ENABLED', false),
     ],

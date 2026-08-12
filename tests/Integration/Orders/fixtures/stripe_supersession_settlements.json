@@ -1,0 +1,69 @@
+{
+    "_note": "Two real-shaped Stripe checkout.session.completed events for ONE payable: the SUPERSEDED session payvia retired (payment-links Task 2's ensure-live renewal) and the CURRENT one that replaced it. Commerce Task 8 uses them to prove that a late settlement for the retired session is refused by the already-paid order CAS. Identifiers are test-mode placeholders; no live provider data is stored here.",
+    "superseded": {
+        "id": "evt_3PxSupersededA1B2C3",
+        "object": "event",
+        "api_version": "2024-06-20",
+        "created": 1786514400,
+        "livemode": false,
+        "pending_webhooks": 0,
+        "type": "checkout.session.completed",
+        "request": {
+            "id": null,
+            "idempotency_key": "payvia-init-attempt-superseded-1"
+        },
+        "data": {
+            "object": {
+                "id": "cs_test_a1SupersededSessionRef0001",
+                "object": "checkout.session",
+                "amount_subtotal": 1000,
+                "amount_total": 1000,
+                "currency": "usd",
+                "livemode": false,
+                "mode": "payment",
+                "payment_intent": "pi_3PxSupersededAttempt0001",
+                "payment_status": "paid",
+                "status": "complete",
+                "client_reference_id": "termorder001",
+                "expires_at": 1786600800,
+                "metadata": {
+                    "link_uuid": "termlink0008"
+                },
+                "url": null
+            }
+        }
+    },
+    "current": {
+        "id": "evt_3PxCurrentD4E5F6",
+        "object": "event",
+        "api_version": "2024-06-20",
+        "created": 1786518000,
+        "livemode": false,
+        "pending_webhooks": 0,
+        "type": "checkout.session.completed",
+        "request": {
+            "id": null,
+            "idempotency_key": "payvia-init-attempt-current-2"
+        },
+        "data": {
+            "object": {
+                "id": "cs_test_b2CurrentSessionRef00000002",
+                "object": "checkout.session",
+                "amount_subtotal": 1000,
+                "amount_total": 1000,
+                "currency": "usd",
+                "livemode": false,
+                "mode": "payment",
+                "payment_intent": "pi_3PxCurrentAttempt00000002",
+                "payment_status": "paid",
+                "status": "complete",
+                "client_reference_id": "termorder001",
+                "expires_at": 1786604400,
+                "metadata": {
+                    "link_uuid": "termlink0008"
+                },
+                "url": null
+            }
+        }
+    }
+}

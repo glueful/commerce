@@ -415,8 +415,10 @@ final class CatalogBreadthTenancyTest extends CommerceTestCase
         // and the two wishlist tables (`commerce_wishlists`,
         // `commerce_wishlist_items`) added in migration 020, and the
         // `commerce_order_draft_attempts` finalize-idempotency ledger added in
-        // migration 022, admin-order-creation cycle 2 Task 6), so a future
-        // accidental removal/addition is caught here as well as locally.
+        // migration 022, admin-order-creation cycle 2 Task 6, and the
+        // `commerce_payment_links` hashed payment-link custody table added in
+        // migration 023, payment-links Task 5), so a future accidental
+        // removal/addition is caught here as well as locally.
         self::assertSame([
             'commerce_products',
             'commerce_variants',
@@ -426,6 +428,7 @@ final class CatalogBreadthTenancyTest extends CommerceTestCase
             'commerce_orders',
             'commerce_refunds',
             'commerce_order_draft_attempts',
+            'commerce_payment_links',
             'commerce_sequences',
             'commerce_discounts',
             'commerce_discount_redemptions',
