@@ -111,6 +111,11 @@ final class AdminOrderCancelGuardTest extends CommerceTestCase
      * The acknowledgement must be an explicit truth, not any old truthy body
      * value -- and never the mere PRESENCE of the key.
      *
+     * The accepted set is exactly `filter_var(..., FILTER_VALIDATE_BOOL,
+     * FILTER_NULL_ON_FAILURE) === true` -- pinned in BOTH directions by this
+     * test and its sibling below, so the contract is the list, not the
+     * implementation detail that happens to produce it.
+     *
      * @dataProvider nonAcknowledgements
      */
     public function testOnlyAnExplicitTrueCountsAsAnAcknowledgement(mixed $value): void
@@ -134,8 +139,14 @@ final class AdminOrderCancelGuardTest extends CommerceTestCase
             'false' => [false],
             'null' => [null],
             'zero' => [0],
+            'zero string' => ['0'],
             'empty string' => [''],
             'the string false' => ['false'],
+            'off' => ['off'],
+            'no' => ['no'],
+            'an unrelated word' => ['maybe'],
+            'a number that is not one' => [2],
+            'an array' => [['yes']],
         ];
     }
 
@@ -153,13 +164,23 @@ final class AdminOrderCancelGuardTest extends CommerceTestCase
         self::assertSame(200, $response->getStatusCode());
     }
 
-    /** @return array<string, array{mixed}> */
+    /**
+     * The COMPLETE accepted set -- the contract Thallo's admin SPA and any other
+     * client may rely on. A JSON client sends `true`; a form-encoded one has no
+     * booleans and sends one of the strings.
+     *
+     * @return array<string, array{mixed}>
+     */
     public static function acknowledgements(): array
     {
         return [
             'boolean true' => [true],
+            'integer one' => [1],
             'string true' => ['true'],
+            'string TRUE' => ['TRUE'],
             'string one' => ['1'],
+            'string on' => ['on'],
+            'string yes' => ['yes'],
         ];
     }
 

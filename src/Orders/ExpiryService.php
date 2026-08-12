@@ -99,8 +99,15 @@ final class ExpiryService
     {
         $tenant = $this->tenants->tenantUuid($context);
         $moment = ($now ?? new \DateTimeImmutable('now'))->setTimezone(new \DateTimeZone('UTC'));
-        $cutoff = $moment->modify('-' . CommerceSettings::orderExpiryMinutes($context) . ' minutes')
-            ->format('Y-m-d H:i:s');
+        // `max(0, ...)`: a nonsensical NEGATIVE `commerce.orders.expiry_minutes`
+        // override would otherwise compose a `--5 minutes` expression, which
+        // `DateTimeImmutable::modify()` rejects with a
+        // `DateMalformedStringException` -- an unrelated config typo taking the
+        // whole cron sweep down. Clamped to zero, the worst a bad override can
+        // do is sweep nothing (the cutoff becomes `now`, and `placed_at < now`
+        // still admits genuinely stale orders) rather than throw.
+        $minutes = max(0, CommerceSettings::orderExpiryMinutes($context));
+        $cutoff = $moment->modify("-{$minutes} minutes")->format('Y-m-d H:i:s');
 
         // Draft isolation (admin-order-creation cycle 2, Task 8): this sweep is
         // pinned to `pending_payment` -- an exact-match ALLOWLIST that is

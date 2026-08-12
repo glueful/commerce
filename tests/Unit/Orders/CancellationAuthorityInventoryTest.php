@@ -101,6 +101,46 @@ final class CancellationAuthorityInventoryTest extends TestCase
         }
     }
 
+    /**
+     * The SECOND ratchet (fix round 1, minor 2): the set of sites that RELEASE a
+     * stock reservation.
+     *
+     * Cancelling an order and releasing its reservation are two halves of one
+     * act, and the guard protects the order half. A future path that gave the
+     * stock back WITHOUT a `canceled` transition -- an "unreserve" endpoint, a
+     * partial release, a compensating job -- would slip past the cancellation
+     * scan above while doing the exact damage the guard exists to prevent:
+     * handing a payer's reserved goods to somebody else while their checkout
+     * session is still live. Pinning the release sites means such a path has to
+     * be looked at.
+     *
+     * Both current sites are the two guarded authorities, so the sets coincide
+     * today; the assertion is that they KEEP coinciding.
+     */
+    public function testTheSetOfStockReleaseSitesIsExactlyTheGuardedCancellationAuthorities(): void
+    {
+        $found = [];
+        foreach ($this->sourceFiles() as $absolute) {
+            if (!str_contains((string) file_get_contents($absolute), "'release'")) {
+                continue;
+            }
+
+            $found[] = str_replace($this->srcRoot() . '/', '', $absolute);
+        }
+        sort($found);
+
+        self::assertSame(
+            ['Http/Admin/AdminOrderController.php', 'Orders/ExpiryService.php'],
+            $found,
+            'a new stock-release site appeared: it must consult PaymentSessionExposureGuard '
+            . 'before giving a reservation back, and be pinned here',
+        );
+
+        foreach ($found as $relative) {
+            self::assertStringContainsString('PaymentSessionExposureGuard', $this->source($relative), $relative);
+        }
+    }
+
     public function testTheGuardPublishesTheAcknowledgementVocabularyTheSpecPins(): void
     {
         self::assertSame('accept_late_payment_risk', PaymentSessionExposureGuard::ACKNOWLEDGEMENT_FIELD);

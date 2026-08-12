@@ -190,10 +190,33 @@ final class AdminOrderPaymentLinkController
      * this order, and whether cancelling it will require accepting the
      * late-payment risk.
      *
-     * The guard is consulted here as an OBSERVATION, on an unlocked row: this
-     * action authorizes nothing, and taking an order lock for a status poll
-     * would hand every admin refresh a contention lever. The cancellation
-     * authorities re-decide under their own locks.
+     * ## Entirely LOCK-FREE (fix round 1, Important 1)
+     *
+     * Every read on this path is non-locking: the order read here,
+     * {@see PaymentLinkService::currentLink()}, and the guard's own
+     * `guardRelevantLinks()`. None of them opens a transaction and none of them
+     * emits `FOR UPDATE`. That is a requirement, not a coincidence -- an
+     * operator page may poll this on every refresh, and `FOR UPDATE` reads on
+     * the order and link rows would put a status poll in direct contention with
+     * initiation Phase A/B and mint/revoke, i.e. a read that authorizes nothing
+     * could stall a payment. `AdminOrderPaymentLinkEndpointTest` pins that no
+     * locking repository method is reachable from here.
+     *
+     * The price is honest and documented at each seam: what this action returns
+     * is a READ-TIME OBSERVATION, never authority. The cancellation authorities
+     * and initiation all re-read and re-decide under their own locks.
+     *
+     * ## A DRAFT answers 200 `{link: null}`, and that is deliberate
+     *
+     * {@see self::store()} refuses a draft with 409 `order_not_pending_payment`
+     * while this action answers it normally. The two are not in disagreement:
+     * "you may not mint a link for a draft" and "this draft has no link" are
+     * both true, and both are the useful answer to their own question. Drafts
+     * are link-less BY CONSTRUCTION (mint is the only writer and it refuses
+     * them), so `{link: null, exposure: none}` is not a guess -- it is the only
+     * state a draft can be in, and a status card that 409'd here would have to
+     * special-case a row it can simply render. Pinned by a test so the asymmetry
+     * stays contract rather than accident.
      */
     #[ApiOperation(summary: "Get an order's payment link state", tags: ['Commerce Admin'])]
     #[ApiResponse(200, description: 'Payment link state retrieved')]

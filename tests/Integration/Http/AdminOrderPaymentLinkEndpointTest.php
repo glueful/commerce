@@ -330,6 +330,66 @@ final class AdminOrderPaymentLinkEndpointTest extends CommerceTestCase
         self::assertSame(404, $this->controller()->show($this->request([]), 'plctlnosuch1')->getStatusCode());
     }
 
+    /**
+     * DELIBERATE ASYMMETRY (fix round 1, minor 6): `store()` refuses a draft
+     * with 409 while `show()` answers it normally. Both are true -- "you may not
+     * mint a link for a draft" and "this draft has no link" -- and drafts are
+     * link-less BY CONSTRUCTION, so `{link: null, exposure: none}` is the only
+     * state a draft can be in rather than a guess. Pinned so the disagreement
+     * stays contract rather than accident.
+     */
+    public function testShowOnADraftIsAnHonestEmptyStateRatherThanTheStoreConflict(): void
+    {
+        $this->seedOrder(status: 'draft');
+
+        $response = $this->controller()->show($this->request([]), self::ORDER);
+        $body = $this->json($response);
+
+        self::assertSame(200, $response->getStatusCode());
+        self::assertNull($body['data']['link']);
+        self::assertSame(PaymentSessionExposureDecision::REASON_NONE, $body['data']['exposure']['reason']);
+        self::assertFalse($body['data']['exposure']['blocks_automatic_cancellation']);
+
+        // ... while minting for the same row is still the honest 409.
+        self::assertSame(409, $this->controller()->store($this->request([]), self::ORDER)->getStatusCode());
+    }
+
+    /**
+     * LOCK-FREE STATUS READS (fix round 1, Important 1).
+     *
+     * A status poll must never take `FOR UPDATE` on the order or link rows: an
+     * operator page may run it on every refresh, and those are exactly the rows
+     * initiation Phase A/B and mint/revoke serialize on -- a read that
+     * authorizes nothing must not be able to stall a payment.
+     *
+     * Pinned at the CALL SURFACE by reading the bodies of the two methods `show`
+     * reaches, because the locking is invisible from outside on the default
+     * SQLite lane (`PaymentLinkRepository::lockClause()` emits `FOR UPDATE` only
+     * for pgsql/mysql, so a SQL-text assertion would pass vacuously here), and
+     * both repositories are `final`, so a recording double is not available. The
+     * method bodies are the honest place to assert it: `*ForUpdate(` absent,
+     * the non-locking variants present, no transaction opened.
+     */
+    public function testTheStatusReadPathTakesNoRowLocksAndOpensNoTransaction(): void
+    {
+        $currentLink = $this->methodBody(PaymentLinkService::class, 'currentLink');
+
+        self::assertStringNotContainsString('ForUpdate(', $currentLink, 'a status poll must not lock rows');
+        self::assertStringNotContainsString('transaction(', $currentLink);
+        self::assertStringContainsString('findByUuid(', $currentLink);
+        self::assertStringContainsString('findActiveForOrder(', $currentLink);
+
+        // The guard's own read is the third leg of the same path.
+        $decide = $this->methodBody(PaymentSessionExposureGuard::class, 'decide');
+        self::assertStringNotContainsString('ForUpdate(', $decide);
+        self::assertStringNotContainsString('transaction(', $decide);
+
+        // And the controller action itself reads the order without a lock.
+        $show = $this->methodBody(AdminOrderPaymentLinkController::class, 'show');
+        self::assertStringNotContainsString('ForUpdate(', $show);
+        self::assertStringContainsString('findByUuid(', $show);
+    }
+
     // =====================================================================
     // The unknown-throwable contract
     // =====================================================================
@@ -450,6 +510,17 @@ final class AdminOrderPaymentLinkEndpointTest extends CommerceTestCase
                 return ($this->compose)($rawToken);
             }
         };
+    }
+
+    /** The source of ONE method, so a ratchet pins that method rather than a whole file. */
+    private function methodBody(string $class, string $method): string
+    {
+        $reflected = new \ReflectionMethod($class, $method);
+        $file = (string) $reflected->getFileName();
+        $lines = (array) file($file);
+        $start = (int) $reflected->getStartLine() - 1;
+
+        return implode('', array_slice($lines, $start, (int) $reflected->getEndLine() - $start));
     }
 
     /** The no-database harness: every db() call inside becomes an infrastructure throwable. */

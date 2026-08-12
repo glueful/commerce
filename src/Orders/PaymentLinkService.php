@@ -539,9 +539,9 @@ final class PaymentLinkService
 
     /**
      * The order's CURRENT link, as a closed {@see PaymentLinkAdminView} -- the
-     * TOKEN-FREE status read behind the `orders.payment_link.show` catalog entry
-     * (payment-links Task 8, design spec §2.2: "`show` returns state/expiry/
-     * exposure only -- never token or hash").
+     * TOKEN-FREE, LOCK-FREE status read behind the `orders.payment_link.show`
+     * catalog entry (payment-links Task 8, design spec §2.2: "`show` returns
+     * state/expiry/exposure only -- never token or hash").
      *
      * The sibling of {@see self::matchCurrentToken()} for a caller that holds NO
      * token and must not need one: an operator surface asking "does this order
@@ -552,13 +552,32 @@ final class PaymentLinkService
      * one-time URL hand-off it holds no token at all -- this is how its admin
      * card stays truthful anyway.
      *
-     * Same transaction, same lock order (ORDER, then link) and the same lazy
-     * terminal transitions as every other read that publishes a link's state, so
-     * an operator is never shown a status the payer's own page would contradict.
+     * ## NO LOCKS, and that is the point (fix round 1, Important 1)
+     *
+     * This method deliberately uses the NON-LOCKING {@see OrderRepository::findByUuid()}
+     * and {@see PaymentLinkRepository::findActiveForOrder()}, and opens no
+     * transaction. Its only caller is a status POLL an operator page may run on
+     * every refresh, and `FOR UPDATE` reads on the order and link rows would put
+     * that poll in direct contention with the two paths that actually need those
+     * locks -- initiation Phase A/B and mint/revoke. A read that authorizes
+     * nothing must not be able to stall a payment.
+     *
+     * The consequence is the SAME honest caveat {@see self::resolveByToken()}
+     * carries: the returned status is a READ-TIME OBSERVATION, not a guarantee
+     * about the row. The lazy transitions below are compare-and-set on `active`,
+     * so they are safe -- they cannot resurrect a terminal link or overwrite
+     * another terminal state's stamp -- but they can LOSE to a concurrent revoke
+     * committing between the read and the CAS. No caller may treat this return
+     * value as authority for a payment or cancellation decision: the authorities
+     * ({@see PaymentSessionExposureGuard}'s callers, and initiation) all re-read
+     * under their own locks.
      *
      * `null` means "no active link" (never minted, or the current one was
      * revoked) -- never "no such order": an unknown or cross-tenant order is the
-     * same typed `order_not_found` every other method here raises.
+     * same typed `order_not_found` every other method here raises. A DRAFT is
+     * deliberately answered rather than refused (see the note on
+     * {@see \Glueful\Extensions\Commerce\Http\Admin\AdminOrderPaymentLinkController::show()}):
+     * drafts are link-less by construction, so the honest answer is "no link".
      *
      * @throws PaymentLinkException `order_not_found` (404)
      */
@@ -570,27 +589,23 @@ final class PaymentLinkService
     ): ?PaymentLinkAdminView {
         $moment = self::moment($now);
 
-        return db($context)->transaction(
-            function () use ($context, $tenant, $orderUuid, $moment): ?PaymentLinkAdminView {
-                // ORDER first, then link. Drafts are included so an ineligible
-                // draft answers "no link" rather than a misleading 404.
-                $order = $this->orders->findByUuidForUpdate($context, $tenant, $orderUuid, includeDrafts: true);
-                if ($order === null) {
-                    throw PaymentLinkException::orderNotFound();
-                }
+        // Drafts are included so an ineligible draft answers "no link" rather
+        // than a misleading 404.
+        $order = $this->orders->findByUuid($context, $tenant, $orderUuid, includeDrafts: true);
+        if ($order === null) {
+            throw PaymentLinkException::orderNotFound();
+        }
 
-                $link = $this->links->findActiveForOrderForUpdate($context, $tenant, $orderUuid);
-                if ($link === null) {
-                    return null;
-                }
+        $link = $this->links->findActiveForOrder($context, $tenant, $orderUuid);
+        if ($link === null) {
+            return null;
+        }
 
-                return new PaymentLinkAdminView(
-                    linkUuid: (string) $link['uuid'],
-                    status: $this->applyLazyTransitions($context, $tenant, $link, $order, $moment),
-                    expiresAt: self::normalizeStamp((string) $link['expires_at']),
-                    providerSessionIssued: $link['provider_session_issued_at'] !== null,
-                );
-            }
+        return new PaymentLinkAdminView(
+            linkUuid: (string) $link['uuid'],
+            status: $this->applyLazyTransitions($context, $tenant, $link, $order, $moment),
+            expiresAt: self::normalizeStamp((string) $link['expires_at']),
+            providerSessionIssued: $link['provider_session_issued_at'] !== null,
         );
     }
 

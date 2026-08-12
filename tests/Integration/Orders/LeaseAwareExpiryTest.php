@@ -238,6 +238,28 @@ final class LeaseAwareExpiryTest extends CommerceTestCase
             ->first()['reason']);
     }
 
+    /**
+     * The EXACT boundary (fix round 1, minor 4). The cutoff predicate is
+     * EXCLUSIVE (`placed_at < cutoff`), so an order placed at precisely the
+     * cutoff instant survives this tick and is swept by the next one. Pinned
+     * because "60 minutes" is a promise about a boundary, and an off-by-one here
+     * would cancel orders a minute early forever.
+     */
+    public function testAnOrderPlacedExactlyAtTheCutoffIsNotSwept(): void
+    {
+        // 09:00:00 minus the 60-minute default is exactly 08:00:00.
+        $this->seedStaleOrder('expordr00013', placedAt: '2026-08-11 08:00:00');
+
+        self::assertSame(0, $this->service()->expireStale($this->context, $this->at('09:00:00')));
+        self::assertSame('pending_payment', $this->statusOf('expordr00013'));
+        self::assertSame(4, $this->stock());
+
+        // One second past it, the same order is swept -- so the assertion above
+        // is about the boundary, not about the order being unsweepable.
+        self::assertSame(1, $this->service()->expireStale($this->context, $this->at('09:00:01')));
+        self::assertSame('canceled', $this->statusOf('expordr00013'));
+    }
+
     public function testAStorefrontOrderInsideTheSixtyMinuteWindowIsStillUntouched(): void
     {
         $this->seedStaleOrder('expordr00008', origin: 'storefront', placedAt: '2026-08-11 08:30:00');
