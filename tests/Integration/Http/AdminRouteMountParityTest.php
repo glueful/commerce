@@ -29,6 +29,12 @@ use Glueful\Routing\Router;
  * Task 9 contributed 9 of them; Task 10 added `orders.drafts.finalize` alongside the
  * `DraftFinalizationService` it mounts, so the catalog never named an action before it
  * existed.
+ *
+ * Payment-links Task 8 follows the SAME additive discipline once more: the three
+ * `orders.payment_link.*` endpoints live in their own fixture
+ * (`admin_route_inventory_1_11_payment_link_additions.json`), every earlier fixture stays
+ * byte-frozen, and the new total (118) is pinned on top. All three mount in `manage` mode
+ * (`require_scope:commerce:write`) -- including the status read, per design spec §2.2.
  */
 final class AdminRouteMountParityTest extends CommerceRouterTestCase
 {
@@ -37,10 +43,13 @@ final class AdminRouteMountParityTest extends CommerceRouterTestCase
     private const ADDITIONS_1_6_COUNT = 1;
     /** Admin-order-creation cycle 2: the draft order surface (9 from Task 9, finalize from Task 10). */
     private const ADDITIONS_DRAFT_COUNT = 10;
+    /** Payment-links Task 8 (design spec §2.2): mint/revoke/status, all manage mode. */
+    private const ADDITIONS_PAYMENT_LINK_COUNT = 3;
     private const TOTAL_COUNT = self::LEGACY_COUNT
         + self::ADDITIONS_COUNT
         + self::ADDITIONS_1_6_COUNT
-        + self::ADDITIONS_DRAFT_COUNT;
+        + self::ADDITIONS_DRAFT_COUNT
+        + self::ADDITIONS_PAYMENT_LINK_COUNT;
 
     public function testNativeMountEqualsLegacyInventoryPlusTaskA6Additions(): void
     {
@@ -72,7 +81,14 @@ final class AdminRouteMountParityTest extends CommerceRouterTestCase
             'cycle 2 adds exactly 10 draft order endpoints (9 from Task 9 + finalize from Task 10)',
         );
 
-        $expected = array_merge($legacy, $additions, $additions16, $draftAdditions);
+        $paymentLinkAdditions = $this->loadFixture('admin_route_inventory_1_11_payment_link_additions.json');
+        self::assertCount(
+            self::ADDITIONS_PAYMENT_LINK_COUNT,
+            $paymentLinkAdditions,
+            'payment-links Task 8 adds exactly 3 payment-link endpoints',
+        );
+
+        $expected = array_merge($legacy, $additions, $additions16, $draftAdditions, $paymentLinkAdditions);
         usort($expected, self::routeSortComparator());
         self::assertCount(self::TOTAL_COUNT, $expected);
 
@@ -82,7 +98,7 @@ final class AdminRouteMountParityTest extends CommerceRouterTestCase
             self::TOTAL_COUNT,
             $actual,
             'mounted non-marketplace admin route count drifted '
-            . '(expected 98 legacy + 6 Task A6 + 1 1.6.0 + 9 draft additions)',
+            . '(expected 98 legacy + 6 Task A6 + 1 1.6.0 + 10 draft + 3 payment-link additions)',
         );
         foreach ($expected as $i => $record) {
             self::assertSame(
@@ -124,6 +140,12 @@ final class AdminRouteMountParityTest extends CommerceRouterTestCase
         foreach ($this->loadFixture('admin_route_inventory_1_10_draft_additions.json') as $record) {
             $routeKey = $record['method'] . ' ' . $record['path'];
             self::assertArrayHasKey($routeKey, $actualByRoute, "expected draft endpoint missing: {$routeKey}");
+            self::assertSame($record, $actualByRoute[$routeKey]);
+        }
+
+        foreach ($this->loadFixture('admin_route_inventory_1_11_payment_link_additions.json') as $record) {
+            $routeKey = $record['method'] . ' ' . $record['path'];
+            self::assertArrayHasKey($routeKey, $actualByRoute, "expected payment-link endpoint missing: {$routeKey}");
             self::assertSame($record, $actualByRoute[$routeKey]);
         }
     }

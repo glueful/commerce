@@ -537,6 +537,63 @@ final class PaymentLinkService
         );
     }
 
+    /**
+     * The order's CURRENT link, as a closed {@see PaymentLinkAdminView} -- the
+     * TOKEN-FREE status read behind the `orders.payment_link.show` catalog entry
+     * (payment-links Task 8, design spec §2.2: "`show` returns state/expiry/
+     * exposure only -- never token or hash").
+     *
+     * The sibling of {@see self::matchCurrentToken()} for a caller that holds NO
+     * token and must not need one: an operator surface asking "does this order
+     * have a live link, and is a payer already inside a checkout?" is asking
+     * about the ORDER, and answering it by making the client present a bearer
+     * credential would mean that credential has to be STORED somewhere to be
+     * presented. Thallo never reads the link table directly, and after Task 12's
+     * one-time URL hand-off it holds no token at all -- this is how its admin
+     * card stays truthful anyway.
+     *
+     * Same transaction, same lock order (ORDER, then link) and the same lazy
+     * terminal transitions as every other read that publishes a link's state, so
+     * an operator is never shown a status the payer's own page would contradict.
+     *
+     * `null` means "no active link" (never minted, or the current one was
+     * revoked) -- never "no such order": an unknown or cross-tenant order is the
+     * same typed `order_not_found` every other method here raises.
+     *
+     * @throws PaymentLinkException `order_not_found` (404)
+     */
+    public function currentLink(
+        ApplicationContext $context,
+        string $tenant,
+        string $orderUuid,
+        ?\DateTimeImmutable $now = null
+    ): ?PaymentLinkAdminView {
+        $moment = self::moment($now);
+
+        return db($context)->transaction(
+            function () use ($context, $tenant, $orderUuid, $moment): ?PaymentLinkAdminView {
+                // ORDER first, then link. Drafts are included so an ineligible
+                // draft answers "no link" rather than a misleading 404.
+                $order = $this->orders->findByUuidForUpdate($context, $tenant, $orderUuid, includeDrafts: true);
+                if ($order === null) {
+                    throw PaymentLinkException::orderNotFound();
+                }
+
+                $link = $this->links->findActiveForOrderForUpdate($context, $tenant, $orderUuid);
+                if ($link === null) {
+                    return null;
+                }
+
+                return new PaymentLinkAdminView(
+                    linkUuid: (string) $link['uuid'],
+                    status: $this->applyLazyTransitions($context, $tenant, $link, $order, $moment),
+                    expiresAt: self::normalizeStamp((string) $link['expires_at']),
+                    providerSessionIssued: $link['provider_session_issued_at'] !== null,
+                );
+            }
+        );
+    }
+
     // =========================================================================
     // Initiation: two phases, with the provider call strictly between them
     // =========================================================================

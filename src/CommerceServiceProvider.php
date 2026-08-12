@@ -63,6 +63,7 @@ use Glueful\Extensions\Commerce\Http\Admin\AdminMarketplaceFinancialController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminMediaController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminOrderController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminOrderDraftController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminOrderPaymentLinkController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminPayoutController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminProductController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminRefundController;
@@ -166,6 +167,7 @@ use Glueful\Extensions\Commerce\Orders\OrderPaymentService;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
 use Glueful\Extensions\Commerce\Orders\PaymentLinkRepository;
 use Glueful\Extensions\Commerce\Orders\PaymentLinkService;
+use Glueful\Extensions\Commerce\Orders\PaymentSessionExposureGuard;
 use Glueful\Extensions\Commerce\Orders\UnavailablePaymentLinkPublicUrlProvider;
 use Glueful\Extensions\Commerce\Orders\UnavailablePaymentLinkReturnUrlProvider;
 use Glueful\Extensions\Commerce\Orders\PurchasableLineResolver;
@@ -705,6 +707,17 @@ final class CommerceServiceProvider extends ServiceProvider
                 'class' => PaymentLinkRepository::class,
                 'shared' => true,
             ],
+            // Payment-links Task 8 (design spec §2.2): THE authority every
+            // non-draft cancellation path consults. Two stateless collaborators
+            // and no config, so a plain autowired binding is exactly right --
+            // and both cancellation authorities default-construct one anyway, so
+            // this binding is a convenience for hosts, never the thing that
+            // makes the policy apply.
+            PaymentSessionExposureGuard::class => [
+                'class' => PaymentSessionExposureGuard::class,
+                'shared' => true,
+                'autowire' => true,
+            ],
             // Payment-links Task 6 (design spec §2.2): the mint/revoke/resolve
             // authority, plus the two host seams it and Task 7 speak through.
             //
@@ -785,6 +798,12 @@ final class CommerceServiceProvider extends ServiceProvider
             ],
             AdminOrderDraftController::class => [
                 'factory' => [self::class, 'makeAdminOrderDraftController'],
+                'shared' => true,
+            ],
+            // Payment-links Task 8 (design spec §2.2): the ONE HTTP owner of
+            // mint/revoke/status.
+            AdminOrderPaymentLinkController::class => [
+                'factory' => [self::class, 'makeAdminOrderPaymentLinkController'],
                 'shared' => true,
             ],
             AdminRefundController::class => [
@@ -1478,7 +1497,12 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(StockRepository::class),
             self::tenantResolver($container),
             $container->get(SellerOrderRepository::class),
-            $container->get(SellerWebhookOutboxPublisher::class)
+            $container->get(SellerWebhookOutboxPublisher::class),
+            // Payment-links Task 8 (design spec §2.2): the sweep's own copy of
+            // THE cancellation authority, plus the link repository its candidate
+            // prefilters and its lapsed-link sweep speak through.
+            $container->get(PaymentSessionExposureGuard::class),
+            $container->get(PaymentLinkRepository::class)
         );
     }
 
@@ -1690,7 +1714,31 @@ final class CommerceServiceProvider extends ServiceProvider
             $container->get(SellerIdentityProvider::class),
             $container->get(SellerOrderRepository::class),
             $container->get(SellerOrderFulfillmentService::class),
-            $container->get(SellerWebhookOutboxPublisher::class)
+            $container->get(SellerWebhookOutboxPublisher::class),
+            // Positions 11-12 keep their own in-constructor defaults; the
+            // exposure guard (position 13, payment-links Task 8) is passed
+            // explicitly so the container's shared instance is the one the
+            // operator cancel path uses.
+            exposure: $container->get(PaymentSessionExposureGuard::class)
+        );
+    }
+
+    /**
+     * Payment-links Task 8 (design spec §2.2). `PaymentLinkService` is passed
+     * NULL here on purpose: the controller resolves it lazily on first use, so
+     * an install with no payment gateway and no public-URL provider can still
+     * construct (and mount) this controller and answer an honest typed refusal,
+     * rather than failing at container-build time.
+     */
+    public static function makeAdminOrderPaymentLinkController(
+        ContainerInterface $container
+    ): AdminOrderPaymentLinkController {
+        return new AdminOrderPaymentLinkController(
+            $container->get(ApplicationContext::class),
+            null,
+            $container->get(OrderRepository::class),
+            self::tenantResolver($container),
+            $container->get(PaymentSessionExposureGuard::class)
         );
     }
 

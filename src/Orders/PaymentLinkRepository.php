@@ -439,6 +439,82 @@ SQL,
         );
     }
 
+    /**
+     * The SWEEP-SIDE complement of {@see self::guardRelevantLinks()}, as a SQL
+     * fragment a candidate query over `commerce_orders` can AND into its own
+     * WHERE clause (payment-links Task 8, design spec §2.2: the `ExpiryService`
+     * "candidate query adds prefilters for active-unexpired links AND any
+     * historical link with `provider_session_issued_at IS NOT NULL`").
+     *
+     * It lives HERE, not in `ExpiryService`, because this class owns ALL access
+     * to `commerce_payment_links` -- a sweep composing its own subquery against
+     * this table would be a second, drifting definition of "guard-relevant".
+     *
+     * TWO `NOT EXISTS` clauses rather than one with an `OR` inside: they are
+     * logically identical (`NOT (A OR B)` = `NOT A AND NOT B`) but each of these
+     * can be served by its own index -- `(tenant_uuid, order_uuid, status)` for
+     * the first and `(tenant_uuid, provider_session_issued_at, order_uuid)` for
+     * the second -- while a disjunction inside one subquery typically uses
+     * neither well.
+     *
+     * The correlation column is HARDCODED to `commerce_orders.uuid` rather than
+     * taken as a parameter: this fragment is interpolated into SQL, and an
+     * identifier parameter would be an injection surface bought for no benefit --
+     * there is exactly one candidate query in the engine and it selects from
+     * `commerce_orders`.
+     *
+     * PREFILTER, NOT AUTHORITY -- and here that is not a caveat but the whole
+     * design: a mint or an initiation committing between this query and the
+     * per-order transaction is invisible to it, which is exactly why
+     * {@see PaymentSessionExposureGuard} re-decides under the order lock.
+     *
+     * @return array{sql: string, bindings: list<string>}
+     */
+    public function sweepExclusion(string $tenant, \DateTimeImmutable $now): array
+    {
+        $table = self::TABLE;
+
+        return [
+            'sql' => <<<SQL
+NOT EXISTS (
+    SELECT 1 FROM {$table} pl_active
+    WHERE pl_active.tenant_uuid = ? AND pl_active.order_uuid = commerce_orders.uuid
+      AND pl_active.status = ? AND pl_active.expires_at > ?
+)
+AND NOT EXISTS (
+    SELECT 1 FROM {$table} pl_issued
+    WHERE pl_issued.tenant_uuid = ? AND pl_issued.order_uuid = commerce_orders.uuid
+      AND pl_issued.provider_session_issued_at IS NOT NULL
+)
+SQL,
+            'bindings' => [$tenant, self::STATUS_ACTIVE, self::stamp($now), $tenant],
+        ];
+    }
+
+    /**
+     * The SWEPT half of the TTL transition (design spec §2.2: "TTL passed =>
+     * `expired` lazily on resolve + swept"). Tenant-wide, ONE statement,
+     * compare-and-set from `active` only -- so it can never resurrect a terminal
+     * link nor relabel a `consumed` one whose order was paid.
+     *
+     * The boundary is INCLUSIVE here (`expires_at <= now`), the exact complement
+     * of the EXCLUSIVE `expires_at > now` every other predicate in this class
+     * uses: at the stamp itself the link has lapsed, so it is swept.
+     *
+     * @return int rows actually transitioned
+     */
+    public function expireLapsed(ApplicationContext $context, string $tenant, \DateTimeImmutable $now): int
+    {
+        return db($context)->table(self::TABLE)->executeModification(
+            <<<SQL
+UPDATE commerce_payment_links
+SET status = ?, updated_at = ?
+WHERE tenant_uuid = ? AND status = ? AND expires_at <= ?
+SQL,
+            [self::STATUS_EXPIRED, self::stamp($now), $tenant, self::STATUS_ACTIVE, self::stamp($now)]
+        );
+    }
+
     /** The boolean form of {@see self::guardRelevantLinks()} -- same predicate, same caveats. */
     public function hasGuardRelevantLink(
         ApplicationContext $context,
