@@ -230,7 +230,13 @@ final class MarketplaceRegressionTest extends CommerceTestCase
      * marketplace/seller routes -- is untouched. Updated once more for
      * payment-links Task 8: +3 `/commerce/admin/orders/{uuid}/payment-link`
      * endpoints (POST/DELETE/GET), again purely additive through the SAME
-     * catalog and again unrelated to the marketplace flag.
+     * catalog and again unrelated to the marketplace flag. Updated a final
+     * time for cleanup-train Task 5: +1
+     * `DELETE /commerce/admin/orders/{uuid}/artifact`, the draft-artifact
+     * deletion endpoint -- again additive, again through the SAME catalog, and
+     * structurally unable to touch a marketplace row (its guard refuses any
+     * order that has an order number, and a marketplace-partitioned order
+     * always has one).
      *
      * @var list<string>
      */
@@ -246,6 +252,7 @@ final class MarketplaceRegressionTest extends CommerceTestCase
         'DELETE /commerce/admin/grants/{uuid}/refund-access-override',
         'DELETE /commerce/admin/media/{uuid}',
         'DELETE /commerce/admin/orders/drafts/{uuid}/lines/{lineUuid}',
+        'DELETE /commerce/admin/orders/{uuid}/artifact',
         'DELETE /commerce/admin/orders/{uuid}/payment-link',
         'DELETE /commerce/admin/products/{uuid}',
         'DELETE /commerce/admin/reviews/{uuid}',
@@ -398,7 +405,7 @@ final class MarketplaceRegressionTest extends CommerceTestCase
         sort($manifest);
 
         self::assertSame(self::PRE_MV1_ROUTE_MANIFEST, $manifest);
-        self::assertCount(146, $manifest);
+        self::assertCount(147, $manifest);
 
         foreach ($manifest as $route) {
             self::assertDoesNotMatchRegularExpression('#^\S+ /commerce/admin/marketplace#', $route);

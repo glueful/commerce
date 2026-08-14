@@ -28,6 +28,10 @@ final class CommerceSettings
     public const PAYMENT_LINK_TTL_DAYS_MIN = 1;
     public const PAYMENT_LINK_TTL_DAYS_MAX = 30;
 
+    /** Cleanup-train Task 5: the closed range draft-artifact retention, in days, is clamped into. */
+    public const DRAFT_PURGE_DAYS_MIN = 1;
+    public const DRAFT_PURGE_DAYS_MAX = 365;
+
     public static function currency(ApplicationContext $context): string
     {
         $override = self::override($context, 'commerce.currency');
@@ -71,6 +75,35 @@ final class CommerceSettings
     public static function draftTtlDays(ApplicationContext $context): int
     {
         return self::intValue($context, 'commerce.orders.draft_ttl_days', 30);
+    }
+
+    /**
+     * Cleanup-train Task 5: how long a canceled DRAFT ARTIFACT is retained
+     * before {@see \Glueful\Extensions\Commerce\Orders\DraftCleanupService::purgeStale()}
+     * hard-deletes it. Default 30 days.
+     *
+     * CLAMPED rather than merely cast, unlike its `draftTtlDays()` sibling and
+     * for the same reason the payment-link TTL is: this value governs a
+     * DESTRUCTIVE sweep with no undo. A configured `0` (or a negative, or a
+     * malformed override that a future writer coerced to zero) would purge an
+     * artifact in the very tick that canceled it, destroying the row an operator
+     * is about to look at; an unbounded value would silently disable the sweep
+     * while looking configured. Neither is honoured -- both are brought back
+     * inside 1..365.
+     */
+    public static function draftPurgeDays(ApplicationContext $context): int
+    {
+        return self::clampDraftPurgeDays(
+            self::intValue($context, 'commerce.orders.draft_purge_days', 30)
+        );
+    }
+
+    public static function clampDraftPurgeDays(int $value): int
+    {
+        return max(
+            self::DRAFT_PURGE_DAYS_MIN,
+            min(self::DRAFT_PURGE_DAYS_MAX, $value)
+        );
     }
 
     /**

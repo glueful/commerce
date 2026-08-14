@@ -1,0 +1,13 @@
+[
+    {
+        "method": "DELETE",
+        "path": "/commerce/admin/orders/{uuid}/artifact",
+        "controller": "Glueful\\Extensions\\Commerce\\Http\\Admin\\AdminOrderArtifactController",
+        "action": "destroy",
+        "middleware": [
+            "auth",
+            "require_scope:commerce:write"
+        ],
+        "name": null
+    }
+]

@@ -89,6 +89,13 @@ final class AdminOrderDraftController
         });
     }
 
+    /**
+     * Each listed row carries a real `line_count` (cleanup-train Task 4): the
+     * service hydrates it for the whole page in ONE grouped query and
+     * {@see DraftOrderProjection::forAdmin()} publishes it. `lines` itself stays
+     * unhydrated here on purpose -- a list needs the number, not every line's
+     * option/add-on payload multiplied by the page size.
+     */
     #[ApiOperation(summary: 'List draft orders', tags: ['Commerce Admin'])]
     #[ApiResponse(200, description: 'Draft orders retrieved')]
     public function index(DraftOrderListQuery $query, Request $request): Response

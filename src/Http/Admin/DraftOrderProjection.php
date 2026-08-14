@@ -35,6 +35,20 @@ final class DraftOrderProjection
     ];
 
     /**
+     * `line_count` (cleanup-train Task 4) is a DERIVED wire field, not a column,
+     * which is exactly why it is absent from {@see self::FIELDS}: that constant
+     * is the `commerce_orders` column whitelist and stays derivable from
+     * {@see OrderProjection::FIELDS} plus `draft_revision`.
+     *
+     * It is published on EVERY draft response so a client reads one key
+     * everywhere instead of switching on the endpoint:
+     *  - the LISTING passes no `$lines` (a list row needs the number, not the
+     *    payload) and instead carries `line_count` on the raw row, hydrated for
+     *    the whole page in one grouped query by
+     *    {@see \Glueful\Extensions\Commerce\Orders\DraftOrderService::paginate()};
+     *  - every DETAIL/mutation response passes real `$lines`, so the count is
+     *    simply their number and always agrees with the array beside it.
+     *
      * @param array<string,mixed> $order
      * @param list<array<string,mixed>> $lines
      * @return array<string,mixed>
@@ -44,6 +58,9 @@ final class DraftOrderProjection
         $projected = array_intersect_key($order, array_flip(self::FIELDS));
         $projected['draft_revision'] = (int) ($order['draft_revision'] ?? 0);
         $projected['lines'] = array_map([self::class, 'line'], $lines);
+        $projected['line_count'] = isset($order['line_count'])
+            ? (int) $order['line_count']
+            : count($projected['lines']);
 
         return $projected;
     }

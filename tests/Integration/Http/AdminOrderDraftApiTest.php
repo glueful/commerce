@@ -1090,6 +1090,66 @@ final class AdminOrderDraftApiTest extends CommerceTestCase
         self::assertSame([], $filtered['data']);
     }
 
+    /**
+     * Cleanup-train Task 4: the drafts LIST used to project every row through
+     * `DraftOrderProjection::forAdmin($row)` with no lines at all, so an admin
+     * client could only render a confidently wrong "0 items" per row. The list
+     * now hydrates a REAL `line_count` per row -- one grouped count for the whole
+     * page, never the full line payload and never a per-row query.
+     */
+    public function testTheDraftsListingHydratesEachRowsRealLineCount(): void
+    {
+        $variantUuid = $this->seedPhysicalProduct('SKU-COUNT-1', 1000);
+        $otherVariantUuid = $this->seedPhysicalProduct('SKU-COUNT-2', 2000);
+
+        $empty = $this->createDraft();
+        $twoLines = $this->createDraft();
+        $this->controller()->storeLine(
+            $this->request('POST', ['variant_uuid' => $variantUuid, 'quantity' => 3]),
+            $twoLines
+        );
+        $this->controller()->storeLine(
+            $this->request('POST', ['variant_uuid' => $otherVariantUuid, 'quantity' => 1]),
+            $twoLines
+        );
+
+        $listed = $this->json($this->controller()->index(
+            new DraftOrderListQuery(),
+            Request::create('/commerce/admin/orders/drafts', 'GET')
+        ))['data'];
+
+        $counts = [];
+        foreach ($listed as $row) {
+            self::assertArrayHasKey('line_count', $row, 'the drafts list must publish a line count');
+            $counts[(string) $row['uuid']] = (int) $row['line_count'];
+        }
+
+        // The count is DISTINCT LINES, not summed quantities.
+        self::assertSame(2, $counts[$twoLines] ?? null);
+        self::assertSame(0, $counts[$empty] ?? null);
+    }
+
+    /**
+     * The same derived field is published by every OTHER draft response too, so a
+     * client reads one key everywhere rather than switching on the endpoint.
+     */
+    public function testEveryDraftResponsePublishesTheSameLineCountField(): void
+    {
+        $variantUuid = $this->seedPhysicalProduct('SKU-COUNT-3', 1000);
+        $uuid = $this->createDraft();
+
+        self::assertSame(0, (int) $this->json($this->controller()->show($this->request('GET', []), $uuid))['data']
+            ['line_count']);
+
+        $added = $this->json($this->controller()->storeLine(
+            $this->request('POST', ['variant_uuid' => $variantUuid, 'quantity' => 1]),
+            $uuid
+        ))['data'];
+        self::assertSame(1, (int) $added['line_count']);
+        self::assertSame(1, (int) $this->json($this->controller()->show($this->request('GET', []), $uuid))['data']
+            ['line_count']);
+    }
+
     public function testTheDraftProjectionCarriesWalkInIdentityAndRevisionWhileStorefrontStaysClosed(): void
     {
         $uuid = $this->createDraft();

@@ -153,14 +153,41 @@ final class DraftOrderService
      */
     public function paginate(ApplicationContext $context, int $page, int $perPage): array
     {
-        return $this->orders->paginatedFor(
+        $tenant = $this->tenants->tenantUuid($context);
+        $result = $this->orders->paginatedFor(
             $context,
-            $this->tenants->tenantUuid($context),
+            $tenant,
             ['status' => OrderScope::DRAFT],
             $page,
             $perPage,
             true
         );
+
+        // Line-count hydration (cleanup-train Task 4): this listing used to hand
+        // the projection a bare order row, so every listed draft crossed the wire
+        // with an EMPTY `lines` array regardless of its real contents and an admin
+        // list could only render a confidently wrong "0 items" per row.
+        //
+        // What a list row needs is the COUNT, not the lines: ONE grouped query for
+        // the whole page ({@see OrderRepository::lineCountsForOrders()}) rather
+        // than N per-row reads, and no line/add-on payload multiplied by the page
+        // size. The count rides on the raw row under `line_count`, which the
+        // projection publishes as a DERIVED wire field -- it is not a
+        // `commerce_orders` column and deliberately does not join the column
+        // whitelist.
+        $uuids = array_map(static fn (array $row): string => (string) $row['uuid'], $result['items']);
+        $counts = $this->orders->lineCountsForOrders($context, $tenant, $uuids);
+
+        $result['items'] = array_map(
+            static function (array $row) use ($counts): array {
+                $row['line_count'] = $counts[(string) $row['uuid']] ?? 0;
+
+                return $row;
+            },
+            $result['items']
+        );
+
+        return $result;
     }
 
     /** @return array{order: array<string,mixed>, lines: list<array<string,mixed>>} */

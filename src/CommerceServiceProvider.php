@@ -61,6 +61,7 @@ use Glueful\Extensions\Commerce\Http\Admin\AdminDownloadController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminGrantController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminMarketplaceFinancialController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminMediaController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminOrderArtifactController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminOrderController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminOrderDraftController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminOrderPaymentLinkController;
@@ -798,6 +799,12 @@ final class CommerceServiceProvider extends ServiceProvider
             ],
             AdminOrderDraftController::class => [
                 'factory' => [self::class, 'makeAdminOrderDraftController'],
+                'shared' => true,
+            ],
+            // Cleanup-train Task 5: the ONE HTTP owner of draft-artifact
+            // deletion -- the only admin endpoint that destroys an order row.
+            AdminOrderArtifactController::class => [
+                'factory' => [self::class, 'makeAdminOrderArtifactController'],
                 'shared' => true,
             ],
             // Payment-links Task 8 (design spec §2.2): the ONE HTTP owner of
@@ -1576,12 +1583,20 @@ final class CommerceServiceProvider extends ServiceProvider
      * deliberately a separate service -- a draft cancellation releases no
      * stock, dispatches no lifecycle event, and captures no seller webhook, so
      * it takes none of the expiry service's marketplace collaborators.
+     *
+     * Cleanup-train Task 5 appends the optional app logger: draft-artifact
+     * deletion is the one destructive operation in this engine that can leave no
+     * database row behind (there would be nothing left for an audit row to
+     * reference), so its only trace is a log line. Soft-resolved through the
+     * SAME guarded idiom every other logger seam here uses, so an install with
+     * no bound logger records nothing rather than failing to build.
      */
     public static function makeDraftCleanupService(ContainerInterface $container): DraftCleanupService
     {
         return new DraftCleanupService(
             $container->get(OrderRepository::class),
-            self::tenantResolver($container)
+            self::tenantResolver($container),
+            self::makeOptionalLogger($container)
         );
     }
 
@@ -1720,6 +1735,23 @@ final class CommerceServiceProvider extends ServiceProvider
             // explicitly so the container's shared instance is the one the
             // operator cancel path uses.
             exposure: $container->get(PaymentSessionExposureGuard::class)
+        );
+    }
+
+    /**
+     * Cleanup-train Task 5: the draft-artifact deletion endpoint. It takes the
+     * SHARED {@see DraftCleanupService} the cron's purge sweep takes, so the
+     * operator-driven delete and the aged sweep can never end up running
+     * differently-wired copies of the one guarded mechanic.
+     */
+    public static function makeAdminOrderArtifactController(
+        ContainerInterface $container
+    ): AdminOrderArtifactController {
+        return new AdminOrderArtifactController(
+            $container->get(ApplicationContext::class),
+            $container->get(OrderRepository::class),
+            $container->get(DraftCleanupService::class),
+            self::tenantResolver($container)
         );
     }
 

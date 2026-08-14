@@ -86,8 +86,11 @@ try {
                 new SellerOrderRepository(),
                 new LedgerPostingService(new LedgerRepository(), new LedgerAccountLock())
             );
-            $paymentService->markPaid($context, $tenant, (string) $args['orderUuid']);
-            $out = ['ok' => true, 'exceptionClass' => null];
+            // `performed` distinguishes "I ran the paid CAS" from "the order was
+            // already paid by a concurrent settler, so I conceded idempotently"
+            // (cleanup-train Task 4) -- the whole point of the CAS-loser lanes.
+            $performed = $paymentService->markPaid($context, $tenant, (string) $args['orderUuid']);
+            $out = ['ok' => true, 'performed' => $performed, 'exceptionClass' => null];
             break;
 
         case 'payout':

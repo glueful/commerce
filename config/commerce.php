@@ -51,6 +51,25 @@ return [
         // that governs unpaid REAL orders holding reserved stock, this governs
         // an operator's unfinished paperwork, which holds nothing.
         'draft_ttl_days' => (int) env('COMMERCE_ORDER_DRAFT_TTL_DAYS', 30),
+
+        // Cleanup-train Task 5: how long a canceled DRAFT ARTIFACT -- an order
+        // row with NO order number and status `canceled` -- is retained before
+        // the expiry cron HARD-DELETES it together with its lines, events and
+        // finalize attempts. Measured from the artifact's LAST TOUCH
+        // (`updated_at`, falling back to `created_at`), which for a swept draft
+        // is the moment it was canceled, so every artifact gets the whole window
+        // before it is destroyed. Clamped to 1..365 on read
+        // ({@see \Glueful\Extensions\Commerce\Support\CommerceSettings::draftPurgeDays()})
+        // -- 0 would destroy an artifact the instant an operator canceled it,
+        // before they could even look at it, and an unbounded value would make
+        // the purge a sweep that quietly never runs.
+        //
+        // Deliberately SEPARATE from `draft_ttl_days` even though both default
+        // to 30: that one decides when unfinished paperwork stops being live,
+        // this one decides when a dead row stops being recoverable, and a store
+        // that wants a long editing window with short retention (or the
+        // reverse) must not have to choose between them.
+        'draft_purge_days' => (int) env('COMMERCE_ORDER_DRAFT_PURGE_DAYS', 30),
     ],
 
     // Payment links (payment-links spec §2.2).

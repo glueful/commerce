@@ -2,6 +2,132 @@
 
 ## [Unreleased]
 
+## [1.12.0] - 2026-08-14 — Draft Artifact Lifecycle & Settlement Idempotency
+
+**Theme: an order artifact that never touched money can finally be deleted, and a paid-order
+race can finally lose without crashing.** A *draft artifact* — a walk-in order canceled before it
+ever touched checkout (`order_number IS NULL` and `status = 'canceled'`) — is money-free by
+construction, so this release adds the one guarded mechanism to remove it: an operator endpoint
+and an aged sweep, both driven by the same structural predicate, transactional across every child
+row, and deliberately the one unaudited destructive operation in the engine. Alongside it: a
+vanished order now reports a typed `OrderNotFoundException` instead of a bare `RuntimeException`,
+a mark-paid on a draft uuid 404s instead of leaking a 409, and a lost paid-CAS race concedes
+idempotently (200) instead of surfacing a bare 500 — the loser's own transaction has rolled back,
+a fresh re-read proving somebody else reached `paid`, with the settlement handler routing the
+concession to the same late-payment path a slower read would have taken anyway.
+
+### Added
+- **`DELETE /orders/{uuid}/artifact` — draft-artifact deletion** (catalog key
+  `orders.artifact.destroy`, `manage` mode, the 119th admin route). A *draft artifact* is an
+  order row that was canceled while it was still a draft: `order_number IS NULL` **and**
+  `status = 'canceled'`. Until now nothing in the engine ever removed one, so every abandoned
+  walk-in draft accumulated forever and stayed visible in the admin orders list. The endpoint
+  hard-deletes the row together with its `commerce_order_lines`, `commerce_order_events` and
+  `commerce_order_draft_attempts` in ONE transaction. Refusals are a closed set: a typed **409
+  `order_not_deletable`** (carrying the observed `status`) for every other row the tenant owns —
+  including an ACTIVE draft, which must be canceled first so a mis-click cannot destroy work in
+  progress — and a **non-revealing 404**, byte-identical for unknown and cross-tenant uuids. The
+  lookup is deliberately draft-INCLUSIVE, unlike every sibling admin order endpoint, so a draft
+  gets the 409 that names its remedy instead of a 404 that denies it exists.
+- **`DraftCleanupService::purgeStale()` and `commerce.orders.draft_purge_days`** (default 30,
+  clamped 1–365) — the aged sweep behind the SAME guarded delete. Canceled numberless artifacts
+  whose `COALESCE(updated_at, created_at)` is older than the window are destroyed in batches, and
+  it is wired as a THIRD independent sweep on the existing `commerce:orders:expire` tick, so
+  hosts get purging with **no new cron obligation**. Cancellation runs before purging and stamps
+  `updated_at`, so a draft is never destroyed on the tick that canceled it. Per-row
+  compare-and-set, so overlapping sweeps double-delete nothing.
+- **`OrderScope::deletableArtifactSql()` / `isDeletableArtifact()`** — the ONE artifact
+  predicate, in its SQL and PHP forms, beside the existing draft predicate. The conjunction is a
+  *structural proof* the row never touched money (only finalize/checkout allocate a number, and
+  every financial child — payments, invoices, stock claims, payment links, refunds, marketplace
+  rows — is created at or after that allocation), which is the only reason a hard delete is legal
+  at all. The guard lives in the `DELETE`'s own `WHERE` clause and runs FIRST, so a caller's
+  precheck is never the authority: a row that stops being an artifact mid-request is refused by
+  the database, the endpoint re-reads, and answers 404 or 409 from current truth. Proven against
+  a genuinely concurrent second OS process on real PostgreSQL, and falsifiable — dropping the
+  predicate destroys a numbered order and its lines in that lane.
+- **`line_count` on every admin DRAFT response** — the drafts LISTING previously projected each
+  row with no lines at all, so a client could only render a confidently wrong "0 items" per draft.
+  `DraftOrderService::paginate()` now hydrates a real count for the whole page in ONE grouped,
+  tenant-constrained query (`OrderRepository::lineCountsForOrders()`) — never a per-row lookup and
+  never the line payload multiplied by the page size — and `DraftOrderProjection` publishes it as a
+  derived wire field on the listing, the detail, and every mutation response alike. `lines` itself
+  stays unhydrated on the listing by design; `DraftOrderProjection::FIELDS` is unchanged (it is the
+  `commerce_orders` column whitelist, and `line_count` is not a column).
+- **`OrderNotFoundException`** — `OrderRepository::transition()` reported a vanished (unknown or
+  cross-tenant) order as a bare `\RuntimeException` separable only by its message, so every caller
+  logged an ordinary "no such uuid" as a 500. It is now typed (still a `\RuntimeException`, still
+  the same generic `Order not found.` message, so nothing that caught one or read one breaks).
+- **`ConcurrentOrderTransitionException`** — the LOSER of `transition()`'s compare-and-set is now
+  separable from an outright illegal transition. Still a `\DomainException` carrying the identical
+  message, so every `catch (\DomainException) -> 409` caller is unaffected; it additionally carries
+  `from`/`to` and the `observed` status read back immediately after the failed CAS.
+
+### Changed
+- **Draft-artifact deletion is the one deliberately UNAUDITED destructive operation in this
+  engine.** It records no `commerce_order_events` row — one would reference an order that no
+  longer exists, and `eventsForOrder()` joins through `commerce_orders`, so it would be
+  unreadable the moment it was written. In its place a `commerce.orders.artifact_deleted`
+  app-log line records actor, uuid, tenant and reason, and **no customer PII** (the artifact's
+  name, email and phone die with the row rather than being copied into a log on the way out).
+  The posture is acceptable for exactly one class of row — one the database has just proven never
+  touched money — which is why the guard is a SQL predicate and not a caller's promise. Hosts
+  that need a durable operator trail should record it from their own admin layer, since the
+  engine has nowhere left to put one.
+- **`commerce:orders:expire` now runs THREE sweeps**, not two — the artifact purge joins order
+  expiry and draft cancellation, isolated from both (each in its own try/catch; a throwing
+  sibling never suspends it, and any failure still surfaces as a non-zero exit).
+- **`OrderPaymentService::markPaid()` answers a lost paid race idempotently** and now returns
+  `bool` (`true` iff THIS call performed the `pending_payment -> paid` transition). When two
+  settlement paths race — materially more likely since the webhook lane — the loser used to
+  surface as a bare 500 even though the exact end state it asked for had just been reached. It now
+  concedes: its own transaction has rolled back, so a fresh tenant-scoped re-read showing `paid`
+  proves somebody else got there, and the call writes nothing, posts nothing and dispatches
+  nothing. Any other observed status still rethrows unchanged. Proven under genuine two-connection
+  PostgreSQL contention.
+- **`OrderPaymentConfirmationHandler` routes a conceded settlement to `rejectLatePayment()`** —
+  byte-identical to what it would have done had its status read landed a moment later, so one
+  real-world situation has one outcome whatever the timing, and a late provider payment stays as
+  discoverable as before.
+- **`AdminOrderController::markPaid()` runs the draft-blind `order()` precheck** every sibling
+  order endpoint already ran: a draft (or unknown, or cross-tenant) uuid is now the same
+  non-revealing 404 instead of the 409 the transition CAS used to return. A conceded settlement is
+  answered 200 with the paid order, never 409.
+
+### Upgrade Notes
+- **`commerce:orders:expire` starts deleting canceled draft artifacts after this upgrade.** The
+  cron's new third sweep (`DraftCleanupService::purgeStale()`) permanently removes any order row
+  matching `order_number IS NULL AND status = 'canceled'` whose `COALESCE(updated_at, created_at)`
+  is older than `commerce.orders.draft_purge_days` (default **30**, clamped **1–365**). There is no
+  disable value by design — a numberless canceled row is structurally proven to have never touched
+  money (only finalize/checkout allocate a number, and every financial child is created at or after
+  that allocation), which is the whole reason the sweep is safe to run unattended. Hosts with a
+  retention requirement should raise `COMMERCE_ORDER_DRAFT_PURGE_DAYS` (max 365) **before**
+  upgrading, not after.
+- **Hosts mounting the admin route catalog must allowlist `orders.artifact.destroy`.**
+  `AdminMountProfile::restricted()` resolves allowlists key-by-key, and an unlisted key is simply
+  not mounted (silently, not an error) — the new `DELETE /orders/{uuid}/artifact` route, and any
+  UI action wired to it, will 404 at the host router until the key is added.
+- **`OrderPaymentService::markPaid()` signature widened `void` → `bool`.** The method is `final`
+  and not part of any interface, so every existing call site that ignores the return value is
+  unaffected. The bool reports whether *this* call performed the `pending_payment → paid`
+  transition (`false` means it conceded to a settlement that already won the race).
+
+### Behavior changes (operator-visible)
+- Marking a **draft** order paid now answers a non-revealing **404** (previously a **409** that
+  incidentally confirmed the uuid was a real, if unpayable, order).
+- Losing a **paid** compare-and-set now answers idempotently — **200** with the already-paid order
+  — instead of a bare **500**; the losing settlement's confirmation handling routes to
+  `rejectLatePayment()`, the same outcome a slower read would have produced anyway.
+- A transition against a vanished (unknown or cross-tenant) order now throws a typed
+  `OrderNotFoundException`, a `\RuntimeException` subclass with the identical message — BC for
+  every existing `catch (\RuntimeException)`.
+- The artifact-deletion guard is plain and narrow by design: **only** rows with no order number
+  **and** `status = 'canceled'` are eligible — never an active draft, never a numbered order of any
+  status. Deletion is the one deliberately **unaudited** destructive operation in this engine (no
+  `commerce_order_events` row is possible for a row that no longer exists); an actor/uuid/tenant/
+  reason log line stands in its place, structurally guaranteed to be money-free and PII-free.
+
 ## [1.11.0] - 2026-08-12 — Payment Links & Session-Exposure Guarded Cancellation
 
 **Theme: a payment link is a bearer credential, and once it has shown a provider a live
