@@ -37,6 +37,14 @@ final class OrderScope
     public const DRAFT = 'draft';
 
     /**
+     * The canceled status value, written once for the same reason `DRAFT` is:
+     * cleanup-train Task 5's draft-ARTIFACT predicate is half `status =
+     * 'canceled'`, and a destructive predicate must not carry a hand-typed
+     * literal.
+     */
+    public const CANCELED = 'canceled';
+
+    /**
      * Query-builder form of the predicate. Returns the same builder for
      * chaining; `$column` accepts a table-qualified name for joined reads.
      */
@@ -67,6 +75,55 @@ final class OrderScope
     public static function isDraftSql(string $qualifier = ''): string
     {
         return self::column($qualifier) . " = '" . self::DRAFT . "'";
+    }
+
+    /**
+     * The ONE draft-ARTIFACT predicate (cleanup-train Task 5), in its SQL form.
+     *
+     * A draft artifact is an order row that was canceled while it was still a
+     * draft: `order_number IS NULL` AND `status = 'canceled'`. That conjunction
+     * is not a convention, it is a STRUCTURAL PROOF that the row never touched
+     * money -- only finalization and storefront checkout ever allocate an order
+     * number, and everything that can reference an order financially (payments,
+     * invoices, stock claims, payment links, refunds, marketplace children) is
+     * created on or after that allocation. A numberless canceled row therefore
+     * cannot have any of them, which is the ONLY reason hard-deleting it is
+     * legal at all.
+     *
+     * It lives here, beside the draft predicate, for the same reason that one
+     * does: it is the authorization for a DESTRUCTIVE operation and it is used
+     * from three places -- the endpoint's classification, the guarded delete's
+     * compare-and-set, and the purge sweep's candidate scan. Three hand-written
+     * copies could drift; one cannot. {@see self::isDeletableArtifact()} is the
+     * PHP form over an already-read row, and the two are pinned equivalent by
+     * `Orders\DraftArtifactPurgeTest`.
+     *
+     * `$qualifier` is an optional table alias, exactly as on the siblings above.
+     */
+    public static function deletableArtifactSql(string $qualifier = ''): string
+    {
+        $prefix = $qualifier === '' ? '' : $qualifier . '.';
+
+        return $prefix . "order_number IS NULL AND " . $prefix . "status = '" . self::CANCELED . "'";
+    }
+
+    /**
+     * The PHP form of {@see self::deletableArtifactSql()}, for a row that has
+     * already been read (the endpoint's classification and re-classification).
+     *
+     * `array_key_exists` rather than `isset` on `order_number`: a NULL number is
+     * the whole point of the predicate, and `isset()` cannot tell "the column is
+     * NULL" from "the caller handed us a row that does not have the column at
+     * all". A row missing the column is not an artifact -- it is a row this
+     * method has no business answering for, and it fails closed.
+     *
+     * @param array<string,mixed> $order a `commerce_orders` row
+     */
+    public static function isDeletableArtifact(array $order): bool
+    {
+        return array_key_exists('order_number', $order)
+            && $order['order_number'] === null
+            && ($order['status'] ?? null) === self::CANCELED;
     }
 
     private static function column(string $qualifier): string

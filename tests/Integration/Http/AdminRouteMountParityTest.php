@@ -35,6 +35,11 @@ use Glueful\Routing\Router;
  * (`admin_route_inventory_1_11_payment_link_additions.json`), every earlier fixture stays
  * byte-frozen, and the new total (118) is pinned on top. All three mount in `manage` mode
  * (`require_scope:commerce:write`) -- including the status read, per design spec §2.2.
+ *
+ * Cleanup-train Task 5 does it ONCE more: the single draft-artifact deletion endpoint lives
+ * in `admin_route_inventory_1_12_artifact_additions.json`, every earlier fixture stays
+ * byte-frozen, and the new total (119) is pinned on top. It mounts in `manage` mode -- it is
+ * the only endpoint in this catalog that destroys a `commerce_orders` row.
  */
 final class AdminRouteMountParityTest extends CommerceRouterTestCase
 {
@@ -45,11 +50,14 @@ final class AdminRouteMountParityTest extends CommerceRouterTestCase
     private const ADDITIONS_DRAFT_COUNT = 10;
     /** Payment-links Task 8 (design spec §2.2): mint/revoke/status, all manage mode. */
     private const ADDITIONS_PAYMENT_LINK_COUNT = 3;
+    /** Cleanup-train Task 5: the guarded draft-artifact hard delete. */
+    private const ADDITIONS_ARTIFACT_COUNT = 1;
     private const TOTAL_COUNT = self::LEGACY_COUNT
         + self::ADDITIONS_COUNT
         + self::ADDITIONS_1_6_COUNT
         + self::ADDITIONS_DRAFT_COUNT
-        + self::ADDITIONS_PAYMENT_LINK_COUNT;
+        + self::ADDITIONS_PAYMENT_LINK_COUNT
+        + self::ADDITIONS_ARTIFACT_COUNT;
 
     public function testNativeMountEqualsLegacyInventoryPlusTaskA6Additions(): void
     {
@@ -88,7 +96,21 @@ final class AdminRouteMountParityTest extends CommerceRouterTestCase
             'payment-links Task 8 adds exactly 3 payment-link endpoints',
         );
 
-        $expected = array_merge($legacy, $additions, $additions16, $draftAdditions, $paymentLinkAdditions);
+        $artifactAdditions = $this->loadFixture('admin_route_inventory_1_12_artifact_additions.json');
+        self::assertCount(
+            self::ADDITIONS_ARTIFACT_COUNT,
+            $artifactAdditions,
+            'cleanup-train Task 5 adds exactly 1 draft-artifact deletion endpoint',
+        );
+
+        $expected = array_merge(
+            $legacy,
+            $additions,
+            $additions16,
+            $draftAdditions,
+            $paymentLinkAdditions,
+            $artifactAdditions,
+        );
         usort($expected, self::routeSortComparator());
         self::assertCount(self::TOTAL_COUNT, $expected);
 
@@ -98,7 +120,7 @@ final class AdminRouteMountParityTest extends CommerceRouterTestCase
             self::TOTAL_COUNT,
             $actual,
             'mounted non-marketplace admin route count drifted '
-            . '(expected 98 legacy + 6 Task A6 + 1 1.6.0 + 10 draft + 3 payment-link additions)',
+            . '(expected 98 legacy + 6 Task A6 + 1 1.6.0 + 10 draft + 3 payment-link + 1 artifact additions)',
         );
         foreach ($expected as $i => $record) {
             self::assertSame(
@@ -146,6 +168,12 @@ final class AdminRouteMountParityTest extends CommerceRouterTestCase
         foreach ($this->loadFixture('admin_route_inventory_1_11_payment_link_additions.json') as $record) {
             $routeKey = $record['method'] . ' ' . $record['path'];
             self::assertArrayHasKey($routeKey, $actualByRoute, "expected payment-link endpoint missing: {$routeKey}");
+            self::assertSame($record, $actualByRoute[$routeKey]);
+        }
+
+        foreach ($this->loadFixture('admin_route_inventory_1_12_artifact_additions.json') as $record) {
+            $routeKey = $record['method'] . ' ' . $record['path'];
+            self::assertArrayHasKey($routeKey, $actualByRoute, "expected artifact endpoint missing: {$routeKey}");
             self::assertSame($record, $actualByRoute[$routeKey]);
         }
     }

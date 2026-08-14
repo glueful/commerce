@@ -12,6 +12,7 @@ use Glueful\Extensions\Commerce\Http\Admin\AdminDiscountController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminDownloadController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminGrantController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminMediaController;
+use Glueful\Extensions\Commerce\Http\Admin\AdminOrderArtifactController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminOrderController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminOrderDraftController;
 use Glueful\Extensions\Commerce\Http\Admin\AdminOrderPaymentLinkController;
@@ -229,6 +230,27 @@ final class AdminRouteCatalog
                 'show',
                 'manage',
                 'json',
+                'orders',
+            ],
+            // — Draft-artifact deletion (cleanup-train Task 5) —
+            // The ONLY entry in this catalog that DESTROYS a `commerce_orders`
+            // row, and it is legal only for a row the database itself proves
+            // never touched money (`order_number IS NULL AND status =
+            // 'canceled'`); everything else is a typed 409. `manage` mode
+            // naturally. Declared `unusual`, not `json`: the `artifact` segment
+            // is a DISCRIMINATOR naming which orders may be deleted at all, not
+            // a sub-resource being destroyed, so this does not behave like the
+            // ordinary `*.destroy` entries above and must not be remounted as if
+            // it did. The literal segment also keeps it unambiguous against
+            // every sibling `/orders/{uuid}/...` pair.
+            [
+                'orders.artifact.destroy',
+                'DELETE',
+                '/orders/{uuid}/artifact',
+                AdminOrderArtifactController::class,
+                'destroy',
+                'manage',
+                'unusual',
                 'orders',
             ],
             // — Draft orders (admin-order-creation cycle 2, Tasks 9 and 10, design spec §2.3/§2.5) —

@@ -3,6 +3,36 @@
 ## [Unreleased]
 
 ### Added
+- **`DELETE /orders/{uuid}/artifact` — draft-artifact deletion** (catalog key
+  `orders.artifact.destroy`, `manage` mode, the 119th admin route). A *draft artifact* is an
+  order row that was canceled while it was still a draft: `order_number IS NULL` **and**
+  `status = 'canceled'`. Until now nothing in the engine ever removed one, so every abandoned
+  walk-in draft accumulated forever and stayed visible in the admin orders list. The endpoint
+  hard-deletes the row together with its `commerce_order_lines`, `commerce_order_events` and
+  `commerce_order_draft_attempts` in ONE transaction. Refusals are a closed set: a typed **409
+  `order_not_deletable`** (carrying the observed `status`) for every other row the tenant owns —
+  including an ACTIVE draft, which must be canceled first so a mis-click cannot destroy work in
+  progress — and a **non-revealing 404**, byte-identical for unknown and cross-tenant uuids. The
+  lookup is deliberately draft-INCLUSIVE, unlike every sibling admin order endpoint, so a draft
+  gets the 409 that names its remedy instead of a 404 that denies it exists.
+- **`DraftCleanupService::purgeStale()` and `commerce.orders.draft_purge_days`** (default 30,
+  clamped 1–365) — the aged sweep behind the SAME guarded delete. Canceled numberless artifacts
+  whose `COALESCE(updated_at, created_at)` is older than the window are destroyed in batches, and
+  it is wired as a THIRD independent sweep on the existing `commerce:orders:expire` tick, so
+  hosts get purging with **no new cron obligation**. Cancellation runs before purging and stamps
+  `updated_at`, so a draft is never destroyed on the tick that canceled it. Per-row
+  compare-and-set, so overlapping sweeps double-delete nothing.
+- **`OrderScope::deletableArtifactSql()` / `isDeletableArtifact()`** — the ONE artifact
+  predicate, in its SQL and PHP forms, beside the existing draft predicate. The conjunction is a
+  *structural proof* the row never touched money (only finalize/checkout allocate a number, and
+  every financial child — payments, invoices, stock claims, payment links, refunds, marketplace
+  rows — is created at or after that allocation), which is the only reason a hard delete is legal
+  at all. The guard lives in the `DELETE`'s own `WHERE` clause and runs FIRST, so a caller's
+  precheck is never the authority: a row that stops being an artifact mid-request is refused by
+  the database, the endpoint re-reads, and answers 404 or 409 from current truth. Proven against
+  a genuinely concurrent second OS process on real PostgreSQL, and falsifiable — dropping the
+  predicate destroys a numbered order and its lines in that lane.
+
 - **`line_count` on every admin DRAFT response** — the drafts LISTING previously projected each
   row with no lines at all, so a client could only render a confidently wrong "0 items" per draft.
   `DraftOrderService::paginate()` now hydrates a real count for the whole page in ONE grouped,
@@ -21,6 +51,19 @@
   `from`/`to` and the `observed` status read back immediately after the failed CAS.
 
 ### Changed
+- **Draft-artifact deletion is the one deliberately UNAUDITED destructive operation in this
+  engine.** It records no `commerce_order_events` row — one would reference an order that no
+  longer exists, and `eventsForOrder()` joins through `commerce_orders`, so it would be
+  unreadable the moment it was written. In its place a `commerce.orders.artifact_deleted`
+  app-log line records actor, uuid, tenant and reason, and **no customer PII** (the artifact's
+  name, email and phone die with the row rather than being copied into a log on the way out).
+  The posture is acceptable for exactly one class of row — one the database has just proven never
+  touched money — which is why the guard is a SQL predicate and not a caller's promise. Hosts
+  that need a durable operator trail should record it from their own admin layer, since the
+  engine has nowhere left to put one.
+- **`commerce:orders:expire` now runs THREE sweeps**, not two — the artifact purge joins order
+  expiry and draft cancellation, isolated from both (each in its own try/catch; a throwing
+  sibling never suspends it, and any failure still surfaces as a non-zero exit).
 - **`OrderPaymentService::markPaid()` answers a lost paid race idempotently** and now returns
   `bool` (`true` iff THIS call performed the `pending_payment -> paid` transition). When two
   settlement paths race — materially more likely since the webhook lane — the loser used to
