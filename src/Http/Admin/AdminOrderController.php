@@ -254,11 +254,35 @@ final class AdminOrderController
         }
     }
 
+    /**
+     * Two cleanup-train Task 4 corrections, both about ANSWERING HONESTLY:
+     *
+     *  - the draft-blind `order()` precheck (below) is the same non-revealing
+     *    404 guard every sibling order endpoint already runs. Without it a DRAFT
+     *    uuid fell through to the transition CAS and came back 409 where
+     *    `show()`/`addNote()`/`invoiceData()` all 404 -- a draft provably cannot
+     *    become paid (`transition()` refuses every draft outright), so the 409
+     *    bought nothing and the 409-vs-404 split mildly revealed that a draft
+     *    exists at that uuid. It also turns an unknown/cross-tenant uuid into
+     *    the ordinary 404 instead of the repository's not-found bubbling out.
+     *
+     *  - a CONCEDED settlement is a 200, not a 409. `markPaid()` returns `false`
+     *    when the order is already paid because a concurrent settlement path won
+     *    the `pending_payment -> paid` compare-and-set; the operator asked for
+     *    the order to be paid and it is paid, so this endpoint answers with the
+     *    paid order and never distinguishes who got there first. Only a genuine
+     *    refusal (a canceled or refunded order, an unreachable state) still
+     *    raises the `\DomainException` this arm turns into 409.
+     */
     #[ApiOperation(summary: 'Mark an order paid', tags: ['Commerce Admin'])]
     #[ApiResponse(200, description: 'Order marked paid')]
+    #[ApiResponse(404, description: 'Order not found')]
     #[ApiResponse(409, description: 'Invalid order transition')]
     public function markPaid(Request $request, string $uuid): Response
     {
+        // Draft-blind, tenant-scoped 404 guard first, before any write.
+        $this->order($uuid);
+
         try {
             $this->payments->markPaid($this->context, $this->tenants->tenantUuid($this->context), $uuid);
 

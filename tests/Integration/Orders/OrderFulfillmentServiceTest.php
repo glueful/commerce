@@ -15,6 +15,7 @@ use Glueful\Extensions\Commerce\Http\Admin\OrderProjection;
 use Glueful\Extensions\Commerce\Http\DTOs\FulfillOrderData;
 use Glueful\Extensions\Commerce\Invoices\ConfigSellerIdentityProvider;
 use Glueful\Extensions\Commerce\Inventory\StockRepository;
+use Glueful\Extensions\Commerce\Orders\ConcurrentOrderTransitionException;
 use Glueful\Extensions\Commerce\Orders\OrderFulfillmentService;
 use Glueful\Extensions\Commerce\Orders\OrderPaymentService;
 use Glueful\Extensions\Commerce\Orders\OrderRepository;
@@ -240,7 +241,14 @@ final class OrderFulfillmentServiceTest extends CommerceTestCase
             self::assertIsArray($result, "subprocess produced no parseable result. stderr: {$stderr}");
 
             self::assertFalse($result['ok'] ?? true, 'B must lose the race to A\'s already-committed transition');
-            self::assertSame(\DomainException::class, $result['exceptionClass'] ?? null);
+            // Cleanup-train Task 4: the CAS loser is now the TYPED
+            // `ConcurrentOrderTransitionException` -- still a `\DomainException`
+            // (every `catch (\DomainException) -> 409` caller is unaffected) and
+            // still carrying the identical message, but separable from an
+            // outright illegal transition, which is what lets a caller answer a
+            // lost race idempotently without swallowing a real refusal.
+            self::assertSame(ConcurrentOrderTransitionException::class, $result['exceptionClass'] ?? null);
+            self::assertTrue(is_subclass_of((string) $result['exceptionClass'], \DomainException::class));
             self::assertSame('Order status changed concurrently; retry the operation.', $result['message'] ?? null);
 
             $final = $connectionA->table('commerce_orders')->where('uuid', '=', $orderUuid)->first();

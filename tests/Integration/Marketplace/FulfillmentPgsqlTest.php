@@ -244,11 +244,21 @@ final class FulfillmentPgsqlTest extends CommerceTestCase
         $connectionA->getTransactionManager()->commit();
 
         $result = $this->collectRaceChild($handle);
-        self::assertFalse(
-            $result['ok'] ?? true,
-            'the second concurrent markPaid() must fail once the CAS has already committed elsewhere'
+        // Cleanup-train Task 4: the loser of the `pending_payment -> paid` CAS no
+        // longer FAILS. Its own transaction rolled back, so it wrote nothing --
+        // which is the fact this lane has always been about -- but the end state
+        // it was driving towards was reached by A, so it concedes idempotently
+        // (`performed = false`) instead of handing a bare 500 to a webhook.
+        self::assertTrue(
+            $result['ok'] ?? false,
+            'the second concurrent markPaid() must concede idempotently, never fail: '
+            . json_encode($result, JSON_THROW_ON_ERROR)
         );
-        self::assertSame(\DomainException::class, $result['exceptionClass'] ?? null);
+        self::assertFalse(
+            $result['performed'] ?? true,
+            'the loser must report that it did NOT perform the transition'
+        );
+        self::assertNull($result['exceptionClass'] ?? null);
 
         $finalOrder = $connectionA->table('commerce_orders')->where('uuid', '=', $orderUuid)->first();
         self::assertSame('paid', $finalOrder['status'], 'the WINNER (A) committed the CAS');

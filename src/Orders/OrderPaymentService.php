@@ -92,8 +92,69 @@ final class OrderPaymentService
      * WHOLE transaction -- the paid CAS, the confirmation stamp, and any
      * already-claimed account locks together -- so a partial posting set
      * can never be observed.
+     *
+     * RETURN (cleanup-train Task 4): `true` iff THIS call performed the
+     * `pending_payment -> paid` transition. `false` means the order is paid but
+     * a concurrent settlement path got there first -- an idempotent concession,
+     * not a failure; see the catch arm below for how that is decided and what
+     * it guarantees (this call wrote nothing, posted nothing, dispatched
+     * nothing). A caller with nothing to add for a duplicate settlement can
+     * ignore the value entirely -- the admin mark-paid endpoint does, and
+     * answers 200 with the paid order either way; the provider-confirmation
+     * handler uses it to route the conceded confirmation to
+     * {@see self::rejectLatePayment()}, exactly as it would have done had it
+     * read the order's status a moment later.
      */
-    public function markPaid(ApplicationContext $context, string $tenant, string $orderUuid): void
+    public function markPaid(ApplicationContext $context, string $tenant, string $orderUuid): bool
+    {
+        try {
+            $this->settle($context, $tenant, $orderUuid);
+        } catch (\DomainException $e) {
+            // IDEMPOTENT CONCESSION (payment-links final review; cleanup-train
+            // Task 4). Two settlement paths can drive the same order to `paid`
+            // at once -- the webhook lane made that materially more likely --
+            // and the loser used to surface as a bare 500 even though the exact
+            // outcome it was asking for had just been achieved.
+            //
+            // Every `\DomainException` out of `settle()` is a REFUSAL of the
+            // `pending_payment -> paid` transition, and there are only two
+            // shapes of it:
+            //  - {@see ConcurrentOrderTransitionException} -- the compare-and-set
+            //    matched zero rows because a concurrent settler won it (the
+            //    INNER window, between the status read and the guarded UPDATE);
+            //  - a plain `\DomainException` from
+            //    {@see OrderStateMachine::assertTransition()} refusing
+            //    `paid -> paid`, which is the same race caught one step earlier
+            //    (the WIDER window, before this call read anything at all).
+            // Both mean the same thing, so both are answered the same way.
+            //
+            // The DISCRIMINATOR is not the exception and not its message: it is
+            // a fresh, tenant-scoped re-read taken AFTER this call's own
+            // transaction has rolled back. Because the rollback undid anything
+            // this call might have written, an order that reads `paid` here is
+            // provably paid by SOMEBODY ELSE -- the end state is reached, the
+            // winner did the audit row, the link consumption, the ledger
+            // posting and the single `OrderPaid` dispatch exactly once, and the
+            // honest answer is "yes, it is paid; no, not by me". Any other
+            // observed status (`pending_payment` -- so the refusal was about
+            // something else entirely -- `canceled`, `refunded`, `draft`, or a
+            // vanished row) is a real failure and rethrows unchanged.
+            if ($this->statusOf($context, $tenant, $orderUuid) !== 'paid') {
+                throw $e;
+            }
+
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * The paid transition proper, as one transaction. Split out of
+     * {@see self::markPaid()} only so the idempotent-concession decision can be
+     * made OUTSIDE the transaction it must observe the rollback of.
+     */
+    private function settle(ApplicationContext $context, string $tenant, string $orderUuid): void
     {
         db($context)->transaction(function () use ($context, $tenant, $orderUuid): void {
             $this->orders->transition($context, $tenant, $orderUuid, 'paid');
@@ -159,6 +220,18 @@ final class OrderPaymentService
                 $this->dispatch($context, new OrderPaid($order));
             });
         });
+    }
+
+    /**
+     * The order's CURRENT status as this session can see it, or `null` if the row
+     * is not there (or is a draft -- `findByUuid()` is draft-blind by default,
+     * and a draft is never `paid`, so the concession rule stays closed to it).
+     */
+    private function statusOf(ApplicationContext $context, string $tenant, string $orderUuid): ?string
+    {
+        $order = $this->orders->findByUuid($context, $tenant, $orderUuid);
+
+        return $order === null ? null : (string) $order['status'];
     }
 
     /**

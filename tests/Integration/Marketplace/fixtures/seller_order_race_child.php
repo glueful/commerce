@@ -122,8 +122,11 @@ try {
 
         case 'markPaid':
             $service = new OrderPaymentService(new OrderRepository(), new SellerOrderPaymentConfirmation());
-            $service->markPaid($context, $tenant, (string) $args['orderUuid']);
-            $out = ['ok' => true, 'exceptionClass' => null];
+            // `performed` distinguishes "I ran the paid CAS" from "the order was
+            // already paid by a concurrent settler, so I conceded idempotently"
+            // (cleanup-train Task 4) -- the whole point of the CAS-loser lane.
+            $performed = $service->markPaid($context, $tenant, (string) $args['orderUuid']);
+            $out = ['ok' => true, 'performed' => $performed, 'exceptionClass' => null];
             break;
 
         default:

@@ -345,7 +345,7 @@ SQL,
     ): void {
         $order = $this->findByUuid($context, $tenant, $uuid, true);
         if ($order === null) {
-            throw new \RuntimeException('Order not found.');
+            throw OrderNotFoundException::forUuid($uuid);
         }
 
         $from = (string) $order['status'];
@@ -370,7 +370,18 @@ SQL,
         $affected = $query->update($changes);
 
         if ($affected !== 1) {
-            throw new \DomainException('Order status changed concurrently; retry the operation.');
+            // One extra read, on the LOST-RACE path only, so the exception can
+            // name the state the winner left behind. A caller that wants to
+            // answer idempotently ("the end state I was driving towards is
+            // already true") needs that fact, and reading it here -- while the
+            // failure is still in hand -- keeps every caller from re-deriving
+            // it. `null` means the row vanished outright.
+            $observed = $this->findByUuid($context, $tenant, $uuid, true);
+            throw ConcurrentOrderTransitionException::lost(
+                $from,
+                $to,
+                $observed === null ? null : (string) $observed['status']
+            );
         }
 
         $this->recordEvent($context, $uuid, 'status:' . $to);
@@ -544,6 +555,54 @@ SQL,
             ->get();
 
         return array_map(fn (array $row): array => $this->decodeLineJson($row), $rows);
+    }
+
+    /**
+     * How many lines each of these orders has -- ONE grouped, tenant-constrained
+     * query for a whole page, never a per-row lookup and never the line payload
+     * itself. The drafts listing is the caller: an admin list row needs the
+     * COUNT ("3 items") and nothing else, and hydrating full line rows (with
+     * their decoded add-on/option json) for up to a hundred drafts to compute a
+     * number would be pure waste.
+     *
+     * Tenant scoping goes through the same join {@see self::linesForOrder()}
+     * uses -- `commerce_order_lines` carries no `tenant_uuid` of its own, so a
+     * bare child-table aggregate would be a cross-tenant read.
+     *
+     * Draft isolation: CALLER-GATED, exactly like `linesForOrder()`. The join is
+     * tenant scoping, not order selection; the caller has already decided which
+     * uuids it is allowed to ask about.
+     *
+     * Every requested uuid appears in the result, an order with no lines as `0`,
+     * so a caller never has to distinguish "no lines" from "not in the map".
+     *
+     * @param list<string> $orderUuids
+     * @return array<string,int> orderUuid => line count
+     */
+    public function lineCountsForOrders(ApplicationContext $context, string $tenant, array $orderUuids): array
+    {
+        $counts = array_fill_keys($orderUuids, 0);
+        if ($orderUuids === []) {
+            return $counts;
+        }
+
+        $placeholders = implode(', ', array_fill(0, count($orderUuids), '?'));
+        $rows = db($context)->table('commerce_order_lines')->executeRaw(
+            <<<SQL
+SELECT l.order_uuid AS order_uuid, COUNT(*) AS line_count
+FROM commerce_order_lines l
+JOIN commerce_orders o ON o.uuid = l.order_uuid
+WHERE o.tenant_uuid = ? AND l.order_uuid IN ({$placeholders})
+GROUP BY l.order_uuid
+SQL,
+            [$tenant, ...$orderUuids]
+        );
+
+        foreach ($rows as $row) {
+            $counts[(string) $row['order_uuid']] = (int) $row['line_count'];
+        }
+
+        return $counts;
     }
 
     /**

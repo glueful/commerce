@@ -2,6 +2,42 @@
 
 ## [Unreleased]
 
+### Added
+- **`line_count` on every admin DRAFT response** — the drafts LISTING previously projected each
+  row with no lines at all, so a client could only render a confidently wrong "0 items" per draft.
+  `DraftOrderService::paginate()` now hydrates a real count for the whole page in ONE grouped,
+  tenant-constrained query (`OrderRepository::lineCountsForOrders()`) — never a per-row lookup and
+  never the line payload multiplied by the page size — and `DraftOrderProjection` publishes it as a
+  derived wire field on the listing, the detail, and every mutation response alike. `lines` itself
+  stays unhydrated on the listing by design; `DraftOrderProjection::FIELDS` is unchanged (it is the
+  `commerce_orders` column whitelist, and `line_count` is not a column).
+- **`OrderNotFoundException`** — `OrderRepository::transition()` reported a vanished (unknown or
+  cross-tenant) order as a bare `\RuntimeException` separable only by its message, so every caller
+  logged an ordinary "no such uuid" as a 500. It is now typed (still a `\RuntimeException`, still
+  the same generic `Order not found.` message, so nothing that caught one or read one breaks).
+- **`ConcurrentOrderTransitionException`** — the LOSER of `transition()`'s compare-and-set is now
+  separable from an outright illegal transition. Still a `\DomainException` carrying the identical
+  message, so every `catch (\DomainException) -> 409` caller is unaffected; it additionally carries
+  `from`/`to` and the `observed` status read back immediately after the failed CAS.
+
+### Changed
+- **`OrderPaymentService::markPaid()` answers a lost paid race idempotently** and now returns
+  `bool` (`true` iff THIS call performed the `pending_payment -> paid` transition). When two
+  settlement paths race — materially more likely since the webhook lane — the loser used to
+  surface as a bare 500 even though the exact end state it asked for had just been reached. It now
+  concedes: its own transaction has rolled back, so a fresh tenant-scoped re-read showing `paid`
+  proves somebody else got there, and the call writes nothing, posts nothing and dispatches
+  nothing. Any other observed status still rethrows unchanged. Proven under genuine two-connection
+  PostgreSQL contention.
+- **`OrderPaymentConfirmationHandler` routes a conceded settlement to `rejectLatePayment()`** —
+  byte-identical to what it would have done had its status read landed a moment later, so one
+  real-world situation has one outcome whatever the timing, and a late provider payment stays as
+  discoverable as before.
+- **`AdminOrderController::markPaid()` runs the draft-blind `order()` precheck** every sibling
+  order endpoint already ran: a draft (or unknown, or cross-tenant) uuid is now the same
+  non-revealing 404 instead of the 409 the transition CAS used to return. A conceded settlement is
+  answered 200 with the paid order, never 409.
+
 ## [1.11.0] - 2026-08-12 — Payment Links & Session-Exposure Guarded Cancellation
 
 **Theme: a payment link is a bearer credential, and once it has shown a provider a live

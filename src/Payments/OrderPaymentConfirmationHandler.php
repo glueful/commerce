@@ -59,9 +59,24 @@ final class OrderPaymentConfirmationHandler implements PaymentConfirmationHandle
             return;
         }
 
+        // The status read above and the settlement below are two observations of
+        // a moving world: a second settlement path (the admin mark-paid endpoint,
+        // a retried or duplicate webhook delivery) can win the
+        // `pending_payment -> paid` compare-and-set in between. That loser used
+        // to escape as a bare 500 -- the provider then retried, read `paid`, and
+        // took the late-payment branch below anyway.
+        //
+        // `markPaid()` now answers that race idempotently and REPORTS it, so
+        // this handler reaches the identical destination directly: a conceded
+        // settlement falls through to `rejectLatePayment()`, which is precisely
+        // what this method would have done had its status read landed a moment
+        // later. One real-world situation, one outcome, whatever the timing --
+        // and a late provider payment that may need refunding stays as
+        // discoverable as it has always been.
         if (($order['status'] ?? '') === 'pending_payment') {
-            $this->payments->markPaid($context, $tenant, (string) $order['uuid']);
-            return;
+            if ($this->payments->markPaid($context, $tenant, (string) $order['uuid'])) {
+                return;
+            }
         }
 
         $this->payments->rejectLatePayment($context, $tenant, (string) $order['uuid'], [
