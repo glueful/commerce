@@ -26,11 +26,11 @@ final class WishlistItemData implements RequestData, ValidatesSelf
     ) {
     }
 
-    /** @return array<string,string> */
+    /** @return array<string, list<string>> */
     public function validate(): array
     {
         return preg_match(UuidBatch::UUID_PATTERN, $this->product_uuid) === 1
             ? []
-            : ['product_uuid' => 'Must be a 12-character product identifier.'];
+            : ['product_uuid' => ['Must be a 12-character product identifier.']];
     }
 }

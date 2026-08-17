@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+- Declares the Glueful schema manifest (migration descriptors, requires.extensions, structural
+  verifier); requires framework >=1.79.0 for schema-on-enable participation. Migrations are now
+  registered by the manifest, not by provider boot.
+
+
 ## [1.12.0] - 2026-08-14 — Draft Artifact Lifecycle & Settlement Idempotency
 
 **Theme: an order artifact that never touched money can finally be deleted, and a paid-order

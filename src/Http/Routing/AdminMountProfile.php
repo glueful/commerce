@@ -44,7 +44,7 @@ final class AdminMountProfile
      *
      * @param list<string> $middleware
      * @param array{view: string, manage: string} $modeMiddleware
-     * @param non-empty-list<string> $allowlist
+     * @param list<string> $allowlist runtime-guarded non-empty below
      */
     public static function restricted(
         string $prefix,
