@@ -6,7 +6,6 @@ namespace Glueful\Extensions\Commerce;
 
 use Glueful\Auth\Contracts\UserProviderInterface;
 use Glueful\Bootstrap\ApplicationContext;
-use Glueful\Database\Migrations\MigrationPriority;
 use Glueful\Encryption\EncryptionService;
 use Glueful\Events\EventService;
 use Glueful\Extensions\Commerce\Catalog\AddonRepository;
@@ -2341,14 +2340,8 @@ final class CommerceServiceProvider extends ServiceProvider
             }
         }
 
-        try {
-            $this->loadMigrationsFrom(__DIR__ . '/../migrations', MigrationPriority::DEPENDENT, 'glueful/commerce');
-        } catch (\Throwable $e) {
-            error_log('[Commerce] Failed to register migrations: ' . $e->getMessage());
-            if ($this->bootEnv() !== 'production') {
-                throw $e;
-            }
-        }
+        // Migrations are declared by the composer manifest (extra.glueful.migrations):
+        // dependent priority, source glueful/commerce; the container factory registers.
 
         try {
             $container = container($context);

@@ -20,7 +20,7 @@ final class WishlistImportData implements RequestData, ValidatesSelf
     ) {
     }
 
-    /** @return array<string,string> */
+    /** @return array<string, list<string>> */
     public function validate(): array
     {
         // Over-limit lists are REFUSED, not truncated. `UuidBatch::normalize()` keeps the first
@@ -28,12 +28,12 @@ final class WishlistImportData implements RequestData, ValidatesSelf
         // dropped uuid would be reported as neither imported nor overflow, so the caller would
         // clear it locally believing it had landed.
         if (count($this->product_uuids) > UuidBatch::LIMIT) {
-            return ['product_uuids' => sprintf('Send at most %d products per import.', UuidBatch::LIMIT)];
+            return ['product_uuids' => [sprintf('Send at most %d products per import.', UuidBatch::LIMIT)]];
         }
 
         foreach ($this->product_uuids as $index => $uuid) {
             if (!is_string($uuid) || preg_match(UuidBatch::UUID_PATTERN, $uuid) !== 1) {
-                return ['product_uuids.' . $index => 'Must be a 12-character product identifier.'];
+                return ['product_uuids.' . $index => ['Must be a 12-character product identifier.']];
             }
         }
 

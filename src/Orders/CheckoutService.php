@@ -958,7 +958,7 @@ final class CheckoutService
         }
 
         foreach (['return', 'cancel'] as $key) {
-            $url = $urls[$key] ?? '';
+            $url = $urls[$key];
             // The SHARED definition (review round 1, minor 6): this check and the
             // payment-link return-URL check must not drift apart.
             if (!is_string($url) || !HttpsUrl::isAbsoluteHttps($url)) {
