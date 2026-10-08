@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Changed
+- **`ResolvedProductFilters` takes lists** (breaking): `categoryUuids` and `tagUuids` are any-of
+  lists, ANDed with each other; the single `categoryUuid` / `tagUuid` arguments are gone. The
+  storefront product list passes one-item lists; its API is unchanged.
+
+### Added
+- **On sale and in stock filters**: `ResolvedProductFilters(onSale: true)` keeps products with an
+  active variant priced below its compare-at price; `inStock: true` keeps products with an active
+  variant that is untracked, has no stock row, or is tracked above zero.
+
 ## [1.13.0] - 2026-08-17
 
 ### Added

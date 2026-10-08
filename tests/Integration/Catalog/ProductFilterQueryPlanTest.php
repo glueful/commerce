@@ -23,14 +23,14 @@ final class ProductFilterQueryPlanTest extends CommerceTestCase
 {
     public function testCategoryFilterSemijoinUsesAnIndexSeekNotATableScan(): void
     {
-        $plan = $this->explainFor(new ResolvedProductFilters(categoryUuid: 'cat0000001'));
+        $plan = $this->explainFor(new ResolvedProductFilters(categoryUuids: ['cat0000001']));
 
         $this->assertTableUsesIndexNotScan($plan, 'commerce_product_categories');
     }
 
     public function testTagFilterSemijoinUsesAnIndexSeekNotATableScan(): void
     {
-        $plan = $this->explainFor(new ResolvedProductFilters(tagUuid: 'tag0000001'));
+        $plan = $this->explainFor(new ResolvedProductFilters(tagUuids: ['tag0000001']));
 
         $this->assertTableUsesIndexNotScan($plan, 'commerce_product_tags');
     }
@@ -47,8 +47,8 @@ final class ProductFilterQueryPlanTest extends CommerceTestCase
     public function testCombinedFiltersEachUseAnIndexSeekNotATableScan(): void
     {
         $plan = $this->explainFor(new ResolvedProductFilters(
-            categoryUuid: 'cat0000001',
-            tagUuid: 'tag0000001',
+            categoryUuids: ['cat0000001'],
+            tagUuids: ['tag0000001'],
             attributePairs: [['attribute_uuid' => 'attr0000001', 'value_slug' => 'red']]
         ));
 

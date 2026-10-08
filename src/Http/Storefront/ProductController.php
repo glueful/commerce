@@ -199,7 +199,11 @@ final class ProductController
             }
         }
 
-        return new ResolvedProductFilters($categoryUuid, $tagUuid, $attributePairs);
+        return new ResolvedProductFilters(
+            $categoryUuid !== null ? [$categoryUuid] : [],
+            $tagUuid !== null ? [$tagUuid] : [],
+            $attributePairs,
+        );
     }
 
     #[ApiOperation(summary: 'Get an active product by slug', tags: ['Commerce Storefront'])]

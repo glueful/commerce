@@ -293,7 +293,8 @@ SQL,
      * (and therefore without ever silently drifting from what `listActive()`
      * actually runs).
      *
-     * Category/tag filters are correlated `EXISTS` subqueries against the
+     * Category/tag filters (lists, any-of within each since 1.14.0) are correlated `EXISTS`
+     * subqueries against the
      * `commerce_product_categories`/`commerce_product_tags` join tables (never a
      * `JOIN` on the main query) -- a product attached to several categories/tags
      * still contributes AT MOST ONE row, never one per matching join row.
@@ -328,29 +329,64 @@ SQL,
             return $query;
         }
 
-        if ($filters->categoryUuid !== null) {
+        if ($filters->categoryUuids !== []) {
+            $placeholders = implode(', ', array_fill(0, count($filters->categoryUuids), '?'));
             $query->whereRaw(
-                <<<'SQL'
+                <<<SQL
 EXISTS (
     SELECT 1 FROM commerce_product_categories
     WHERE commerce_product_categories.product_uuid = commerce_products.uuid
-    AND commerce_product_categories.category_uuid = ?
+    AND commerce_product_categories.category_uuid IN ({$placeholders})
 )
 SQL,
-                [$filters->categoryUuid]
+                array_values($filters->categoryUuids)
             );
         }
 
-        if ($filters->tagUuid !== null) {
+        if ($filters->tagUuids !== []) {
+            $placeholders = implode(', ', array_fill(0, count($filters->tagUuids), '?'));
             $query->whereRaw(
-                <<<'SQL'
+                <<<SQL
 EXISTS (
     SELECT 1 FROM commerce_product_tags
     WHERE commerce_product_tags.product_uuid = commerce_products.uuid
-    AND commerce_product_tags.tag_uuid = ?
+    AND commerce_product_tags.tag_uuid IN ({$placeholders})
 )
 SQL,
-                [$filters->tagUuid]
+                array_values($filters->tagUuids)
+            );
+        }
+
+        if ($filters->onSale) {
+            $query->whereRaw(
+                <<<'SQL'
+EXISTS (
+    SELECT 1 FROM commerce_variants
+    WHERE commerce_variants.product_uuid = commerce_products.uuid
+    AND commerce_variants.status = 'active'
+    AND commerce_variants.compare_at_price IS NOT NULL
+    AND commerce_variants.compare_at_price > commerce_variants.price
+)
+SQL
+            );
+        }
+
+        if ($filters->inStock) {
+            // A variant with no stock row is sellable (StockRepository::decrement() gates tracked
+            // rows only), so it counts as in stock, as an untracked one does.
+            $query->whereRaw(
+                <<<'SQL'
+EXISTS (
+    SELECT 1 FROM commerce_variants
+    LEFT JOIN commerce_stock
+        ON commerce_stock.variant_uuid = commerce_variants.uuid
+        AND commerce_stock.tenant_uuid = commerce_variants.tenant_uuid
+    WHERE commerce_variants.product_uuid = commerce_products.uuid
+    AND commerce_variants.status = 'active'
+    AND (commerce_stock.uuid IS NULL OR commerce_stock.tracked = ? OR commerce_stock.quantity > 0)
+)
+SQL,
+                [false]
             );
         }
 
