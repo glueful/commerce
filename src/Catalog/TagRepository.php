@@ -6,6 +6,7 @@ namespace Glueful\Extensions\Commerce\Catalog;
 
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Extensions\Commerce\Support\LiteralLike;
+use Glueful\Extensions\Commerce\Support\UuidBatch;
 
 final class TagRepository
 {
@@ -179,6 +180,41 @@ SQL,
             ->orderBy('commerce_tags.name', 'ASC')
             ->orderBy('commerce_tags.uuid', 'ASC')
             ->get();
+    }
+
+    /**
+     * Every tag of each product (1.14.0, the Product grid's card): ONE query for the whole list,
+     * name order (case-insensitive), then uuid. Empty input issues NO query.
+     *
+     * @param array<mixed> $productUuids
+     * @return array<string, list<array{name: string, slug: string}>> keyed by product_uuid
+     */
+    public function tagProjectionsForProducts(
+        ApplicationContext $context,
+        string $tenant,
+        array $productUuids
+    ): array {
+        $productUuids = UuidBatch::normalize($productUuids);
+        if ($productUuids === []) {
+            return [];
+        }
+        $rows = db($context)->table('commerce_product_tags')
+            ->join('commerce_tags', 'commerce_product_tags.tag_uuid', '=', 'commerce_tags.uuid')
+            ->select(['commerce_product_tags.product_uuid', 'commerce_tags.name', 'commerce_tags.slug'])
+            ->where('commerce_tags.tenant_uuid', '=', $tenant)
+            ->whereIn('commerce_product_tags.product_uuid', $productUuids)
+            ->orderBy('commerce_product_tags.product_uuid', 'ASC')
+            ->orderByRaw('LOWER(commerce_tags.name) ASC')
+            ->orderBy('commerce_tags.uuid', 'ASC')
+            ->get();
+        $result = [];
+        foreach ($rows as $row) {
+            $result[(string) $row['product_uuid']][] = [
+                'name' => (string) $row['name'],
+                'slug' => (string) $row['slug'],
+            ];
+        }
+        return $result;
     }
 
     public function attachProduct(ApplicationContext $context, string $productUuid, string $tagUuid): void

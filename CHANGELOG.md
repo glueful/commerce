@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+## [1.14.0] - 2026-10-08 — Product list queries
+
+**Theme: a product list can be narrowed, ordered and decorated the way a storefront grid needs.**
+Category and tag filters take lists (any of them, both groups ANDed); on-sale and in-stock
+filters join them; `listActive()` takes an order; and every category and tag of a page of products
+loads in one query each. Breaking for direct callers of `ResolvedProductFilters`: the single
+`categoryUuid` / `tagUuid` arguments are now `categoryUuids` / `tagUuids` lists.
+
+### Changed
+- **`ResolvedProductFilters` takes lists** (breaking): `categoryUuids` and `tagUuids` are any-of
+  lists, ANDed with each other; the single `categoryUuid` / `tagUuid` arguments are gone. The
+  storefront product list passes one-item lists; its API is unchanged.
+
+### Added
+- **On sale and in stock filters**: `ResolvedProductFilters(onSale: true)` keeps products with an
+  active variant priced below its compare-at price; `inStock: true` keeps products with an active
+  variant that is untracked, has no stock row, or is tracked above zero.
+- **Product list order**: `listActive()` takes a `ProductSort` — `newest` (default), `price_asc`,
+  `price_desc` (by the lowest active variant price; unpriced products last) and `name`.
+- **Batch taxonomy projections**: `CategoryRepository::categoryProjectionsForProducts()` and
+  `TagRepository::tagProjectionsForProducts()` — every category or tag of a list of products in
+  one query.
+
 ## [1.13.0] - 2026-08-17
 
 ### Added
