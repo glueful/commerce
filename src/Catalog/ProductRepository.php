@@ -257,8 +257,9 @@ SQL,
      * `Http\Storefront\ProductController::index()`. Count and row queries are
      * built by the SAME {@see self::activeFilteredQuery()} call (two fresh
      * builder instances, identical predicates) so a filter can never drift
-     * between the two. Ordered `created_at DESC, uuid ASC` -- the uuid
-     * tie-break keeps pages stable when several products share a `created_at`.
+     * between the two. Ordered by `$sort` ({@see ProductSort}); `newest` (the default) is
+     * `created_at DESC, uuid ASC` -- the uuid tie-break keeps pages stable when several products
+     * share a `created_at`.
      *
      * @return array{items: list<array<string,mixed>>, total: int}
      */
@@ -267,12 +268,11 @@ SQL,
         string $tenant,
         int $page,
         int $perPage,
-        ?ResolvedProductFilters $filters = null
+        ?ResolvedProductFilters $filters = null,
+        string $sort = ProductSort::NEWEST,
     ): array {
         $total = $this->activeFilteredQuery($context, $tenant, $filters)->count();
-        $rows = $this->activeFilteredQuery($context, $tenant, $filters)
-            ->orderBy('created_at', 'DESC')
-            ->orderBy('uuid', 'ASC')
+        $rows = ProductSort::apply($this->activeFilteredQuery($context, $tenant, $filters), $sort)
             ->limit($perPage)
             ->offset(max(0, $page - 1) * $perPage)
             ->get();

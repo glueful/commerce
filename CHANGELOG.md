@@ -11,6 +11,8 @@
 - **On sale and in stock filters**: `ResolvedProductFilters(onSale: true)` keeps products with an
   active variant priced below its compare-at price; `inStock: true` keeps products with an active
   variant that is untracked, has no stock row, or is tracked above zero.
+- **Product list order**: `listActive()` takes a `ProductSort` — `newest` (default), `price_asc`,
+  `price_desc` (by the lowest active variant price; unpriced products last) and `name`.
 
 ## [1.13.0] - 2026-08-17
 
