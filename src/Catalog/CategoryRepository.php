@@ -241,6 +241,52 @@ SQL,
         return $result;
     }
 
+    /**
+     * Every category of each product (1.14.0, the Product grid's card): ONE query for the whole
+     * list, in the same `position, name, uuid` order as {@see self::firstCategoryProjectionsForProducts()}.
+     * Input through {@see UuidBatch::normalize()}; an empty set issues NO query.
+     *
+     * @param array<mixed> $productUuids
+     * @return array<string, list<array{name: string, slug: string}>> keyed by product_uuid
+     */
+    public function categoryProjectionsForProducts(
+        ApplicationContext $context,
+        string $tenant,
+        array $productUuids
+    ): array {
+        $productUuids = UuidBatch::normalize($productUuids);
+        if ($productUuids === []) {
+            return [];
+        }
+        $rows = db($context)->table('commerce_product_categories')
+            ->join(
+                'commerce_categories',
+                'commerce_product_categories.category_uuid',
+                '=',
+                'commerce_categories.uuid'
+            )
+            ->select([
+                'commerce_product_categories.product_uuid',
+                'commerce_categories.name',
+                'commerce_categories.slug',
+            ])
+            ->where('commerce_categories.tenant_uuid', '=', $tenant)
+            ->whereIn('commerce_product_categories.product_uuid', $productUuids)
+            ->orderBy('commerce_product_categories.product_uuid', 'ASC')
+            ->orderBy('commerce_categories.position', 'ASC')
+            ->orderBy('commerce_categories.name', 'ASC')
+            ->orderBy('commerce_categories.uuid', 'ASC')
+            ->get();
+        $result = [];
+        foreach ($rows as $row) {
+            $result[(string) $row['product_uuid']][] = [
+                'name' => (string) $row['name'],
+                'slug' => (string) $row['slug'],
+            ];
+        }
+        return $result;
+    }
+
     public function attachProduct(ApplicationContext $context, string $productUuid, string $categoryUuid): void
     {
         db($context)->table('commerce_product_categories')->insert([

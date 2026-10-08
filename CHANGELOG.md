@@ -13,6 +13,9 @@
   variant that is untracked, has no stock row, or is tracked above zero.
 - **Product list order**: `listActive()` takes a `ProductSort` — `newest` (default), `price_asc`,
   `price_desc` (by the lowest active variant price; unpriced products last) and `name`.
+- **Batch taxonomy projections**: `CategoryRepository::categoryProjectionsForProducts()` and
+  `TagRepository::tagProjectionsForProducts()` — every category or tag of a list of products in
+  one query.
 
 ## [1.13.0] - 2026-08-17
 
